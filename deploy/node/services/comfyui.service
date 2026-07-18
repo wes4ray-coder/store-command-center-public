@@ -1,0 +1,13 @@
+[Unit]
+Description=ComfyUI Image Generation Server
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=__HOME__/ComfyUI
+ExecStart=__HOME__/comfyui-start.sh
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target

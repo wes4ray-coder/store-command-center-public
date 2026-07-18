@@ -1,0 +1,231 @@
+"""
+The Company — unified automation control plane.
+
+One place the Company owns ALL automation. Two kinds of thing:
+
+  • Autonomy systems — background loops that run on their own (creation, the
+    Republic's self-governance, the crew thinking, town meetings, dev-swarm cron,
+    security scans). Each has a toggle; a single MASTER switch gates them all.
+
+  • Capabilities ("mini-MCP") — discrete actions the Company can TRIGGER on
+    demand and receive a product back (make art/music/video/3D, convene the
+    assembly, commission research, scan trends). No autonomy to manage — just
+    fire and receive.
+
+Design is deliberately NON-INVASIVE: every autonomy system already reads its own
+native setting each tick. We don't rewrite those loops — the master + per-system
+toggles simply CASCADE into the native settings (effective = master AND desired).
+So flipping the master off writes every native switch off, and each existing
+loop stops on its next tick. One tiny exception (dev-swarm cron) gets a global
+gate added in scheduler.py.
+"""
+import json, logging, threading
+import httpx
+from deps import get_conn, get_setting
+
+logger = logging.getLogger("store")
+_LOCAL = "http://127.0.0.1:8787"
+
+
+# ── settings io ──────────────────────────────────────────────────────────────
+def _get(k, d=None):
+    return get_setting(k, d)
+
+
+def _set(k, v):
+    c = get_conn()
+    try:
+        c.execute("INSERT OR REPLACE INTO settings (key,value) VALUES (?,?)", (k, str(v)))
+        c.commit()
+    finally:
+        c.close()
+
+
+def _truthy(v):
+    return str(v).lower() in ("1", "true", "yes", "on")
+
+
+# ── autonomy systems: id → native setting it cascades into ───────────────────
+SYSTEMS = [
+    {"id": "create",      "label": "Autonomous creation",   "group": "Company", "key": "world_auto_enabled",         "on": "1",   "off": "0", "desc": "The studio makes art/music/video/3D on a cadence."},
+    {"id": "govern",      "label": "Republic self-governs",  "group": "Company", "key": "world_auto_govern_min",      "on": "360", "off": "0", "numeric": True, "desc": "The assembly convenes itself to strategize + act."},
+    {"id": "cognition",   "label": "Crew thinking (LLM)",    "group": "World",   "key": "world_llm_enabled",          "on": "1",   "off": "0", "desc": "Agents form thoughts, opinions, ideas."},
+    {"id": "meetings",    "label": "Town meetings",          "group": "World",   "key": "world_meetings_enabled",     "on": "1",   "off": "0", "desc": "Periodic votes on company direction."},
+    {"id": "incidents",   "label": "Incidents & events",     "group": "World",   "key": "world_incidents_enabled",    "on": "1",   "off": "0", "desc": "Random world events keep it lively."},
+    {"id": "auto_publish", "label": "Auto-publish (free only)", "group": "Company", "key": "world_ops_automation_mode", "on": "budget", "off": "review", "literal": True, "desc": "Free publishes (WordPress, Cults3D) run on their own. Paid listings, payouts and code ALWAYS wait for your blessing."},
+    {"id": "sell",        "label": "Autonomous listing",     "group": "Company", "key": "world_sell_auto",            "on": "1",   "off": "0", "desc": "Queue paid Etsy/Printify listings for your review (costs $0.20/ea)."},
+    {"id": "swarm_cron",  "label": "Dev-swarm cron",         "group": "Dev",     "key": "swarm_cron_enabled",         "on": "1",   "off": "0", "desc": "Advance cron-enabled coding jobs on schedule."},
+    {"id": "sec_monitor", "label": "Security monitor",       "group": "Infra",   "key": "security_monitor_enabled",   "on": "1",   "off": "0", "desc": "Watch the network for device changes."},
+    {"id": "sec_scan",    "label": "Security auto-scan",     "group": "Infra",   "key": "security_autoscan_enabled",  "on": "1",   "off": "0", "desc": "Periodic Pi-hole / config scans."},
+    {"id": "sec_analyze", "label": "AI threat-hunt",         "group": "Infra",   "key": "security_autoanalyze_enabled", "on": "1", "off": "0", "desc": "LLM threat analysis (uses the GPU)."},
+    {"id": "sec_audit",   "label": "Nightly security audit", "group": "Infra",   "key": "security_audit_enabled",     "on": "1",   "off": "0", "desc": "Hardening snapshot + regression alerts to the God Console."},
+    {"id": "guardian",    "label": "Network Guardian (auto-block)", "group": "Infra", "key": "netguard_auto_enabled",  "on": "1",   "off": "0", "desc": "Auto-block ad/tracker/ACR domains network-wide — never functional/local. Reversible."},
+    {"id": "ai_watch",    "label": "AI Shield (agent watch)",   "group": "Infra",   "key": "ai_watch_enabled",           "on": "1",   "off": "0", "desc": "Watch AI agents for rogue behaviour (payout/code bursts, unknown actors) → God Console."},
+]
+_SYS = {s["id"]: s for s in SYSTEMS}
+
+
+def _native_on(s):
+    raw = _get(s["key"], s["off"])
+    if s.get("literal"):                 # non-boolean setting: on means raw == the "on" value
+        return raw == s["on"]
+    if s.get("numeric"):
+        try:
+            return int(raw) > 0
+        except Exception:
+            return False
+    return _truthy(raw)
+
+
+def master_on():
+    return _truthy(_get("company_master_on", "1"))
+
+
+def desired(sid):
+    raw = _get(f"company_desired_{sid}", None)
+    if raw is None:
+        return _native_on(_SYS[sid])
+    return _truthy(raw)
+
+
+def _apply():
+    """Cascade: each native switch = master AND that system's desired state."""
+    m = master_on()
+    for s in SYSTEMS:
+        want = m and desired(s["id"])
+        _set(s["key"], s["on"] if want else s["off"])
+
+
+def set_master(on):
+    _set("company_master_on", "1" if on else "0")
+    _apply()
+    try:
+        import world_ops as wo
+        wo.note("🟢 The Company is awake — automation resumed." if on
+                else "⏸️ The Company is dormant — all automation paused.",
+                kind="info", from_agent="Mission Control")
+    except Exception:
+        pass
+    return panel()
+
+
+def set_system(sid, on):
+    if sid not in _SYS:
+        return None
+    _set(f"company_desired_{sid}", "1" if on else "0")
+    _apply()
+    return panel()
+
+
+def init():
+    """One-time setup: capture current native states as the desired baseline and
+    switch the Company on. First run goes full-auto for the Company + World (the
+    creative/strategic loops); infra/security stay as they were."""
+    first = _get("company_control_init") != "1"
+    if first:
+        full_auto = {"create", "govern", "cognition", "meetings", "incidents"}
+        for s in SYSTEMS:
+            on = (s["id"] in full_auto) or _native_on(s)
+            _set(f"company_desired_{s['id']}", "1" if on else "0")
+        _set("company_master_on", "1")
+        _set("company_control_init", "1")
+        logger.info("world_control: first-run full-auto baseline set")
+    _apply()
+
+
+# ── capabilities ("mini-MCP"): trigger an action, receive a product ──────────
+def _cap_create(kind):
+    import world_auto
+    if world_auto._state["running"]:
+        return "a creation is already in progress"
+    threading.Thread(target=world_auto.run_cycle, args=(kind, True), daemon=True).start()
+    return f"creating {kind}"
+
+
+def _cap_convene():
+    import world_strategy
+    threading.Thread(target=world_strategy.run_cycle, daemon=True).start()
+    return "the assembly is convening"
+
+
+def _cap_research(args):
+    import world_ops as wo
+    topic = (args or {}).get("topic") or "Scout a survival edge on the web"
+    wo.pray("library_research", f"Research: {topic}", detail="Commissioned from Mission Control.",
+            cost_cents=0, agent_name="Mission Control")
+    return f"research commissioned: {topic}"
+
+
+def _cap_sell(channel):
+    import world_sell
+    threading.Thread(target=world_sell.list_design, args=(channel,), daemon=True).start()
+    return f"drafting a {channel} listing — it'll appear as a prayer to review"
+
+
+def _cap_http(method, path):
+    def go():
+        try:
+            httpx.request(method, f"{_LOCAL}{path}", timeout=20)
+        except Exception:
+            logger.exception("capability http %s %s", method, path)
+    threading.Thread(target=go, daemon=True).start()
+    return "triggered"
+
+
+CAPABILITIES = [
+    {"id": "make_art",    "label": "🖼️ Create art",           "group": "Create", "fn": lambda a: _cap_create("image")},
+    {"id": "make_music",  "label": "🎵 Create music",          "group": "Create", "fn": lambda a: _cap_create("music")},
+    {"id": "make_video",  "label": "🎬 Create video",          "group": "Create", "fn": lambda a: _cap_create("video")},
+    {"id": "make_3d",     "label": "🧊 Sculpt a 3D model",     "group": "Create", "fn": lambda a: _cap_create("3d")},
+    {"id": "sell_etsy",   "label": "🛍️ List a design on Etsy", "group": "Sell",   "fn": lambda a: _cap_sell("etsy")},
+    {"id": "sell_printify", "label": "👕 List on Printify",     "group": "Sell",   "fn": lambda a: _cap_sell("printify")},
+    {"id": "convene",     "label": "🏛️ Convene the assembly",  "group": "Govern", "fn": lambda a: _cap_convene()},
+    {"id": "research",    "label": "📖 Commission research",   "group": "Learn",  "fn": lambda a: _cap_research(a)},
+    {"id": "scan_trends", "label": "📈 Scan market trends",    "group": "Research", "fn": lambda a: _cap_http("POST", "/api/trends/scan")},
+    {"id": "sec_scan_now", "label": "🛡️ Run a security scan",  "group": "Infra",  "fn": lambda a: _cap_http("POST", "/api/security/scan")},
+]
+_CAP = {c["id"]: c for c in CAPABILITIES}
+
+
+def invoke(cap_id, args=None):
+    c = _CAP.get(cap_id)
+    if not c:
+        return {"ok": False, "error": f"unknown capability '{cap_id}'"}
+    try:
+        return {"ok": True, "result": c["fn"](args or {})}
+    except Exception as e:
+        logger.exception("capability %s failed", cap_id)
+        return {"ok": False, "error": str(e)}
+
+
+def set_sell_config(price_cents=None, product_type=None):
+    if price_cents is not None:
+        _set("world_sell_price_cents", max(100, int(price_cents)))
+    if product_type:
+        _set("world_sell_product_type", str(product_type)[:40])
+    return panel()
+
+
+def panel():
+    m = master_on()
+    try:
+        price = int(_get("world_sell_price_cents", "2499"))
+    except Exception:
+        price = 2499
+    return {
+        "master": m,
+        "systems": [{
+            "id": s["id"], "label": s["label"], "group": s["group"], "desc": s.get("desc", ""),
+            "desired": desired(s["id"]), "effective": (m and desired(s["id"])),
+        } for s in SYSTEMS],
+        "capabilities": [{"id": c["id"], "label": c["label"], "group": c["group"]} for c in CAPABILITIES],
+        "sell": {
+            "price_cents": price,
+            "product_type": _get("world_sell_product_type", "Poster"),
+            "etsy_ready": bool(_get("etsy_access_token") and _get("etsy_shop_id")),
+            "printify_ready": bool(_get("printify_key") and _get("printify_shop_id")),
+        },
+    }
+
+
+init()

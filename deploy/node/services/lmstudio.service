@@ -1,0 +1,29 @@
+# LM Studio headless LLM server — autostarts after the graphical session so the
+# Electron backend has a display (starting at boot races ahead of X and times out).
+# Installed/placeholders substituted by node-setup.sh.
+[Unit]
+Description=LM Studio Headless Server
+After=graphical-session.target
+PartOf=graphical-session.target
+Wants=graphical-session.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+Environment="HOME=__HOME__"
+Environment="PATH=__HOME__/.lmstudio/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+Environment="DISPLAY=:0"
+Environment="XDG_RUNTIME_DIR=/run/user/__UID__"
+Environment="DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/__UID__/bus"
+# Serve on the LAN (default is 127.0.0.1, which the store host can't reach).
+Environment="LMS_SERVER_HOST=0.0.0.0"
+ExecStartPre=/bin/sleep 4
+ExecStartPre=__HOME__/.lmstudio/bin/lms daemon up
+ExecStart=__HOME__/.lmstudio/bin/lms server start --port 1234 --bind 0.0.0.0 --cors
+ExecStop=__HOME__/.lmstudio/bin/lms server stop
+ExecStopPost=__HOME__/.lmstudio/bin/lms daemon down
+TimeoutStartSec=300
+TimeoutStopSec=30
+
+[Install]
+WantedBy=graphical-session.target

@@ -1,0 +1,11 @@
+# Store Command Center — Python dependencies
+# Install into a venv:  python3 -m venv venv && ./venv/bin/pip install -r requirements.txt
+fastapi==0.139.0
+uvicorn==0.51.0
+starlette==1.3.1
+pydantic==2.13.4
+httpx==0.28.1
+python-multipart==0.0.32
+itsdangerous==2.2.0
+feedparser==6.0.12
+websocket-client==1.9.0

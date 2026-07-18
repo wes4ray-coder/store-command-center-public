@@ -1,0 +1,401 @@
+/* ══ ORACLE TAB ══
+   A forecasting TOURNAMENT: multiple LLM "analysts" compete to predict crypto/stock
+   prices. Each call is scored on getting the direction right, how close the target
+   was, and how far out it was called (longer correct calls score much higher). They
+   keep a memory of past lessons and climb a leaderboard.
+
+   Sub-tabs (same pane-toggle mechanism as Crypto/Settings — everything stays in the
+   DOM, we only switch which pane is visible, and each pane lazy-loads once):
+     🏆 Leaderboard — ranked analysts + run-a-round controls + live progress
+     🔮 Open calls  — predictions still awaiting their horizon
+     📊 Results     — resolved predictions, scored ✓/✗ */
+
+const _ORACLE_PANES = ['leaderboard', 'open', 'results'];
+let _oracleLoaded = {};        // pane -> true once its data has been fetched
+let _oracleRoundPoll = null;   // setTimeout handle for the live round view
+let _oracleHistoryFilter = ''; // agent_id filter carried into the Open/Results panes
+
+async function renderOracle() {
+  _oracleLoaded = {};
+  document.getElementById('main-content').innerHTML = `
+    <div class="view-header">
+      <div class="view-title">&#128302; Oracle</div>
+      <div class="view-sub">A forecasting tournament &mdash; LLM analysts compete to predict crypto &amp;
+        stock prices, get scored on accuracy and how far out they called it, remember their lessons,
+        and climb a leaderboard. Nothing here trades real money.</div>
+    </div>
+    <div class="subtab-bar" id="oracle-subtabs">
+      <div class="subtab active" onclick="oracleSub('leaderboard')">&#127942; Leaderboard</div>
+      <div class="subtab" onclick="oracleSub('open')">&#128302; Open calls</div>
+      <div class="subtab" onclick="oracleSub('results')">&#128202; Results</div>
+    </div>
+    ${_ORACLE_PANES.map(k => `<div class="settings-tabpane" id="pane-oracle-${k}"${k === 'leaderboard' ? '' : ' style="display:none;"'}>
+      <div class="empty"><div class="empty-icon">&#9203;</div>Loading&#8230;</div>
+    </div>`).join('')}`;
+  oracleSub('leaderboard');
+}
+window.renderOracle = renderOracle;
+
+function oracleSub(k) {
+  _ORACLE_PANES.forEach(name => {
+    const pane = document.getElementById('pane-oracle-' + name);
+    if (pane) pane.style.display = (name === k) ? '' : 'none';
+  });
+  document.querySelectorAll('#oracle-subtabs .subtab').forEach((el, i) => {
+    el.classList.toggle('active', _ORACLE_PANES[i] === k);
+  });
+  if (!_oracleLoaded[k]) {
+    _oracleLoaded[k] = true;
+    ({ leaderboard: oracleLoadLeaderboard, open: oracleLoadOpen, results: oracleLoadResults }[k])();
+  }
+}
+window.oracleSub = oracleSub;
+
+/* ── formatting helpers ───────────────────────────────────────────────────── */
+// Crypto can be sub-cent (DOGE/XRP) — don't force 2 decimals that hide the value.
+// Use up to ~5 significant figures, more decimals for small numbers.
+function _orUsd(v) {
+  if (v == null || isNaN(v)) return '—';
+  v = Number(v);
+  const a = Math.abs(v);
+  let dec;
+  if (a === 0)      dec = 2;
+  else if (a < 1)   dec = 6;
+  else if (a < 100) dec = 4;
+  else              dec = 2;
+  return '$' + v.toLocaleString(undefined, { maximumFractionDigits: dec });
+}
+function _orPct(v, dp) {
+  if (v == null || isNaN(v)) return '—';
+  return Number(v).toFixed(dp != null ? dp : 1) + '%';
+}
+function _orDate(s) {
+  if (!s) return '—';
+  return esc(String(s).slice(0, 10));
+}
+function _orAssetBadge(asset, market) {
+  const isStock = market === 'stock';
+  const col = isStock ? 'var(--accent2)' : 'var(--warn)';
+  return `<span style="font-size:.62rem;font-weight:700;color:${col};border:1px solid ${col};
+    border-radius:10px;padding:2px 8px;text-transform:uppercase;letter-spacing:.03em;">${esc(asset || '?')}</span>`;
+}
+function _orDir(dir) {
+  const up = dir === 'up';
+  const col = up ? 'var(--green)' : 'var(--red)';
+  return `<span style="color:${col};font-weight:700;">${up ? '&#9650;' : '&#9660;'} ${up ? 'up' : 'down'}</span>`;
+}
+function _orConfBar(c) {
+  const pct = Math.round((Number(c) || 0) * 100);
+  return `<div title="confidence ${pct}%" style="display:flex;align-items:center;gap:6px;">
+    <div style="flex:1;min-width:44px;height:6px;background:var(--surface);border-radius:4px;overflow:hidden;">
+      <div style="height:100%;width:${pct}%;background:linear-gradient(90deg,var(--accent),var(--accent2));"></div></div>
+    <span style="font-size:.7rem;color:var(--muted);">${pct}%</span></div>`;
+}
+
+/* ── 🏆 LEADERBOARD ───────────────────────────────────────────────────────── */
+async function oracleLoadLeaderboard() {
+  const pane = document.getElementById('pane-oracle-leaderboard');
+  let d;
+  try { d = await api('/api/oracle/leaderboard'); }
+  catch (e) { pane.innerHTML = `<div class="empty"><div class="empty-icon">&#10060;</div>${esc(e.message)}</div>`; return; }
+  const lb = d.leaderboard || [];
+  const medal = (i) => ['🥇', '🥈', '🥉'][i] || `#${i + 1}`;
+
+  const rows = lb.map((a, i) => {
+    const s = a.stats || {};
+    const score = Number(s.score || 0);
+    const scoreCol = score > 0 ? 'var(--green)' : (score < 0 ? 'var(--red)' : 'var(--muted)');
+    return `
+      <tr style="border-top:1px solid var(--border);${a.active ? '' : 'opacity:.5;'}">
+        <td style="padding:7px 10px;font-size:.95rem;white-space:nowrap;">${medal(i)}</td>
+        <td style="padding:7px 10px;">
+          <div style="font-weight:600;">${esc(a.name)}</div>
+          <div style="font-size:.68rem;color:var(--muted);">${esc(a.model || '')}</div>
+        </td>
+        <td style="padding:7px 10px;text-align:right;font-weight:700;color:${scoreCol};">${score > 0 ? '+' : ''}${score.toFixed(1)}</td>
+        <td style="padding:7px 10px;text-align:right;color:var(--muted);">${s.accuracy != null ? _orPct(s.accuracy, 0) : '—'}</td>
+        <td style="padding:7px 10px;text-align:right;color:var(--muted);">${s.resolved ?? 0}</td>
+        <td style="padding:7px 10px;text-align:right;color:var(--muted);">${s.open ?? 0}</td>
+        <td style="padding:7px 10px;text-align:right;color:var(--muted);">${s.avg_horizon != null ? Number(s.avg_horizon).toFixed(1) + 'd' : '—'}</td>
+        <td style="padding:7px 10px;text-align:right;white-space:nowrap;">
+          <button class="btn-sm" onclick="oracleMemory(${a.id})" title="See the lessons this analyst has learned from past calls.">&#129504; Memory</button>
+          <button class="btn-sm" onclick="oracleHistory(${a.id})" title="Filter Open calls & Results to just this analyst.">History</button>
+          <label style="display:inline-flex;align-items:center;gap:4px;font-size:.7rem;color:var(--muted);margin-left:4px;cursor:pointer;"
+            title="Bench a model to keep it out of new tournament rounds.">
+            <input type="checkbox" ${a.active ? 'checked' : ''} onchange="oracleToggle(${a.id},this.checked)"> active</label>
+        </td>
+      </tr>
+      <tr id="or-mem-${a.id}" style="display:none;"><td colspan="8" style="padding:0 10px 10px 10px;"></td></tr>`;
+  }).join('');
+
+  pane.innerHTML = `
+    <div class="section-header">
+      <div><div class="section-title">&#127942; Leaderboard</div>
+        <div class="section-sub">Models compete to forecast prices. Scored on getting direction right,
+          how close the target was, and how far out they called it &mdash; longer correct calls score much higher.</div></div>
+      <button class="btn-sm" onclick="_oracleLoaded.leaderboard=false;oracleSub('leaderboard')">&#8635; Refresh</button>
+    </div>
+
+    <div class="settings-group" style="max-width:900px;margin-bottom:16px;border-color:var(--accent);">
+      <div class="settings-group-title">&#128302; Run a tournament round</div>
+      <div style="font-size:.76rem;color:var(--muted);margin-bottom:10px;">
+        Each active analyst studies the market and makes a fresh forecast for the chosen number of assets.
+        Calls resolve automatically once their horizon arrives &mdash; or hit <b>Resolve due now</b> to score any that are ready.
+      </div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
+        <label style="font-size:.76rem;color:var(--muted);">How many assets:
+          <input type="number" id="or-round-n" min="1" max="12" value="3" style="width:64px;margin-left:4px;"
+            title="How many different assets each analyst forecasts this round (1–12).">
+          ${hlp('Each active analyst makes one forecast per asset. More assets = a bigger, slower round.')}</label>
+        <button class="btn-sm primary" id="or-round-btn" onclick="oracleStartRound()">&#128302; Run tournament round</button>
+        <button class="btn-sm" id="or-resolve-btn" onclick="oracleResolve()"
+          title="Score any open predictions whose horizon date has already passed.">&#9878;&#65039; Resolve due now</button>
+      </div>
+      <div id="or-round-status" style="margin-top:10px;"></div>
+    </div>
+
+    ${lb.length ? `
+    <div class="settings-group" style="max-width:900px;overflow-x:auto;">
+      <table style="width:100%;border-collapse:collapse;font-size:.8rem;">
+        <thead><tr style="text-align:left;color:var(--muted);font-size:.66rem;text-transform:uppercase;letter-spacing:.04em;">
+          <th style="padding:6px 10px;">#</th><th style="padding:6px 10px;">Analyst</th>
+          <th style="padding:6px 10px;text-align:right;">Score</th>
+          <th style="padding:6px 10px;text-align:right;">Accuracy</th>
+          <th style="padding:6px 10px;text-align:right;">Resolved</th>
+          <th style="padding:6px 10px;text-align:right;">Open</th>
+          <th style="padding:6px 10px;text-align:right;">Avg horizon</th>
+          <th style="padding:6px 10px;text-align:right;"></th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>`
+    : `<div class="empty"><div class="empty-icon">&#128302;</div>Run your first tournament round to see analysts compete.</div>`}`;
+
+  if (_oracleRoundPoll) oraclePollRound();   // resume the live progress view if a round is running
+}
+window.oracleLoadLeaderboard = oracleLoadLeaderboard;
+
+async function oracleToggle(id, active) {
+  try {
+    await api(`/api/oracle/agents/${id}/toggle`, { method: 'POST', body: JSON.stringify({ active }) });
+    toast(active ? 'Analyst activated' : 'Analyst benched');
+  } catch (e) { toast('Error: ' + e.message, 'error'); }
+  _oracleLoaded.leaderboard = false; oracleSub('leaderboard');
+}
+window.oracleToggle = oracleToggle;
+
+async function oracleMemory(id) {
+  const tr = document.getElementById('or-mem-' + id);
+  if (!tr) return;
+  if (tr.style.display !== 'none') { tr.style.display = 'none'; return; }
+  tr.style.display = '';
+  const cell = tr.firstElementChild;
+  cell.innerHTML = '<div style="color:var(--muted);font-size:.76rem;">Loading lessons…</div>';
+  let d;
+  try { d = await api(`/api/oracle/memory/${id}?limit=25`); }
+  catch (e) { cell.innerHTML = `<div style="color:var(--red);font-size:.76rem;">${esc(e.message)}</div>`; return; }
+  const lessons = d.lessons || [];
+  cell.innerHTML = `
+    <div class="settings-group" style="margin:4px 0 0 0;border-color:var(--accent2);">
+      <div class="settings-group-title">&#129504; Lessons learned</div>
+      ${lessons.length ? lessons.map(l => `
+        <div style="font-size:.76rem;color:var(--text);line-height:1.6;padding:5px 0;border-top:1px solid var(--border);">
+          ${esc(l.text)}
+          <span style="color:var(--muted);font-size:.66rem;margin-left:6px;">${_orDate(l.created_at)}</span>
+        </div>`).join('')
+      : '<div style="font-size:.76rem;color:var(--muted);">No lessons yet — this analyst learns as its calls resolve.</div>'}
+    </div>`;
+}
+window.oracleMemory = oracleMemory;
+
+// "History" jumps to the Open-calls pane filtered to a single analyst.
+function oracleHistory(id) {
+  _oracleHistoryFilter = String(id);
+  _oracleLoaded.open = false;
+  _oracleLoaded.results = false;
+  oracleSub('open');
+}
+window.oracleHistory = oracleHistory;
+
+let _oracleRoundStarting = false;
+async function oracleStartRound() {
+  const n = parseInt(document.getElementById('or-round-n').value, 10) || 3;
+  const btn = document.getElementById('or-round-btn');
+  try {
+    await api('/api/oracle/round', { method: 'POST', body: JSON.stringify({ assets: n }) });
+    toast(`Tournament round started — ${n} asset(s) per analyst`);
+  } catch (e) {
+    toast(e.message && /409|running/i.test(e.message) ? 'A round is already running' : ('Error: ' + e.message), 'error');
+    return;
+  }
+  if (btn) btn.disabled = true;
+  oraclePollRound();
+}
+window.oracleStartRound = oracleStartRound;
+
+async function oraclePollRound() {
+  let st;
+  try { st = await api('/api/oracle/round/status'); } catch { return; }
+  const box = document.getElementById('or-round-status');
+  const btn = document.getElementById('or-round-btn');
+  if (box) {
+    const pct = st.target ? Math.round((st.done / st.target) * 100) : 0;
+    box.innerHTML = `
+      <div style="font-size:.78rem;margin-bottom:6px;">
+        ${st.running ? '⏳' : '✅'} ${st.done || 0}/${st.target || 0} done${st.made != null ? ` · <b style="color:var(--green);">${st.made} call(s) made</b>` : ''}
+        <div style="height:6px;background:var(--surface);border-radius:4px;margin-top:5px;overflow:hidden;">
+          <div style="height:100%;width:${pct}%;background:linear-gradient(90deg,var(--accent),var(--accent2));"></div></div>
+      </div>
+      <pre style="font-size:.68rem;color:var(--muted);background:var(--surface);border-radius:6px;padding:8px 10px;max-height:180px;overflow:auto;white-space:pre-wrap;margin:0;">${esc((st.log || []).slice(-12).join('\n'))}</pre>`;
+  }
+  if (st.running) {
+    if (btn) btn.disabled = true;
+    _oracleRoundPoll = setTimeout(oraclePollRound, 3000);
+  } else {
+    _oracleRoundPoll = null;
+    if (btn) btn.disabled = false;
+    // fresh calls landed — leaderboard & open pane are stale
+    _oracleLoaded.open = false;
+    oracleLoadLeaderboard();
+  }
+}
+window.oraclePollRound = oraclePollRound;
+
+async function oracleResolve() {
+  const btn = document.getElementById('or-resolve-btn');
+  const orig = btn ? btn.innerHTML : '';
+  if (btn) { btn.disabled = true; btn.innerHTML = '⏳ Resolving…'; }
+  try {
+    const r = await api('/api/oracle/resolve', { method: 'POST', body: JSON.stringify({}) });
+    toast(`Resolved ${r && r.resolved != null ? r.resolved : 0} prediction(s)`);
+  } catch (e) { toast('Error: ' + e.message, 'error'); }
+  if (btn) { btn.disabled = false; btn.innerHTML = orig; }
+  _oracleLoaded.open = false;
+  _oracleLoaded.results = false;
+  oracleLoadLeaderboard();
+}
+window.oracleResolve = oracleResolve;
+
+/* ── shared filter banner for Open/Results panes ──────────────────────────── */
+function _orFilterBanner() {
+  if (!_oracleHistoryFilter) return '';
+  return `<div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;font-size:.76rem;color:var(--muted);">
+    &#128269; Filtered to one analyst.
+    <button class="btn-sm" onclick="oracleClearFilter()">&#10005; Clear filter</button></div>`;
+}
+function oracleClearFilter() {
+  _oracleHistoryFilter = '';
+  _oracleLoaded.open = false;
+  _oracleLoaded.results = false;
+  const active = document.querySelector('#oracle-subtabs .subtab.active');
+  oracleSub(active && active.textContent.includes('Results') ? 'results' : 'open');
+}
+window.oracleClearFilter = oracleClearFilter;
+
+// expandable thesis + sources block, shared by Open/Results
+function _orThesis(p) {
+  const sources = (p.sources || []).map(s =>
+    s.url
+      ? `<a href="${esc(s.url)}" target="_blank" rel="noopener" style="color:var(--accent);text-decoration:none;display:block;margin-bottom:3px;">&#128279; ${esc(s.title || s.url)}</a>${s.snippet ? `<div style="color:var(--muted);font-size:.7rem;margin:0 0 6px 16px;">${esc(s.snippet)}</div>` : ''}`
+      : `<div style="color:var(--muted);margin-bottom:3px;">${esc(s.title || '')}</div>`).join('');
+  if (!p.thesis && !sources) return '<span style="color:var(--muted);font-size:.72rem;">—</span>';
+  return `<details>
+    <summary style="cursor:pointer;color:var(--accent);font-size:.72rem;">thesis${(p.sources || []).length ? ` · ${p.sources.length} source(s)` : ''}</summary>
+    ${p.thesis ? `<div style="font-size:.76rem;color:var(--text);line-height:1.6;margin:6px 0;">${esc(p.thesis)}</div>` : ''}
+    ${sources ? `<div style="font-size:.74rem;margin-top:4px;">${sources}</div>` : ''}
+  </details>`;
+}
+
+/* ── 🔮 OPEN CALLS ────────────────────────────────────────────────────────── */
+async function oracleLoadOpen() {
+  const pane = document.getElementById('pane-oracle-open');
+  let d;
+  const q = '/api/oracle/predictions?status=open&limit=200' + (_oracleHistoryFilter ? '&agent_id=' + encodeURIComponent(_oracleHistoryFilter) : '');
+  try { d = await api(q); }
+  catch (e) { pane.innerHTML = `<div class="empty"><div class="empty-icon">&#10060;</div>${esc(e.message)}</div>`; return; }
+  const preds = (d.predictions || []).slice().sort((a, b) =>
+    String(a.resolve_at || '').localeCompare(String(b.resolve_at || '')));
+
+  const rows = preds.map(p => `
+    <tr style="border-top:1px solid var(--border);vertical-align:top;">
+      <td style="padding:7px 10px;font-weight:600;">${esc(p.agent_name || '')}</td>
+      <td style="padding:7px 10px;">${_orAssetBadge(p.asset, p.market)}</td>
+      <td style="padding:7px 10px;">${_orDir(p.direction)}</td>
+      <td style="padding:7px 10px;white-space:nowrap;">${_orUsd(p.current_value)} <span style="color:var(--muted);">&rarr;</span> <b>${_orUsd(p.target_value)}</b></td>
+      <td style="padding:7px 10px;text-align:center;color:var(--muted);white-space:nowrap;">${p.horizon_days != null ? p.horizon_days + 'd' : '—'}</td>
+      <td style="padding:7px 10px;color:var(--muted);white-space:nowrap;">${_orDate(p.resolve_at)}</td>
+      <td style="padding:7px 10px;min-width:120px;">${_orConfBar(p.confidence)}</td>
+      <td style="padding:7px 10px;max-width:280px;">${_orThesis(p)}</td>
+    </tr>`).join('');
+
+  pane.innerHTML = `
+    <div class="section-header">
+      <div><div class="section-title">&#128302; Open calls</div>
+        <div class="section-sub">Live forecasts still awaiting their horizon, soonest to resolve first.</div></div>
+      <button class="btn-sm" onclick="_oracleLoaded.open=false;oracleSub('open')">&#8635; Refresh</button>
+    </div>
+    ${_orFilterBanner()}
+    ${preds.length ? `
+    <div class="settings-group" style="max-width:1000px;overflow-x:auto;">
+      <table style="width:100%;border-collapse:collapse;font-size:.8rem;">
+        <thead><tr style="text-align:left;color:var(--muted);font-size:.66rem;text-transform:uppercase;letter-spacing:.04em;">
+          <th style="padding:6px 10px;">Analyst</th><th style="padding:6px 10px;">Asset</th>
+          <th style="padding:6px 10px;">Call</th><th style="padding:6px 10px;">Target</th>
+          <th style="padding:6px 10px;text-align:center;">Horizon</th><th style="padding:6px 10px;">Resolves</th>
+          <th style="padding:6px 10px;">Confidence</th><th style="padding:6px 10px;">Thesis</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>`
+    : `<div class="empty"><div class="empty-icon">&#128302;</div>${_oracleHistoryFilter ? 'No open calls for this analyst.' : 'No open calls yet — run a tournament round to see analysts compete.'}</div>`}`;
+}
+window.oracleLoadOpen = oracleLoadOpen;
+
+/* ── 📊 RESULTS ───────────────────────────────────────────────────────────── */
+async function oracleLoadResults() {
+  const pane = document.getElementById('pane-oracle-results');
+  let d;
+  const q = '/api/oracle/predictions?status=resolved&limit=200' + (_oracleHistoryFilter ? '&agent_id=' + encodeURIComponent(_oracleHistoryFilter) : '');
+  try { d = await api(q); }
+  catch (e) { pane.innerHTML = `<div class="empty"><div class="empty-icon">&#10060;</div>${esc(e.message)}</div>`; return; }
+  const preds = d.predictions || [];
+
+  const rows = preds.map(p => {
+    const correct = !!p.correct;
+    const cCol = correct ? 'var(--green)' : 'var(--red)';
+    const score = Number(p.score || 0);
+    const sCol = score > 0 ? 'var(--green)' : (score < 0 ? 'var(--red)' : 'var(--muted)');
+    return `
+    <tr style="border-top:1px solid var(--border);vertical-align:top;">
+      <td style="padding:7px 10px;font-weight:600;">${esc(p.agent_name || '')}</td>
+      <td style="padding:7px 10px;">${_orAssetBadge(p.asset, p.market)}</td>
+      <td style="padding:7px 10px;white-space:nowrap;">${_orDir(p.direction)} ${_orUsd(p.target_value)}</td>
+      <td style="padding:7px 10px;white-space:nowrap;"><b>${_orUsd(p.actual_value)}</b></td>
+      <td style="padding:7px 10px;text-align:center;color:${cCol};font-weight:700;">${correct ? '&#10003;' : '&#10007;'}</td>
+      <td style="padding:7px 10px;text-align:right;color:var(--muted);">${p.rel_error != null ? _orPct(p.rel_error * 100, 1) : '—'}</td>
+      <td style="padding:7px 10px;text-align:right;font-weight:700;color:${sCol};">${score > 0 ? '+' : ''}${score.toFixed(1)}</td>
+      <td style="padding:7px 10px;color:var(--muted);white-space:nowrap;">${_orDate(p.resolved_at)}</td>
+      <td style="padding:7px 10px;max-width:280px;">${_orThesis(p)}</td>
+    </tr>`;
+  }).join('');
+
+  pane.innerHTML = `
+    <div class="section-header">
+      <div><div class="section-title">&#128202; Results</div>
+        <div class="section-sub">Resolved calls, scored on direction, how close the target was, and how far out it was called.</div></div>
+      <button class="btn-sm" onclick="_oracleLoaded.results=false;oracleSub('results')">&#8635; Refresh</button>
+    </div>
+    ${_orFilterBanner()}
+    ${preds.length ? `
+    <div class="settings-group" style="max-width:1000px;overflow-x:auto;">
+      <table style="width:100%;border-collapse:collapse;font-size:.8rem;">
+        <thead><tr style="text-align:left;color:var(--muted);font-size:.66rem;text-transform:uppercase;letter-spacing:.04em;">
+          <th style="padding:6px 10px;">Analyst</th><th style="padding:6px 10px;">Asset</th>
+          <th style="padding:6px 10px;">Called</th><th style="padding:6px 10px;">Actual</th>
+          <th style="padding:6px 10px;text-align:center;">Correct</th><th style="padding:6px 10px;text-align:right;">% off</th>
+          <th style="padding:6px 10px;text-align:right;">Score</th><th style="padding:6px 10px;">Resolved</th>
+          <th style="padding:6px 10px;">Thesis</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>`
+    : `<div class="empty"><div class="empty-icon">&#128202;</div>${_oracleHistoryFilter ? 'No resolved calls for this analyst yet.' : 'No resolved calls yet — run a round, then Resolve due now once horizons arrive.'}</div>`}`;
+}
+window.oracleLoadResults = oracleLoadResults;

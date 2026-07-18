@@ -1,0 +1,324 @@
+"""videos routes."""
+from fastapi import APIRouter, HTTPException, BackgroundTasks, Request, Form, UploadFile, File
+from deps import *
+from services import *
+import services as _svc
+
+router = APIRouter()
+
+
+class VideoRequest(BaseModel):
+    prompt: str
+    width: int = 832
+    height: int = 480
+    num_frames: int = 49
+    steps: int = 20
+    fps: int = 16
+    seed: int = 0
+    model_id: str = "Wan-AI/Wan2.1-T2V-1.3B-Diffusers"
+
+class VideoChainRequest(BaseModel):
+    title: str = ""
+    concept: str = ""
+    prompts: list[str]
+    model_id: str = "Wan-AI/Wan2.1-T2V-1.3B-Diffusers"
+    width: int = 832
+    height: int = 480
+    num_frames: int = 49
+    steps: int = 20
+    fps: int = 16
+    strength: float = 0.7   # 0=copy prev video, 1=ignore it. 0.6-0.75 = smooth continuation
+
+class ChainPromptsRequest(BaseModel):
+    concept: str
+    num_segments: int = 3
+    style: str = ""
+
+@router.get("/api/video-chains")
+def list_video_chains():
+    conn = get_conn()
+    chains = conn.execute(
+        "SELECT * FROM video_chains ORDER BY created_at DESC"
+    ).fetchall()
+    result = []
+    for c in chains:
+        row = dict(c)
+        row["prompts"] = json.loads(row["prompts"]) if row["prompts"] else []
+        segs = conn.execute(
+            "SELECT id,chain_index,status,video_path,prompt,progress,progress_msg FROM videos WHERE chain_id=? ORDER BY chain_index",
+            (row["id"],)
+        ).fetchall()
+        row["segments"] = [dict(s) for s in segs]
+        result.append(row)
+    conn.close()
+    return result
+
+@router.get("/api/video-chains/{chain_id}")
+def get_video_chain(chain_id: int):
+    conn = get_conn()
+    chain = conn.execute("SELECT * FROM video_chains WHERE id=?", (chain_id,)).fetchone()
+    if not chain:
+        conn.close()
+        raise HTTPException(404, "Chain not found")
+    row = dict(chain)
+    row["prompts"] = json.loads(row["prompts"]) if row["prompts"] else []
+    segs = conn.execute(
+        "SELECT id,chain_index,status,video_path,prompt,progress,progress_msg FROM videos WHERE chain_id=? ORDER BY chain_index",
+        (chain_id,)
+    ).fetchall()
+    row["segments"] = [dict(s) for s in segs]
+    conn.close()
+    return row
+
+@router.post("/api/video-chains")
+def create_video_chain(req: VideoChainRequest, background_tasks: BackgroundTasks):
+    if len(req.prompts) < 1:
+        raise HTTPException(400, "Need at least 1 prompt to create a chain")
+
+    title = req.title or f"Chain: {req.prompts[0][:40]}"
+    conn = get_conn()
+    cur = conn.execute(
+        "INSERT INTO video_chains (title,concept,model_id,width,height,num_frames,steps,fps,strength,prompts,total_segments) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        (title, req.concept, req.model_id, req.width, req.height, req.num_frames,
+         req.steps, req.fps, req.strength, json.dumps(req.prompts), len(req.prompts))
+    )
+    chain_id = cur.lastrowid
+    conn.commit()
+    conn.close()
+    background_tasks.add_task(run_chain_generation, chain_id)
+    return {"chain_id": chain_id, "message": f"Chain started with {len(req.prompts)} segments"}
+
+@router.delete("/api/video-chains/{chain_id}")
+def delete_video_chain(chain_id: int):
+    conn = get_conn()
+    chain = conn.execute("SELECT * FROM video_chains WHERE id=?", (chain_id,)).fetchone()
+    if not chain:
+        conn.close()
+        raise HTTPException(404, "Chain not found")
+    segs = conn.execute("SELECT video_path FROM videos WHERE chain_id=?", (chain_id,)).fetchall()
+    for s in segs:
+        if s["video_path"]:
+            try:
+                Path(s["video_path"]).unlink(missing_ok=True)
+            except Exception:
+                pass
+    if chain["compiled_path"]:
+        try:
+            Path(chain["compiled_path"]).unlink(missing_ok=True)
+        except Exception:
+            pass
+    conn.execute("DELETE FROM videos WHERE chain_id=?", (chain_id,))
+    conn.execute("DELETE FROM video_chains WHERE id=?", (chain_id,))
+    conn.commit()
+    conn.close()
+    return {"ok": True}
+
+@router.post("/api/video-chains/{chain_id}/compile")
+def compile_video_chain(chain_id: int, background_tasks: BackgroundTasks):
+    """Compile all done segments into a single video with xfade transitions."""
+    conn = get_conn()
+    chain = conn.execute("SELECT * FROM video_chains WHERE id=?", (chain_id,)).fetchone()
+    if not chain:
+        conn.close()
+        raise HTTPException(404, "Chain not found")
+    if chain["status"] not in ("done", "failed"):
+        conn.close()
+        raise HTTPException(400, "Chain is still generating")
+    segs = conn.execute(
+        "SELECT video_path FROM videos WHERE chain_id=? AND status='done' ORDER BY chain_index",
+        (chain_id,)
+    ).fetchall()
+    paths = [s["video_path"] for s in segs if s["video_path"]]
+    chain_fps = chain["fps"] or 16
+    conn.close()
+    if not paths:
+        raise HTTPException(400, "No completed segments to compile")
+
+    def _do_compile():
+        out = str(_chain_compiled_path(chain_id))
+        try:
+            _compile_chain_video(paths, out, fps=chain_fps)
+            c = get_conn()
+            c.execute(
+                "UPDATE video_chains SET compiled_path=?,updated_at=datetime('now') WHERE id=?",
+                (out, chain_id)
+            )
+            c.commit()
+            c.close()
+            logger.info("Chain %d compiled: %s", chain_id, out)
+        except Exception as ex:
+            logger.error("Chain %d compile failed: %s", chain_id, ex)
+
+    background_tasks.add_task(_do_compile)
+    return {"message": "Compiling chain video…"}
+
+@router.post("/api/videos/chain-prompts")
+def generate_chain_prompts(req: ChainPromptsRequest):
+    """Use LLM to generate sequential scene prompts for video chaining."""
+    if req.num_segments < 1:
+        raise HTTPException(400, "num_segments must be at least 1")
+
+    user_msg = f"Concept: {req.concept}\nNumber of segments: {req.num_segments}"
+    if req.style:
+        user_msg += f"\nStyle/mood: {req.style}"
+
+    def _work():
+        raw = _call_lmstudio(get_prompt('video_chain'), user_msg, max_tokens=1500)
+        import re as _re
+        m = _re.search(r'\[.*\]', raw, _re.DOTALL)
+        if m:
+            try:
+                prompts = json.loads(m.group())
+                if isinstance(prompts, list) and len(prompts) >= 1:
+                    return {"prompts": [str(p) for p in prompts[:req.num_segments]]}
+            except Exception:
+                pass
+        # Fallback: split by newlines, strip bullets/quotes
+        lines = [l.strip().strip('"').strip("'").lstrip("-0123456789. ").strip()
+                 for l in raw.splitlines() if l.strip()]
+        lines = [l for l in lines if len(l) > 20]
+        return {"prompts": lines[:req.num_segments], "raw": raw[:200]}
+
+    tid = orch.submit_llm(_work, desc=f"Chain prompts: {req.concept[:50]}")
+    return {"task_id": tid}
+
+@router.get("/api/videos")
+def list_videos():
+    conn = get_conn()
+    rows = conn.execute("SELECT * FROM videos ORDER BY created_at DESC").fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+@router.get("/api/videos/{vid_id}")
+def get_video(vid_id: int):
+    conn = get_conn()
+    row = conn.execute("SELECT * FROM videos WHERE id=?", (vid_id,)).fetchone()
+    conn.close()
+    if not row:
+        raise HTTPException(status_code=404, detail="Video not found")
+    return dict(row)
+
+@router.post("/api/videos/generate")
+def create_video(req: VideoRequest, background_tasks: BackgroundTasks):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute(
+        "INSERT INTO videos (prompt,width,height,num_frames,steps,fps,seed,status,model_id) "
+        "VALUES (?,?,?,?,?,?,?,'queued',?)",
+        (req.prompt, req.width, req.height, req.num_frames, req.steps, req.fps, req.seed, req.model_id),
+    )
+    vid_id = c.lastrowid
+    conn.commit()
+    conn.close()
+    background_tasks.add_task(run_video_generation, vid_id)
+    return {"id": vid_id, "status": "queued"}
+
+@router.delete("/api/videos/{vid_id}")
+def delete_video(vid_id: int):
+    conn = get_conn()
+    row = conn.execute("SELECT * FROM videos WHERE id=?", (vid_id,)).fetchone()
+    if not row:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Video not found")
+    conn.close()
+    # If it's mid-generation, kill the subprocess first so we don't leave an orphan.
+    _svc.cancel_video(vid_id)
+    conn = get_conn()
+    if row["video_path"]:
+        try:
+            Path(row["video_path"]).unlink(missing_ok=True)
+        except Exception:
+            pass
+    conn.execute("DELETE FROM videos WHERE id=?", (vid_id,))
+    conn.commit()
+    conn.close()
+    return {"ok": True}
+
+
+@router.get("/api/video-health")
+def videos_health():
+    """Is the GPU node reachable and the generator wired up? Surfaced in the UI so
+    the user knows before queueing whether a job can even run."""
+    ok, msg = _svc._video_preflight()
+    return {"ok": ok, "message": msg, "gpu_host": globals().get("GPU_HOST", "")}
+
+
+@router.post("/api/videos/{vid_id}/cancel")
+def cancel_video_route(vid_id: int):
+    """Stop a queued/generating video: kill its subprocess and mark it failed."""
+    conn = get_conn()
+    row = conn.execute("SELECT status FROM videos WHERE id=?", (vid_id,)).fetchone()
+    if not row:
+        conn.close()
+        raise HTTPException(404, "Video not found")
+    if row["status"] not in ("queued", "generating"):
+        conn.close()
+        raise HTTPException(400, f"Video is '{row['status']}', not running")
+    killed = _svc.cancel_video(vid_id)
+    conn.execute("UPDATE videos SET status='failed',error='Cancelled by user',updated_at=datetime('now') WHERE id=?", (vid_id,))
+    conn.commit()
+    conn.close()
+    return {"ok": True, "killed_process": killed}
+
+
+class AddAudioRequest(BaseModel):
+    music_prompt: str = ""
+    narration: str = ""
+
+
+@router.post("/api/videos/{vid_id}/add-audio")
+def add_audio(vid_id: int, req: AddAudioRequest, background_tasks: BackgroundTasks):
+    """Bridge: generate background music (+ optional spoken narration) for a video
+    and mux it on. The result is served from videos.audio_path when done."""
+    conn = get_conn()
+    row = conn.execute("SELECT status, video_path FROM videos WHERE id=?", (vid_id,)).fetchone()
+    if not row:
+        conn.close()
+        raise HTTPException(404, "Video not found")
+    if row["status"] != "done" or not row["video_path"]:
+        conn.close()
+        raise HTTPException(400, "Video isn't finished yet")
+    conn.execute("UPDATE videos SET audio_status='queued',audio_error=NULL WHERE id=?", (vid_id,))
+    conn.commit()
+    conn.close()
+    background_tasks.add_task(add_video_audio, vid_id, req.music_prompt, req.narration)
+    return {"ok": True, "status": "queued"}
+
+
+@router.post("/api/videos/{vid_id}/retry")
+def retry_video(vid_id: int, background_tasks: BackgroundTasks):
+    """Re-queue a failed video with the same settings (no need to retype the prompt)."""
+    conn = get_conn()
+    row = conn.execute("SELECT * FROM videos WHERE id=?", (vid_id,)).fetchone()
+    if not row:
+        conn.close()
+        raise HTTPException(404, "Video not found")
+    if row["status"] in ("queued", "generating"):
+        conn.close()
+        raise HTTPException(400, "Video is already running")
+    conn.execute("UPDATE videos SET status='queued',error=NULL,video_path=NULL,updated_at=datetime('now') WHERE id=?", (vid_id,))
+    conn.commit()
+    conn.close()
+    background_tasks.add_task(run_video_generation, vid_id)
+    return {"ok": True, "status": "queued"}
+
+
+@router.post("/api/video-chains/{chain_id}/cancel")
+def cancel_chain(chain_id: int):
+    """Stop a generating chain: kill the active segment's subprocess, mark failed."""
+    conn = get_conn()
+    chain = conn.execute("SELECT status FROM video_chains WHERE id=?", (chain_id,)).fetchone()
+    if not chain:
+        conn.close()
+        raise HTTPException(404, "Chain not found")
+    active = conn.execute("SELECT id FROM videos WHERE chain_id=? AND status IN ('queued','generating')", (chain_id,)).fetchall()
+    killed = False
+    for a in active:
+        if _svc.cancel_video(a["id"]):
+            killed = True
+        conn.execute("UPDATE videos SET status='failed',error='Cancelled by user' WHERE id=?", (a["id"],))
+    conn.execute("UPDATE video_chains SET status='failed',error='Cancelled by user',updated_at=datetime('now') WHERE id=?", (chain_id,))
+    conn.commit()
+    conn.close()
+    return {"ok": True, "killed_process": killed}

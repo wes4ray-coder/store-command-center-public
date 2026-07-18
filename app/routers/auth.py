@@ -1,0 +1,98 @@
+"""auth routes."""
+import re as _re, glob as _glob, os as _os
+from fastapi import APIRouter, HTTPException, BackgroundTasks, Request, Form, UploadFile, File
+from deps import *
+from services import *
+
+router = APIRouter()
+
+
+def _asset_ver():
+    """Newest mtime across static JS/CSS — bumps whenever any asset changes, so the
+    browser refetches only what actually changed (no more hard-refresh needed)."""
+    try:
+        files = _glob.glob(str(BASE / "static/js/*.js")) + _glob.glob(str(BASE / "static/css/*.css"))
+        return int(max(_os.path.getmtime(f) for f in files)) if files else 0
+    except Exception:
+        return 0
+
+
+@router.get("/", include_in_schema=False)
+async def dashboard():
+    # Serve index.html, injecting the configured base path so the app works under
+    # any reverse-proxy prefix (STORE_BASE) or at root ("") — not just "/store".
+    html = (BASE / "static/index.html").read_text()
+    if STORE_BASE != "/store":
+        html = (html
+                .replace("'/store'", f"'{STORE_BASE}'")       # const API
+                .replace("/store/logout", f"{STORE_BASE}/logout")
+                .replace("/store/static/", f"{STORE_BASE}/static/"))
+    if APP_NAME != "Store Command Center":
+        html = html.replace("Store Command Center", APP_NAME)
+    # cache-bust: stamp ?v=<newest-asset-mtime> on every static js/css src so browsers
+    # always pull the current file after an update (index.html itself is no-cache below)
+    ver = _asset_ver()
+    html = _re.sub(r'(/static/(?:js|css)/[\w./\-]+\.(?:js|css))(["\'])', rf'\1?v={ver}\2', html)
+    return HTMLResponse(html, headers={"Cache-Control": "no-store, no-cache, must-revalidate", "Pragma": "no-cache"})
+
+@router.get("/login", include_in_schema=False)
+async def login_page(error: str = ""):
+    block = f'<div class="err">{error}</div>' if error else ""
+    html = _LOGIN_HTML.replace("{error_block}", block).replace("Store Command Center", APP_NAME)
+    return HTMLResponse(html)
+
+# ── Brute-force limiter: per-IP failed-login throttle ────────────────────────
+import time as _time
+import asyncio as _asyncio
+_login_fails: dict = {}          # ip -> [failure timestamps]
+_LOGIN_WINDOW = 300              # sliding window (5 min)
+_LOGIN_MAX    = 8                # failures in the window before lockout
+
+
+def _client_ip(request: Request) -> str:
+    xff = request.headers.get("x-forwarded-for", "")
+    return (xff.split(",")[0].strip() if xff else "") or \
+           (request.client.host if request.client else "unknown")
+
+
+@router.post("/login", include_in_schema=False)
+async def login_post(request: Request, password: str = Form(...)):
+    ip = _client_ip(request)
+    now = _time.time()
+    fails = [t for t in _login_fails.get(ip, []) if now - t < _LOGIN_WINDOW]
+    if len(fails) >= _LOGIN_MAX:
+        wait_min = int((_LOGIN_WINDOW - (now - fails[0])) // 60) + 1
+        logger.warning("Login lockout for %s (%d failures)", ip, len(fails))
+        block = f'<div class="err">🔒 Too many failed attempts. Try again in ~{wait_min} min.</div>'
+        html = _LOGIN_HTML.replace("{error_block}", block).replace("Store Command Center", APP_NAME)
+        return HTMLResponse(html, status_code=429)
+    if _check_password(password):
+        _login_fails.pop(ip, None)
+        request.session["authenticated"] = True
+        return RedirectResponse(url=f"{STORE_BASE}/", status_code=303)
+    fails.append(now)
+    _login_fails[ip] = fails
+    await _asyncio.sleep(0.6)   # slow down guessing (async — doesn't block the server)
+    left = _LOGIN_MAX - len(fails)
+    tail = f' ({left} attempt{"s" if left != 1 else ""} left)' if left <= 3 else ''
+    block = f'<div class="err">❌ Incorrect password. Try again.{tail}</div>'
+    html = _LOGIN_HTML.replace("{error_block}", block).replace("Store Command Center", APP_NAME)
+    return HTMLResponse(html, status_code=401)
+
+@router.get("/logout", include_in_schema=False)
+async def logout(request: Request):
+    request.session.clear()
+    return RedirectResponse(url=f"{STORE_BASE}/login", status_code=303)
+
+class PasswordChange(BaseModel):
+    current: str
+    new_password: str
+
+@router.post("/api/auth/change-password")
+async def change_password(body: PasswordChange):
+    if not _check_password(body.current):
+        raise HTTPException(400, "Current password is incorrect")
+    if len(body.new_password) < 4:
+        raise HTTPException(400, "Password must be at least 4 characters")
+    _set_stored_hash(body.new_password)
+    return {"ok": True}
