@@ -9,3 +9,9 @@ python-multipart==0.0.32
 itsdangerous==2.2.0
 feedparser==6.0.12
 websocket-client==1.9.0
+# runtime deps that fresh public installs were missing (field report 2026-07-18)
+cryptography==49.0.0
+fastapi-mcp==0.4.0
+requests==2.34.2
+numpy==2.5.1
+Pillow==12.3.0

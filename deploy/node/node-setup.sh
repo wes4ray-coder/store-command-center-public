@@ -279,6 +279,17 @@ setup_audio(){
   info "Audio / music (MusicGen) + voice (MMS-TTS) …"
   [ -x "$PY" ] || { err "ComfyUI venv missing — run ComfyUI setup first"; set_result audio failed; return; }
   "$PY" -c "import scipy" >/dev/null 2>&1 || "$PY" -m pip install -q scipy >>"$LOG" 2>&1
+  # SELF-HEAL: transitive installs can pull a torchaudio built for a DIFFERENT
+  # CUDA than torch (e.g. a cu13 wheel against torch+cu121) — transformers'
+  # audio path then dies with "libcudart.so: cannot open shared object file".
+  # Pin torchaudio to torch's exact version from torch's own CUDA index.
+  if ! "$PY" -c "import torch,torchaudio; assert torchaudio.__version__.split('+')[0]==torch.__version__.split('+')[0]" >/dev/null 2>&1; then
+    TVER="$("$PY" -c 'import torch;print(torch.__version__.split("+")[0])' 2>/dev/null)"
+    CUTAG="$("$PY" -c 'import torch;v=torch.version.cuda;print("cu"+v.replace(".","") if v else "cpu")' 2>/dev/null)"
+    if [ -n "$TVER" ] && "$PY" -m pip install -q "torchaudio==$TVER" --index-url "https://download.pytorch.org/whl/${CUTAG:-cu121}" >>"$LOG" 2>&1; then
+      ok "torchaudio re-pinned to $TVER (${CUTAG:-cu121}) — CUDA mismatch healed"
+    else warn "torchaudio/torch CUDA mismatch could not be auto-healed — see $LOG"; fi
+  fi
   if [ -f "$HERE/store_audiogen.py" ]; then cp "$HERE/store_audiogen.py" "$HOME/store_audiogen.py" && ok "installed store_audiogen.py"; fi
   if "$PY" -c "from transformers import MusicgenForConditionalGeneration, VitsModel; import scipy" >/dev/null 2>&1; then
     ok "Audio ready (MusicGen + MMS-TTS models download on first use)"; set_result audio ok
@@ -288,9 +299,20 @@ setup_audio(){
 # ── LM Studio (LLM) ──────────────────────────────────────────────────────────
 setup_lmstudio(){
   local LMS="$HOME/.lmstudio/bin/lms"
-  if [ -x "$LMS" ]; then ok "LM Studio present ($("$LMS" version 2>/dev/null | head -1 | tr -d '\r'))"; set_result lmstudio ok
-  else warn "LM Studio not installed — download the AppImage from https://lmstudio.ai, run it once, then enable the CLI (⌘/Ctrl-Shift-R → Install \`lms\`). It can't be reliably auto-installed headlessly."
-    set_result lmstudio missing; fi
+  if [ -x "$LMS" ]; then
+    ok "LM Studio present ($("$LMS" version 2>/dev/null | head -1 | tr -d '\r'))"; set_result lmstudio ok; return
+  fi
+  if [ "$MODE" = "check" ]; then warn "LM Studio not installed"; set_result lmstudio missing; return; fi
+  # LM Studio ships an OFFICIAL headless CLI installer now — no GUI/xvfb needed.
+  info "Installing LM Studio (headless CLI installer) …"
+  if curl -fsSL https://lmstudio.ai/install.sh | sh >>"$LOG" 2>&1 && [ -x "$LMS" ]; then
+    ok "LM Studio CLI installed ($("$LMS" version 2>/dev/null | head -1 | tr -d '\r'))"
+    ok "download models with: $LMS get <publisher/model> --gguf -y"
+    set_result lmstudio ok
+  else
+    warn "headless install failed — fallback: install the AppImage from https://lmstudio.ai, run it once, then enable the CLI. See $LOG"
+    set_result lmstudio missing
+  fi
 }
 
 # ── systemd --user services (autostart) ──────────────────────────────────────

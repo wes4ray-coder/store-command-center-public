@@ -1,0 +1,14 @@
+# Store Command Center — minimal HTTPS for LAN access.
+#
+# WHY: the app's session cookie is `Secure`, so login only works over HTTPS or
+# http://localhost. On a LAN, http://<server-ip>:8787 will accept your password
+# and then silently fail to keep you signed in. This 4-line Caddyfile fixes it
+# with a self-signed cert (browsers show a one-time warning — accept it).
+#
+# Install caddy (https://caddyserver.com), put this at /etc/caddy/Caddyfile
+# (or run `caddy run --config Caddyfile.example`), then browse to
+# https://<server-ip>:8443
+:8443 {
+	tls internal
+	reverse_proxy 127.0.0.1:8787
+}

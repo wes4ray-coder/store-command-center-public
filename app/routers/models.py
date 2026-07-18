@@ -84,7 +84,19 @@ def start_model_download(filename: str):
     # mkdir the dest dir first — specialty dirs (rmbg/, sometimes controlnet/) may not
     # exist yet on a fresh box, which would make the final `mv` fail.
     dest_dir = _dest_dir(m)
-    cmd  = f"mkdir -p {dest_dir} && wget -q -O {tmp} '{url}' 2>&1 && mv {tmp} {dest}"
+    # VALIDATE before install: Civitai (and others) gate some downloads behind a
+    # login/token and return an HTML error page with HTTP 200 — blindly moving
+    # that into models/ leaves a corrupt ".safetensors" that fails at load time
+    # with no clue why. Reject tiny files and files that start like HTML, and
+    # surface the need for CIVITAI_TOKEN loudly.
+    cmd  = (f"mkdir -p {dest_dir} && wget -q -O {tmp} '{url}' 2>&1 && "
+            f"S=$(stat -c%s {tmp} 2>/dev/null || echo 0) && "
+            f"H=$(head -c 64 {tmp} | tr -d '\\0') && "
+            f"if [ \"$S\" -lt 1048576 ] || echo \"$H\" | grep -qiE '<!DOCTYPE|<html|\"error\"'; then "
+            f"  echo 'DOWNLOAD INVALID: got a non-model response (size='$S' bytes) — "
+            f"the source likely requires a login/API token (Civitai: set CIVITAI_TOKEN and use ?token=)'; "
+            f"  rm -f {tmp}; exit 1; "
+            f"else mv {tmp} {dest}; fi")
 
     proc = subprocess.Popen(
         BOX_SSH + [cmd],

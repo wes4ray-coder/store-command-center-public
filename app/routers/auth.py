@@ -36,8 +36,23 @@ async def dashboard():
     return HTMLResponse(html, headers={"Cache-Control": "no-store, no-cache, must-revalidate", "Pragma": "no-cache"})
 
 @router.get("/login", include_in_schema=False)
-async def login_page(error: str = ""):
+async def login_page(request: Request, error: str = ""):
     block = f'<div class="err">{error}</div>' if error else ""
+    # SECURE-COOKIE TRAP: the session cookie is `Secure`, so over plain HTTP from
+    # another machine the browser silently drops it and login "does nothing".
+    # Warn up front instead of letting the user fail mysteriously.
+    try:
+        fwd_proto = (request.headers.get("x-forwarded-proto") or "").lower()
+        scheme = fwd_proto or request.url.scheme
+        host = (request.url.hostname or "").lower()
+        if scheme == "http" and host not in ("localhost", "127.0.0.1", "::1"):
+            block += ('<div class="err" style="background:#3a2f14;border-color:#6a5a2a;color:#e8d49a">'
+                      '⚠️ <b>Plain HTTP from another machine</b> — the secure session cookie can\'t be set, '
+                      'so signing in will silently fail.<br>Use HTTPS (see <code>deploy/caddy/</code> for a '
+                      '2-line reverse proxy), an SSH tunnel, or open via <code>http://localhost:8787</code> '
+                      'on the server itself.</div>')
+    except Exception:
+        pass
     # FIRST-RUN HELPER: a fresh install has no way to know the default password —
     # tell them, and promise the change prompt. Only shown while the default is
     # in effect (no info leak once a real password is set).
