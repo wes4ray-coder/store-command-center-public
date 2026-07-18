@@ -123,3 +123,24 @@ function statCard(label, value) {
     <div style="font-size:.68rem;color:var(--muted);margin-top:2px;">${label}</div>
   </div>`;
 }
+
+/* ── FIRST-RUN HELPER ── still on the default password? Walk the user straight
+   to changing it (retail installs had no way to know the default, and nothing
+   prompted them afterwards). Shows until a real password is set. */
+(async () => {
+  try {
+    const s = await api('/api/auth/status');
+    if (!s.default_password) return;
+    const b = document.createElement('div');
+    b.id = 'default-pw-banner';
+    b.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:1200;background:#7a4a12;color:#ffe9c2;' +
+      'padding:8px 14px;font-size:.85rem;display:flex;gap:12px;align-items:center;justify-content:center;box-shadow:0 2px 12px rgba(0,0,0,.4)';
+    b.innerHTML = `🔑 <b>You're signed in with the default password (<code>store</code>)</b> — set your own now.
+      <button style="background:#e8a13c;color:#231303;border:none;border-radius:6px;padding:4px 12px;font-weight:700;cursor:pointer"
+        onclick="switchView('settings'); setTimeout(() => { if (window.settingsSub) settingsSub('system');
+          const el = document.getElementById('s-pw-cur');
+          if (el) { el.scrollIntoView({ behavior: 'smooth', block: 'center' }); el.focus(); } }, 300);">Change password</button>
+      <span style="cursor:pointer;opacity:.7" title="dismiss until next reload" onclick="this.parentElement.remove()">✕</span>`;
+    document.body.appendChild(b);
+  } catch {}
+})();

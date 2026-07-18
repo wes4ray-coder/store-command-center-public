@@ -69,13 +69,43 @@ def _set_stored_hash(pw: str):
     conn.close()
 
 
+def is_default_password() -> bool:
+    """True while the install still runs on the first-run default password —
+    drives the login-page hint and the post-login 'change it now' banner."""
+    if _get_stored_hash() is None:
+        return True
+    try:
+        conn = get_conn()
+        row = conn.execute("SELECT value FROM settings WHERE key='_auth_default_pw'").fetchone()
+        conn.close()
+        return bool(row and row["value"] == "1")
+    except Exception:
+        return False
+
+
+def _flag_default_pw(on: bool):
+    try:
+        conn = get_conn()
+        if on:
+            conn.execute("INSERT OR REPLACE INTO settings (key,value) VALUES ('_auth_default_pw','1')")
+        else:
+            conn.execute("DELETE FROM settings WHERE key='_auth_default_pw'")
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+
 def _check_password(pw: str) -> bool:
     stored = _get_stored_hash()
     if stored is None:
-        # First-run default password
+        # First-run default password — accept it, but FLAG it so the UI walks the
+        # user straight to changing it (it used to lock in silently, and anyone
+        # typing the password they *wanted* just got "Incorrect password").
         if _hmac.compare_digest(_hashlib.sha256(pw.encode("utf-8")).hexdigest(),
                                 _hashlib.sha256(b"store").hexdigest()):
             _set_stored_hash(pw)
+            _flag_default_pw(True)
             return True
         return False
     if _verify_pw(pw, stored):

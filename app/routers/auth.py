@@ -38,8 +38,26 @@ async def dashboard():
 @router.get("/login", include_in_schema=False)
 async def login_page(error: str = ""):
     block = f'<div class="err">{error}</div>' if error else ""
+    # FIRST-RUN HELPER: a fresh install has no way to know the default password —
+    # tell them, and promise the change prompt. Only shown while the default is
+    # in effect (no info leak once a real password is set).
+    try:
+        from auth_core import is_default_password
+        if is_default_password():
+            block += ('<div class="err" style="background:#173a2a;border-color:#2a6a4a;color:#9fe0b8">'
+                      '🔑 <b>First run</b> — sign in with the default password <code>store</code>.<br>'
+                      "You'll be prompted to change it right after you're in.</div>")
+    except Exception:
+        pass
     html = _LOGIN_HTML.replace("{error_block}", block).replace("Store Command Center", APP_NAME)
     return HTMLResponse(html)
+
+
+@router.get("/api/auth/status")
+async def auth_status():
+    """Post-login helper: is this install still on the default password?"""
+    from auth_core import is_default_password
+    return {"default_password": is_default_password()}
 
 # ── Brute-force limiter: per-IP failed-login throttle ────────────────────────
 import time as _time
@@ -95,4 +113,6 @@ async def change_password(body: PasswordChange):
     if len(body.new_password) < 4:
         raise HTTPException(400, "Password must be at least 4 characters")
     _set_stored_hash(body.new_password)
+    from auth_core import _flag_default_pw
+    _flag_default_pw(False)                 # a chosen password ends the first-run state
     return {"ok": True}
