@@ -130,6 +130,63 @@ def test_missions_wait_for_god_approval(client):
     assert r.status_code == 400
 
 
-def test_miner_token_exists(client):
+def test_buddy_compute_economy(client):
+    """JLY as the peer network's working coin: credit for lending, charge for using,
+    comped (never blocked) when broke, and the god-side settings endpoint."""
+    import jellycoin
+    # buddy lends us compute → treasury pays their peer wallet
+    r = jellycoin.peer_job_credit("Buddy", "llm")
+    assert r["billed"] and r["amount"] == 1_000_000        # default 1 JLY/llm job
+    assert _balance(client, "peer:Buddy") == 1_000_000
+    # buddy uses our AI helper → charged back into the company wallet
+    company0 = _balance(client, "company")
+    r = jellycoin.peer_job_charge("Buddy", "llm")
+    assert r["billed"]
+    assert _balance(client, "peer:Buddy") == 0
+    assert _balance(client, "company") == company0 + 1_000_000
+    # broke buddy: job is comped, never blocked, and the tab is recorded
+    r = jellycoin.peer_job_charge("Buddy", "llm")
+    assert not r["billed"] and r["reason"] == "comped"
+    pb = client.get("/api/jelly/peer-billing").json()
+    assert pb["enabled"] and pb["comped_jobs"] >= 1
+    assert any(w["name"] == "peer:Buddy" for w in pb["peer_wallets"])
+    # embeddings are 1/10th price
+    assert jellycoin.peer_job_price("embedding") == 100_000
+    # god can change price and switch billing off entirely
+    r = client.post("/api/jelly/peer-billing", json={"enabled": True, "price_jly": 2.5})
+    assert r.json()["price_jly"] == 2.5
+    r = client.post("/api/jelly/peer-billing", json={"enabled": False})
+    assert not r.json()["enabled"]
+    assert jellycoin.peer_job_charge("Buddy", "llm") == {"billed": False, "reason": "billing off"}
+    client.post("/api/jelly/peer-billing", json={"enabled": True, "price_jly": 1})
+
+
+def test_miner_token_exists_and_encrypted_at_rest(client):
     r = client.get("/api/jelly/miner-token").json()
     assert len(r["token"]) >= 32 and "jellyminer.py" in r["run"]
+    # security protocol: the token row in settings must be ciphertext, not the raw token
+    import crypto as store_crypto
+    from deps import get_conn
+    conn = get_conn()
+    raw = conn.execute("SELECT value FROM settings WHERE key='jelly_miner_token'").fetchone()["value"]
+    conn.close()
+    assert store_crypto.is_encrypted(raw) and raw != r["token"]
+    assert "jelly_miner_token" in store_crypto.SECRET_KEYS
+
+
+def test_stats_series_and_docs(client):
+    _mine_one(client)                       # ensure ≥2 blocks so series exist
+    _mine_one(client)
+    s = client.get("/api/jelly/stats").json()
+    assert len(s["series"]) >= 3            # genesis + 2 mined
+    last = s["series"][-1]
+    assert last["difficulty"] >= 1.0 and last["supply"] > 1_000_000
+    assert s["series"][0]["interval"] is None and last["interval"] is not None
+    assert s["target_block_sec"] == 60
+    assert any(r["miner"] == "testrig" for r in s["per_rig"])
+    # white paper + security docs are served
+    wp = client.get("/api/jelly/doc/whitepaper")
+    assert wp.status_code == 200 and "Proof-of-work specification" in wp.text
+    sec = client.get("/api/jelly/doc/security")
+    assert sec.status_code == 200 and "Incident playbook" in sec.text
+    assert client.get("/api/jelly/doc/nope").status_code == 404

@@ -22,6 +22,44 @@ python3 jellyminer.py --url http://127.0.0.1:8787 --token <TOKEN> --name rig1
 Get `<TOKEN>` (and this script itself) from the Store UI: **Crypto → 🪼 JellyCoin → Mining**.
 Rewards land in the wallet `miner:<name>`. Difficulty auto-retargets toward one block/min.
 
+## Run as a service (survives reboots)
+
+The GPU node already runs this way (`~/.config/systemd/user/jellyminer.service`, user has
+linger enabled). Recipe for any rig:
+
+```ini
+# ~/.config/systemd/user/jellyminer.service
+[Unit]
+Description=JellyMiner — JellyCoin GPU miner
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=%h/jellyminer-venv/bin/python %h/jellyminer.py --url http://127.0.0.1:8787 --token <TOKEN> --name <rig> --throttle 50
+Restart=on-failure
+RestartSec=15
+
+[Install]
+WantedBy=default.target
+```
+
+`systemctl --user daemon-reload && systemctl --user enable --now jellyminer` (plus
+`loginctl enable-linger` once, so it starts at boot without a login). Stop/start:
+`systemctl --user stop|start jellyminer`; logs: `journalctl --user -u jellyminer -f`.
+
+**Modern GPUs** work too, and fast (an RTX 3060 clears 500+ MH/s). If the card is *also*
+your AI box (LM Studio / ComfyUI), add `--throttle 50` so mining idles half the time and
+fills the gaps instead of fighting your models for the GPU. The GPU node already has a
+ready venv: `~/jellyminer-venv/bin/python jellyminer.py …`.
+
+## JLY is also the buddy-share compute coin
+
+If you've paired Store installs (Settings → Peers), JLY meters the shared AI helper:
+a buddy's box doing LLM work for us **earns** their `peer:<name>` wallet JLY from the
+treasury; a buddy running jobs on our node **spends** theirs (comped if broke — sharing
+never breaks over play money). Buddies check their balance via `/api/peers/rpc/wallet`.
+Toggle + price: **Crypto → 🪼 JellyCoin → Buddy compute**.
+
 While the God-Console toggle "Company skilling boosts mining" is on, the Company agents'
 woodcutting/mining/fishing queues up boost tickets — they pay out **inside your mined
 blocks** (bonus JLY split agent/company). No GPU online → no boosts, ever.

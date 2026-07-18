@@ -98,6 +98,8 @@ async function worldSettings() {
       ${chk('world_meetings_enabled', 'Hold town meetings')}
       ${num('world_meeting_interval_min', 'Meeting every', 'minutes')}
       ${chk('world_incidents_enabled', 'Random town incidents')}
+      ${chk('world_leader_upgrades', 'Mayor/Boss file real dev-swarm upgrades from the company fund (charged only when you approve)')}
+      ${num('world_leader_upgrade_hours', 'Leader proposal every', 'hours')}
       <div style="font-weight:600;color:#9fc0ff;margin:10px 0 4px">👁️ World-builder's eyes</div>
       ${chk('world_vision_enabled', 'Vision-review generated sprites')}
       ${num('world_vision_candidates', 'Candidates per build', 'pick best')}
@@ -106,6 +108,14 @@ async function worldSettings() {
       <div style="font-weight:600;color:#9fc0ff;margin:10px 0 4px">🎨 Pixel-art generation</div>
       ${txt('world_prop_model', 'Image model', 'blank = store default')}
       ${txt('world_prop_lora', 'Pixel-art LoRA', 'file:strength, blank = off')}
+      <div style="font-weight:600;color:#9fc0ff;margin:10px 0 4px">🧱 Terrain tileset</div>
+      <div style="display:flex;align-items:center;gap:8px;margin:7px 0;flex-wrap:wrap">
+        <button class="btn" style="padding:5px 12px;font-size:.76rem" onclick="worldTilesetGen()"
+          title="Render a 6-tile terrain set (grass/path/floor/wall/plaza/water) from the world theme with the pixel-art pipeline, made seamless, and swap it in for the procedural terrain. Takes a few minutes on the GPU.">🧱 Generate from theme</button>
+        <button class="btn" style="padding:5px 12px;font-size:.76rem" onclick="worldTilesetRemove()"
+          title="Remove the generated tileset — the map instantly falls back to the procedural terrain art.">🗑 Remove (procedural)</button>
+        <span id="ws-tileset-status" style="font-size:.72rem;color:#8a97ad"></span>
+      </div>
       <div style="font-weight:600;color:#9fc0ff;margin:10px 0 4px">🛡️ Real-world rules</div>
       ${num('world_min_item_cost', 'Min item cost', '🪙')}
       ${chk('world_allow_free', 'Allow free items')}
@@ -114,19 +124,56 @@ async function worldSettings() {
       ${chk('world_require_review', 'Require review before posting (no AI-junk dumps)')}
       <div style="font-weight:600;color:#9fc0ff;margin:10px 0 4px">🪼 JellyCoin</div>
       ${chk('world_crypto_mining_enabled', 'Skilling boosts GPU mining (pays only in real mined blocks)')}
+      <div style="font-weight:600;color:#9fc0ff;margin:10px 0 4px">🎵 Music</div>
+      ${chk('world_music_lyrics', 'Agents may write & sing their own lyrics (vocal songs via ACE-Step)')}
       <div style="display:flex;gap:8px;margin-top:14px">
         <button class="btn" style="padding:7px 14px" onclick="worldSaveSettings()">💾 Save</button>
         <button class="btn" style="padding:7px 14px" onclick="worldCloseModal()">Cancel</button>
       </div>`;
     _worldModal('⚙️ Company Settings', body);   // via the shared helper so the console tab strip renders
+    _tilesetStatus();
   } catch (e) { toast?.(e.message); }
 }
+async function _tilesetStatus() {
+  const el = document.getElementById('ws-tileset-status');
+  if (!el) return;
+  try {
+    const t = await api('/api/world/tileset');
+    el.textContent = (t.installed ? '✅ installed' : 'not installed')
+      + (t.state ? ` · ${t.state}${t.note ? ` (${t.note})` : ''}` : '');
+  } catch {}
+}
+async function worldTilesetGen() {
+  try {
+    await api('/api/world/tileset', { method: 'POST', body: '{}' });
+    toast?.('🧱 Generating terrain tiles — a few minutes on the GPU');
+    const el = document.getElementById('ws-tileset-status');
+    const tick = setInterval(async () => {
+      if (!document.getElementById('ws-tileset-status')) { clearInterval(tick); return; }
+      await _tilesetStatus();
+      const t = await api('/api/world/tileset').catch(() => null);
+      if (t && t.state !== 'generating') {
+        clearInterval(tick);
+        if (t.state === 'done') { toast?.('🧱 Tileset ready — reloading the map'); location.reload(); }
+      }
+    }, 5000);
+  } catch (e) { toast?.(e.message); }
+}
+async function worldTilesetRemove() {
+  try {
+    await api('/api/world/tileset', { method: 'DELETE' });
+    toast?.('🗑 Tileset removed — procedural terrain is back');
+    location.reload();
+  } catch (e) { toast?.(e.message); }
+}
+window.worldTilesetGen = worldTilesetGen; window.worldTilesetRemove = worldTilesetRemove;
 async function worldSaveSettings() {
   const keys = ['world_llm_enabled', 'world_llm_interval_min', 'world_active_start', 'world_active_end',
     'world_meetings_enabled', 'world_meeting_interval_min', 'world_incidents_enabled',
     'world_vision_enabled', 'world_vision_candidates', 'world_vision_retries', 'world_vision_min_score',
     'world_min_item_cost', 'world_allow_free', 'world_min_price_cents', 'world_max_discount_pct',
-    'world_require_review', 'world_prop_model', 'world_prop_lora', 'world_crypto_mining_enabled'];
+    'world_require_review', 'world_prop_model', 'world_prop_lora', 'world_crypto_mining_enabled',
+    'world_music_lyrics', 'world_leader_upgrades', 'world_leader_upgrade_hours'];
   const s = {};
   keys.forEach(k => { const el = document.getElementById('ws_' + k); if (el) s[k] = el.type === 'checkbox' ? (el.checked ? '1' : '0') : el.value; });
   try { await api('/api/world/settings', { method: 'POST', body: JSON.stringify({ settings: s }) });

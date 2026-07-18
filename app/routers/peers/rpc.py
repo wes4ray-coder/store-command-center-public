@@ -93,6 +93,26 @@ def rpc_ping(request: Request):
     return {"ok": True, "name": _my_name(), **_git_info(), "recently_promoted": promoted}
 
 
+@router.get("/api/peers/rpc/wallet", include_in_schema=False)
+def rpc_wallet(request: Request):
+    """A buddy checks their JellyCoin wallet ON OUR CHAIN: balance earned lending us
+    compute, spent using our AI helper, and their recent txs. Read-only by design —
+    spending happens implicitly via jobs (and the host's Crypto→JellyCoin tab)."""
+    peer = _peer_from_key(request)
+    import jellycoin
+    w = jellycoin.wallet(f"peer:{peer['name']}", kind="peer")
+    conn = get_conn()
+    txs = [dict(r) for r in conn.execute(
+        "SELECT time,frm,dst,amount,kind,memo FROM jelly_txs WHERE frm=? OR dst=? "
+        "ORDER BY id DESC LIMIT 20", (w["name"], w["name"])).fetchall()]
+    conn.close()
+    return {"ok": True, "symbol": jellycoin.SYMBOL, "wallet": w["name"],
+            "address": w["address"], "balance_jly": w["balance"] / jellycoin.UNIT,
+            "billing": jellycoin.peer_billing_enabled(),
+            "price_per_llm_job_jly": jellycoin.peer_job_price("llm") / jellycoin.UNIT,
+            "recent_txs": txs}
+
+
 class RpcReviewIn(BaseModel):
     title: Optional[str] = None
     diff: str
@@ -195,6 +215,13 @@ def rpc_job(body: RpcJobIn, request: Request):
     conn.commit()
     jid = cur.lastrowid
     conn.close()
+    # JellyCoin buddy economy: charge the peer's JLY wallet for using our AI helper
+    # (comped if broke — sharing never breaks over play money; toggle in Crypto→JellyCoin).
+    try:
+        import jellycoin
+        jellycoin.peer_job_charge(peer["name"], body.kind)
+    except Exception:
+        pass
 
     if body.kind == "embedding":
         text = (body.input or "")[:8000]

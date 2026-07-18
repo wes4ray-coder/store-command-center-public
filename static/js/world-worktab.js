@@ -76,7 +76,7 @@ async function _loadBills() {
         <input id="bill-unpause" type="number" placeholder="auto" min="0" title="Optional: refill starts again when stock falls to this (blank = ~75% of target)." style="width:52px;background:#0b1120;border:1px solid #33456b;color:#e8eefc;border-radius:5px;padding:3px 4px">
         <span style="color:#66738c;font-size:.66rem">min lv</span>
         <input id="bill-minlv" type="number" value="1" min="1" title="Only agents at or above this level take the bill." style="width:44px;background:#0b1120;border:1px solid #33456b;color:#e8eefc;border-radius:5px;padding:3px 4px">
-        <button class="btn" style="padding:3px 10px;font-size:.68rem" onclick="worldBillAdd()">+ add</button>
+        <button class="btn" style="padding:3px 10px;font-size:.68rem" onclick="worldBillAdd()">+ add bill</button>
         <label style="margin-left:auto;display:flex;align-items:center;gap:5px;font-size:.66rem;color:#c7d2e5" title="When ON, an active bill may start ONE real autopilot creation per interval — budget caps, review queue, taste and endorsements all still apply. Default off.">
           <input id="bill-drive" type="checkbox" ${drive ? 'checked' : ''} onchange="worldBillDrive(this.checked)" style="width:15px;height:15px">⚡ bills drive real production</label>
       </div></div>`;

@@ -149,7 +149,13 @@ def approve_job(jid: int):
                  "updated_at=datetime('now') WHERE id=?", (jid,))
     conn.execute("INSERT INTO swarm_events (job_id,agent,kind,content) VALUES (?,?,?,?)",
                  (jid, "you", "system", "APPROVED by you. Ready to promote dev → master → retail."))
-    conn.commit(); conn.close()
+    conn.commit()
+    try:                              # a leader-filed upgrade charges the company fund on approval
+        import world_leader
+        world_leader.charge_on_approval(conn, jid)
+    except Exception:
+        pass
+    conn.close()
     return {"ok": True, "decision": "approved"}
 
 
@@ -341,9 +347,15 @@ def promote_job(jid: int, body: dict = None):
             _swarm_event(jid, "system", "error",
                          "Stashed work could not auto-restore — recover it with `git stash pop` "
                          f"in {REPO_MASTER}. {out[:200]}")
-    # 5. resync retail to master, scrub for PUBLIC release, republish as a clean
-    #    parentless commit. retail must carry no real IPs/domains/identity/private
-    #    docs, AND none of master's history (which still holds them).
+    # 5. resync retail to master, scrub for PUBLIC release, republish. retail must carry
+    #    no real IPs/domains/identity/private docs, AND none of master's history (which
+    #    still holds them). We CHAIN each publish onto the PREVIOUS public commit (never
+    #    onto master): the public branch gets a normal linear history that consumers can
+    #    `git pull --ff-only` (that's what /api/system/update-apply does) — while master's
+    #    dirty history is never an ancestor. The tree is still rebuilt fresh from master +
+    #    scrub each time, so no un-scrubbed blob is ever referenced.
+    prev_retail = (_gitc(REPO_RETAIL, "rev-parse", "--verify", "-q", "retail")[1].strip()
+                   or _gitc(REPO_RETAIL, "rev-parse", "--verify", "-q", "origin/retail")[1].strip())
     rc, out = _gitc(REPO_RETAIL, "reset", "--hard", "master"); log_step("retail reset→master", rc, out)
     import retail_scrub  # lazy: this module is dropped from retail, so import only here
     try:
@@ -361,15 +373,21 @@ def promote_job(jid: int, body: dict = None):
                      + ", ".join(leaks[:20]) + ". Update retail_scrub.RETAIL_REPLACEMENTS/RETAIL_DROP.")
     else:
         log_step("retail VERIFY", 0, "clean — no identifiers survived the scrub")
-        # Publish the scrubbed tree as a PARENTLESS commit so master's history (which
-        # still contains the real values) never reaches the public branch.
+        # Publish the scrubbed tree, chained onto the PREVIOUS public commit (prev_retail)
+        # so consumers can fast-forward. The parent is a prior SCRUBBED commit, never
+        # master, so master's real-identifier history is still never an ancestor. The
+        # very first publish (no prev_retail) is parentless.
         rc, tree = _gitc(REPO_RETAIL, "write-tree")
-        rc2, commit = _gitc(REPO_RETAIL, "commit-tree", tree.strip(), "-m",
-                            f"Store Command Center — public release (genericized, job #{jid})")
+        ct_args = ["commit-tree", tree.strip()]
+        if prev_retail:
+            ct_args += ["-p", prev_retail]
+        ct_args += ["-m", f"Store Command Center — public release (genericized, job #{jid})"]
+        rc2, commit = _gitc(REPO_RETAIL, *ct_args)
         if rc2 == 0 and commit.strip():
             rc, out = _gitc(REPO_RETAIL, "reset", "--hard", commit.strip())
-            log_step("retail orphan commit", rc, out)
-            # retail history is replaced each promote → force (lease guards a concurrent push).
+            log_step("retail publish commit", rc, out)
+            # Chained onto the prior public tip → a normal fast-forward push. force-with-lease
+            # stays as a guard (we reset the local branch) and covers the rare re-root case.
             rc, out = _gitc(REPO_RETAIL, "push", "--force-with-lease", "origin", "retail")
             log_step("push retail", rc, out)
         else:

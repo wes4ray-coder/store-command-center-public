@@ -201,10 +201,15 @@ def difficulty(target: int) -> float:
 
 
 # ── wallets & transfers ──────────────────────────────────────────────────────
+_KIND_PREFIX = {"peer:": "peer", "miner:": "miner", "agent:": "agent"}
+
+
 def _wallet(conn, name: str, kind: str = "user"):
     row = conn.execute("SELECT * FROM jelly_wallets WHERE name=?", (name,)).fetchone()
     if row:
         return row
+    if kind == "user":      # auto-created wallets (e.g. a transfer target) keep their kind
+        kind = next((k for pre, k in _KIND_PREFIX.items() if name.startswith(pre)), "user")
     addr = "jly1" + secrets.token_hex(18)
     conn.execute("INSERT INTO jelly_wallets (name,address,balance,kind) VALUES (?,?,0,?)",
                  (name, addr, kind))
@@ -450,6 +455,73 @@ def transfer_nft(token_id: str, frm: str, dst: str) -> dict:
         return {"ok": True, "token_id": token_id, "owner": dst}
     finally:
         conn.close()
+
+
+# ── buddy-share compute economy (peers federation) ───────────────────────────
+# JLY is the working coin of the peer network: when a buddy's box does AI work
+# for us (client.delegate_llm), our treasury PAYS their peer:<name> wallet; when
+# a buddy runs a job on OUR AI helper (rpc_job), their wallet is CHARGED into the
+# company wallet. A broke buddy is never blocked — the job runs comped (amount-0
+# tx keeps the tab) because compute sharing must not break over play money.
+PEER_BILLING_KEY = "jelly_peer_billing"            # settings toggle, default on
+PEER_PRICE_KEY = "jelly_peer_job_price_jly"        # JLY per llm job, default 1
+PEER_PRICE_DEFAULT = 1.0
+
+
+def peer_billing_enabled() -> bool:
+    from deps import get_setting
+    return str(get_setting(PEER_BILLING_KEY) or "1") in ("1", "true", "on")
+
+
+def peer_job_price(kind: str = "llm") -> int:
+    """Price in ujly. Embeddings are 1/10th of an llm job (they borrow, never swap)."""
+    from deps import get_setting
+    try:
+        jly = float(get_setting(PEER_PRICE_KEY) or PEER_PRICE_DEFAULT)
+    except Exception:
+        jly = PEER_PRICE_DEFAULT
+    price = int(max(0.0, jly) * UNIT)
+    return price // 10 if kind == "embedding" else price
+
+
+def peer_job_charge(peer_name: str, kind: str = "llm") -> dict:
+    """Inbound: a buddy used OUR AI helper. Charge their wallet → company (or comp)."""
+    if not peer_billing_enabled():
+        return {"billed": False, "reason": "billing off"}
+    price = peer_job_price(kind)
+    wname = f"peer:{peer_name}"
+    if price <= 0:
+        return {"billed": False, "reason": "free"}
+    try:
+        transfer(wname, COMPANY, price, memo=f"{kind} job on our node", kind="compute")
+        return {"billed": True, "amount": price}
+    except ValueError:                      # broke buddy → job still runs, tab recorded
+        conn = get_conn()
+        try:
+            _ensure(conn)
+            _wallet(conn, wname, kind="peer")
+            conn.execute("INSERT INTO jelly_txs (height,time,frm,dst,amount,kind,memo) VALUES (?,?,?,?,0,?,?)",
+                         (_tip_height(conn), int(time.time()), wname, COMPANY,
+                          "compute_comped", f"{kind} job comped (insufficient JLY)"))
+            conn.commit()
+        finally:
+            conn.close()
+        return {"billed": False, "reason": "comped"}
+
+
+def peer_job_credit(peer_name: str, kind: str = "llm") -> dict:
+    """Outbound: a buddy's box did AI work FOR us. Treasury pays their peer wallet."""
+    if not peer_billing_enabled():
+        return {"billed": False, "reason": "billing off"}
+    price = peer_job_price(kind)
+    if price <= 0:
+        return {"billed": False, "reason": "free"}
+    try:
+        transfer(TREASURY, f"peer:{peer_name}", price,
+                 memo=f"{kind} job lent to us — thanks!", kind="compute")
+        return {"billed": True, "amount": price}
+    except ValueError:
+        return {"billed": False, "reason": "treasury empty"}
 
 
 # ── status ───────────────────────────────────────────────────────────────────

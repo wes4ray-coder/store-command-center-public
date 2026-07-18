@@ -258,6 +258,81 @@ def personal_create(c, a):
     return True
 
 
+# ── self-generated APPEARANCE: an agent commissions their own look ────────────
+MAKEOVER_COST = 80
+MAKEOVER_COOLDOWN_SEC = 24 * 3600
+
+def agent_makeover(c, a, charge=True):
+    """Queue a custom full-body sprite for this agent (LoRA pipeline + transparent
+    knockout). Same GPU discipline as props: one render at a time, nothing else
+    queued, real store work outranks it in the orch queue."""
+    import time as _t
+    from world_defs import mget, mset
+    if _gen_lock.locked():
+        return {"ok": False, "msg": "the workshop is busy"}
+    if charge and (a["coins"] or 0) < MAKEOVER_COST:
+        return {"ok": False, "msg": f"needs {MAKEOVER_COST} coins"}
+    if _t.time() - float(mget(c, f"mk_t_{a['key']}", 0) or 0) < MAKEOVER_COOLDOWN_SEC:
+        return {"ok": False, "msg": "already had a makeover today"}
+    if c.execute("SELECT COUNT(*) FROM world_props WHERE status IN ('queued','generating')").fetchone()[0]:
+        return {"ok": False, "msg": "the render lane is busy — try again soon"}
+    # every guard passed — only NOW charge + burn the cooldown (a refused
+    # attempt must never cost coins or the daily slot)
+    if charge:
+        c.execute("UPDATE world_agents SET coins=coins-? WHERE id=?", (MAKEOVER_COST, a["id"]))
+        from world_defs import mget as _mg
+        mset(c, "company_fund", int(float(_mg(c, "company_fund", 0) or 0)) + MAKEOVER_COST)
+    mset(c, f"mk_t_{a['key']}", _t.time())
+    _event(c, a["key"], "want", f"🎨 {a['name']} is having a custom look made at the studio.")
+    threading.Thread(target=_generate_agent_sprite, args=(a["id"],), daemon=True).start()
+    return {"ok": True}
+
+
+def _generate_agent_sprite(agent_id: int):
+    """Render one full-body character sprite through the current pixel pipeline."""
+    if not _gen_lock.acquire(blocking=False):
+        return
+    try:
+        conn = get_conn()
+        try:
+            row = conn.execute("SELECT * FROM world_agents WHERE id=?", (agent_id,)).fetchone()
+            if not row:
+                return
+            a = dict(row)
+        finally:
+            conn.close()
+        from world_defs import DEPARTMENTS
+        dept = DEPARTMENTS.get(a["dept"], (a["dept"], ""))[0]
+        prompt = pixel_prompt(f"full-body standing villager game character, a {dept} worker, "
+                              f"friendly face, front view, whole body visible head to feet")
+        raw = WORLD_ASSETS / f"agent_{a['key']}_raw.png"
+        final = WORLD_ASSETS / f"agent_{a['key']}.png"
+        import random as _r
+        res = subprocess.run([str(GENERATE_SCRIPT), prompt, str(raw), "768", "768", "8",
+                              str(_r.randint(1, 2**31 - 1)), DEFAULT_IMAGE_MODEL,
+                              ws.s("world_prop_lora")],
+                             capture_output=True, text=True, timeout=300)
+        if res.returncode != 0 or not raw.exists():
+            logger.error("agent sprite %s failed: %s", a["key"], (res.stderr or "")[:160])
+            return
+        _pixelate(raw, final, cells=64, colors=28)
+        try:
+            raw.unlink()
+        except Exception:
+            pass
+        conn = get_conn()
+        try:
+            conn.execute("UPDATE world_agents SET sprite_path=? WHERE id=?",
+                         (f"/store/static/world_assets/{final.name}", agent_id))
+            conn.execute("INSERT INTO world_events (agent_key,kind,text) VALUES (?,?,?)",
+                         (a["key"], "system", f"✨ {a['name']} debuts a brand-new look!"))
+            conn.commit()
+        finally:
+            conn.close()
+    finally:
+        _gen_lock.release()
+
+
 _last_autobuild = [0.0]
 
 def maybe_autobuild(conn):

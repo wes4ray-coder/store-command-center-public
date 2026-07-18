@@ -641,7 +641,7 @@ def analyze_logs(length: int = 800):
         return {"analyzed": len(qs), "findings_added": added, "score": _score()}
 
     _audit("analyze", "logs", f"{len(qs)} queries")
-    tid = orch.submit_llm(_work, desc="AI network log analysis", priority=2)   # background
+    tid = orch.submit_llm(_work, desc="AI network log analysis", priority=2, task="security_analyze")   # background
     return {"task_id": tid}
 
 

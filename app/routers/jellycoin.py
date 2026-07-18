@@ -31,11 +31,13 @@ _MINER_FILE = Path(__file__).resolve().parent.parent.parent / "miner" / "jellymi
 
 
 def _miner_token() -> str:
-    tok = get_setting(MINER_TOKEN_KEY)
+    tok = get_setting(MINER_TOKEN_KEY)      # get_setting transparently decrypts
     if not tok:
+        import crypto as _secrets_at_rest   # app/crypto.py — settings encryption
         tok = secrets.token_hex(16)
         conn = get_conn()
-        conn.execute("INSERT OR REPLACE INTO settings (key,value) VALUES (?,?)", (MINER_TOKEN_KEY, tok))
+        conn.execute("INSERT OR REPLACE INTO settings (key,value) VALUES (?,?)",
+                     (MINER_TOKEN_KEY, _secrets_at_rest.enc(tok)))
         conn.commit()
         conn.close()
     return tok
@@ -106,6 +108,53 @@ def jelly_tip(payload: dict = Body(...)):
         raise HTTPException(400, str(e))
 
 
+@router.get("/api/jelly/stats")
+def jelly_stats(points: int = 160):
+    """Chart series derived from the block table: difficulty, block interval,
+    cumulative supply (each downsampled to ≤`points`), plus blocks per rig."""
+    points = max(10, min(500, points))
+    conn = get_conn()
+    try:
+        jellycoin.ensure_schema(conn)
+        rows = conn.execute("SELECT height,time,target,reward,boost,miner FROM jelly_blocks "
+                            "ORDER BY height").fetchall()
+        per_rig = [dict(r) for r in conn.execute(
+            "SELECT miner, COUNT(*) blocks FROM jelly_blocks WHERE height>0 "
+            "GROUP BY miner ORDER BY blocks DESC LIMIT 8")]
+    finally:
+        conn.close()
+    series = []
+    supply = 0
+    for i, r in enumerate(rows):
+        supply += int(r["reward"]) + int(r["boost"])
+        series.append({
+            "h": int(r["height"]), "t": int(r["time"]),
+            "difficulty": round(jellycoin.difficulty(int(r["target"], 16)), 2),
+            "interval": (int(r["time"]) - int(rows[i - 1]["time"])) if i else None,
+            "supply": round(supply / jellycoin.UNIT, 2),
+        })
+    if len(series) > points:                      # keep first/last, stride the middle
+        step = len(series) / points
+        series = [series[int(i * step)] for i in range(points - 1)] + [series[-1]]
+    return {"series": series, "per_rig": per_rig,
+            "target_block_sec": jellycoin.TARGET_BLOCK_SEC}
+
+
+_DOCS = {"whitepaper": "WHITEPAPER.md", "security": "SECURITY.md"}
+_DOCS_DIR = Path(__file__).resolve().parent.parent.parent / "docs" / "jellycoin"
+
+
+@router.get("/api/jelly/doc/{name}")
+def jelly_doc(name: str):
+    """Serve the JellyCoin white paper / security-protocol docs (markdown, read-only)."""
+    fn = _DOCS.get(name)
+    if not fn or not (_DOCS_DIR / fn).is_file():
+        raise HTTPException(404, f"doc must be one of {sorted(_DOCS)}")
+    from fastapi.responses import PlainTextResponse
+    return PlainTextResponse((_DOCS_DIR / fn).read_text(encoding="utf-8"),
+                             media_type="text/markdown")
+
+
 # ── mining (LAN-reachable, token-guarded; GPU rigs only — server never mines) ─
 @router.get("/api/jelly/mining/work")
 def jelly_work(request: Request, miner: str, gpu: str = "", hashrate: float = 0.0):
@@ -142,6 +191,39 @@ def jelly_miner_token():
     return {"token": tok,
             "run": (f"python3 jellyminer.py --url http://127.0.0.1:8787 "
                     f"--token {tok} --name $(hostname)")}
+
+
+# ── buddy-share compute billing (peers federation) ───────────────────────────
+@router.get("/api/jelly/peer-billing")
+def jelly_peer_billing():
+    conn = get_conn()
+    try:
+        jellycoin.ensure_schema(conn)
+        peers = [dict(r) for r in conn.execute(
+            "SELECT name,balance FROM jelly_wallets WHERE kind='peer' ORDER BY balance DESC")]
+        comped = conn.execute("SELECT COUNT(*) c FROM jelly_txs WHERE kind='compute_comped'").fetchone()["c"]
+    finally:
+        conn.close()
+    return {"enabled": jellycoin.peer_billing_enabled(),
+            "price_jly": jellycoin.peer_job_price("llm") / jellycoin.UNIT,
+            "embedding_price_jly": jellycoin.peer_job_price("embedding") / jellycoin.UNIT,
+            "peer_wallets": peers, "comped_jobs": int(comped)}
+
+
+@router.post("/api/jelly/peer-billing")
+def jelly_peer_billing_set(payload: dict = Body(...)):
+    conn = get_conn()
+    try:
+        if "enabled" in payload:
+            conn.execute("INSERT OR REPLACE INTO settings (key,value) VALUES (?,?)",
+                         (jellycoin.PEER_BILLING_KEY, "1" if payload["enabled"] else "0"))
+        if "price_jly" in payload:
+            conn.execute("INSERT OR REPLACE INTO settings (key,value) VALUES (?,?)",
+                         (jellycoin.PEER_PRICE_KEY, str(max(0.0, float(payload["price_jly"])))))
+        conn.commit()
+    finally:
+        conn.close()
+    return jelly_peer_billing()
 
 
 # ── NFTs ─────────────────────────────────────────────────────────────────────

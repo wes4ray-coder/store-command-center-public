@@ -165,9 +165,12 @@ BOX_VENV_PYTHON = _env("STORE_BOX_VENV_PYTHON", "~/ComfyUI/venv/bin/python3")
 BOX_HF_CACHE    = _env("STORE_BOX_HF_CACHE", "~/.cache/huggingface/hub")
 # Per-type HuggingFace homes on the node's model SSD (models separated by type).
 # Each pipeline sets HF_HOME to its own folder so video/audio/3D weights never mix.
+# These env values are FALLBACKS — the live `models_dir_<kind>` settings (Settings →
+# 🧠 Models → 📁 Storage, resolved via app/model_paths.py) win when set.
 NODE_HF_VIDEO   = _env("STORE_HF_VIDEO", "/media/user/SSD/models_video")
 NODE_HF_AUDIO   = _env("STORE_HF_AUDIO", "/media/user/SSD/models_audio")
 NODE_HF_3D      = _env("STORE_HF_3D",    "/media/user/SSD/models_3d")
+NODE_LLM_DIR    = _env("STORE_NODE_LLM_DIR", "/media/user/SSD/models_llm")   # LM Studio's folder (informational)
 
 # ── Default models (also overridable live in the Settings tab, which wins) ────
 ENHANCE_MODEL_DEFAULT       = _env("STORE_ENHANCE_MODEL", "google/gemma-4-12b-qat")

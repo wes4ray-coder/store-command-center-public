@@ -46,8 +46,10 @@ def _loaded_llms() -> list:
         return []
     try:
         data = _json.loads(out)
-        return [m.get("modelKey") or m.get("identifier")
-                for m in data if m.get("type") == "llm" and (m.get("modelKey") or m.get("identifier"))]
+        # identifier FIRST — aliases like `model@cpu` are addressed by identifier,
+        # and chat routing must match what the API actually serves under.
+        return [m.get("identifier") or m.get("modelKey")
+                for m in data if m.get("type") == "llm" and (m.get("identifier") or m.get("modelKey"))]
     except Exception:
         return []
 
@@ -83,10 +85,40 @@ def _idle_ttl() -> int:
     return 1800
 
 
+def _model_cfg_of(model: str) -> dict:
+    try:
+        import json as _json
+        from deps import get_setting
+        return (_json.loads(get_setting("llm_model_cfg", "{}") or "{}")).get(model) or {}
+    except Exception:
+        return {}
+
+
 def _load_args(model: str) -> list:
-    """`lms load` argv with an idle TTL appended so the model auto-unloads when idle."""
+    """`lms load` argv: idle TTL + per-model LOAD-TIME settings from the
+    llm_model_cfg registry — context_length, gpu ratio, parallel prompt slots,
+    and a per-model ttl. MULTI-MODEL: an id ending in `@cpu` loads the SAME
+    underlying model as a second CPU-placed instance under that alias
+    (`--identifier` — the supported version of the copy-and-rename trick), so a
+    full-speed GPU model and CPU side-models can serve at the same time."""
     ttl = _idle_ttl()
-    return ["load", model] + (["--ttl", str(ttl)] if ttl > 0 else [])
+    alias = None
+    real = model
+    if model.endswith("@cpu"):
+        alias, real = model, model[:-4]
+    args = ["load", real]
+    cfg = _model_cfg_of(model)
+    if alias:
+        args += ["--identifier", alias, "--gpu", "off"]
+    elif cfg.get("gpu") not in (None, ""):
+        args += ["--gpu", str(cfg["gpu"])]
+    if cfg.get("context_length"):
+        args += ["--context-length", str(int(cfg["context_length"]))]
+    if cfg.get("parallel"):
+        args += ["--parallel", str(int(cfg["parallel"]))]
+    if cfg.get("ttl"):
+        ttl = int(cfg["ttl"])
+    return args + (["--ttl", str(ttl)] if ttl > 0 else [])
 
 
 def _ssh(*args, timeout: int = 15) -> tuple[int, str]:
@@ -211,6 +243,7 @@ class Orchestrator:
         retry_meta: Optional[dict] = None,
         model: Optional[str] = None,
         priority: int = 1,
+        task: Optional[str] = None,
     ) -> int:
         """Submit an LLM task. Returns task_id immediately (non-blocking).
 
@@ -218,6 +251,13 @@ class Orchestrator:
         resident LLM (verified via `lms ps`) before running `func`; the orchestrator
         is the single authority for model loading, so nothing races `lms` in parallel.
         If omitted, the worker borrows whatever model is already loaded (legacy path)."""
+
+        if model is None and task:
+            try:                       # per-task override (Settings → Prompts picker)
+                import model_registry
+                model = model_registry.for_task(task) or None
+            except Exception:
+                model = None
         with self._lock:
             tid = self._counter
             self._counter += 1
@@ -555,11 +595,19 @@ class Orchestrator:
         if ok:
             self._current_llm_model = model
             return True
-        # `lms load` is SYNCHRONOUS (blocks until the model is ready) and evicting the
-        # resident model first avoids the HTTP hot-swap that 400s. Try up to twice.
+        # `lms load` is SYNCHRONOUS (blocks until the model is ready). MULTI-MODEL
+        # eviction policy: CPU-placed instances (`@cpu` / gpu:"off") and PINNED
+        # models coexist and are never evicted; only unpinned GPU residents are
+        # cleared to make room for a new GPU model. A `@cpu` load evicts nothing.
+        new_is_cpu = model.endswith("@cpu") or str(_model_cfg_of(model).get("gpu")) == "off"
         for attempt in range(2):
             _, loaded = _match()
-            for m in loaded:                   # GPU_EXCLUSIVE → evict first
+            for m in loaded:
+                if new_is_cpu:
+                    continue                    # CPU loads never displace anyone
+                mc = _model_cfg_of(m)
+                if m.endswith("@cpu") or str(mc.get("gpu")) == "off" or mc.get("pin"):
+                    continue                    # CPU side-models + pinned stay resident
                 _ssh(LMS, "unload", m, timeout=20)
             log.info("[orch] ensure_loaded: loading '%s' (attempt %d)", model, attempt + 1)
             _ssh(LMS, *_load_args(model), timeout=240)

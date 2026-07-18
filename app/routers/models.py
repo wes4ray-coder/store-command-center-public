@@ -3,8 +3,23 @@ from fastapi import APIRouter, HTTPException, BackgroundTasks, Request, Form, Up
 from deps import *
 from services import *
 import model_registry
+import model_paths as _mp
 
 router = APIRouter()
+
+
+def _dest_dir(m):
+    """Download destination for a catalog entry: its own dest_dir (loras/upscalers/
+    controlnet keep their ComfyUI subfolders) — but entries on the CHECKPOINT default
+    follow the live 📁 Storage setting so users can relocate their models drive."""
+    d = m.get("dest_dir") or COMFY_CKPT
+    return _mp.primary("image") if d == COMFY_CKPT else d
+
+
+@router.get("/api/models/storage")
+def model_storage():
+    """📁 Storage locations per model kind (setting + effective + fallback)."""
+    return {"kinds": _mp.snapshot()}
 
 
 @router.get("/api/models/registry")
@@ -63,12 +78,12 @@ def start_model_download(filename: str):
         return {"ok": True, "status": "already_downloading"}
 
     url  = m["download_url"]
-    dest = f"{m.get('dest_dir', COMFY_CKPT)}/{filename}"
+    dest = f"{_dest_dir(m)}/{filename}"
     # Use /tmp on the box so ComfyUI never sees the partial file
     tmp  = f"/tmp/.dl_{filename}"
     # mkdir the dest dir first — specialty dirs (rmbg/, sometimes controlnet/) may not
     # exist yet on a fresh box, which would make the final `mv` fail.
-    dest_dir = m.get("dest_dir", COMFY_CKPT)
+    dest_dir = _dest_dir(m)
     cmd  = f"mkdir -p {dest_dir} && wget -q -O {tmp} '{url}' 2>&1 && mv {tmp} {dest}"
 
     proc = subprocess.Popen(
@@ -231,7 +246,7 @@ def list_video_models():
         installed = False
         try:
             r = subprocess.run(
-                BOX_SSH + [f"ls {NODE_HF_VIDEO}/hub/models--{key}/snapshots/ 2>/dev/null | wc -l"],
+                BOX_SSH + [f"ls {_mp.primary("video")}/hub/models--{key}/snapshots/ 2>/dev/null | wc -l"],
                 capture_output=True, text=True, timeout=8,
             )
             installed = int((r.stdout or "0").strip()) > 0
@@ -255,7 +270,7 @@ def start_video_model_download(key: str):
 
     model_id = catalogue[key]["model_id"]
     cmd = (
-        f"HF_HOME={NODE_HF_VIDEO} {BOX_VENV_PYTHON} -c \""
+        f"HF_HOME={_mp.primary("video")} {BOX_VENV_PYTHON} -c \""
         f"from huggingface_hub import snapshot_download; "
         f"snapshot_download('{model_id}')\""
     )
@@ -304,7 +319,7 @@ def video_model_download_status(key: str):
     if job["status"] == "downloading":
         try:
             r = subprocess.run(
-                BOX_SSH + [f"du -sb {NODE_HF_VIDEO}/hub/models--{key}/ 2>/dev/null | cut -f1 || echo 0"],
+                BOX_SSH + [f"du -sb {_mp.primary("video")}/hub/models--{key}/ 2>/dev/null | cut -f1 || echo 0"],
                 capture_output=True, text=True, timeout=5,
             )
             result["bytes_downloaded"] = int((r.stdout or "0").strip() or 0)

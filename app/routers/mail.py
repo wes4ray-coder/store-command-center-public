@@ -209,16 +209,21 @@ def draft_quote(req: DraftIn):
             except Exception:
                 pass
         model = getattr(orch, "_current_llm_model", None) or ENHANCE_MODEL
+        try:                            # editable copy in the prompt registry (mail_quote)
+            from prompts import get_prompt
+            quote_sys = get_prompt("mail_quote")
+        except Exception:
+            quote_sys = _QUOTE_SYS
         if len(content) > 1:
             # Vision: the model 400s on a separate system role next to images → fold the
             # instructions into the user turn instead.
-            content[0]["text"] = (_QUOTE_SYS + "\n\n----\n" + content[0]["text"] +
+            content[0]["text"] = (quote_sys + "\n\n----\n" + content[0]["text"] +
                 "\n\nThe customer attached the photo(s) above. Look at them to judge the actual "
                 "scope, materials, and any rot/damage, and factor that into your hours estimate. "
                 "Mention what you can see in the photos.")
             messages = [{"role": "user", "content": content}]
         else:
-            messages = [{"role": "system", "content": _QUOTE_SYS},
+            messages = [{"role": "system", "content": quote_sys},
                         {"role": "user", "content": content[0]["text"]}]
         body = {"model": model, "messages": messages,
                 "max_tokens": 750, "temperature": 0.7, "reasoning_effort": "none"}
@@ -227,7 +232,7 @@ def draft_quote(req: DraftIn):
         out = (r.json()["choices"][0]["message"].get("content") or "").strip()
         out = re.sub(r"<think>.*?</think>", "", out, flags=re.DOTALL).strip()
         return {"quote": out, "photos_analyzed": len(content) - 1}
-    tid = orch.submit_llm(_work, desc="Draft carpentry quote (vision)")
+    tid = orch.submit_llm(_work, desc="Draft carpentry quote (vision)", task="mail_quote")
     return {"task_id": tid}
 
 

@@ -14,7 +14,7 @@ import logging
 
 logger = logging.getLogger("store")
 
-GATHER = ("woodcutting", "mining", "farming", "fishing", "construction")
+GATHER = ("woodcutting", "mining", "farming", "fishing", "construction", "hunting")
 
 
 # ── assists: helping is a first-class stat (anti-selfishness pressure) ────────

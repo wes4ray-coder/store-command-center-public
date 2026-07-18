@@ -56,5 +56,5 @@ def api_test_prompt(key: str, body: dict):
     def _work():
         return {"output": _call_lmstudio(sysp, inp, max_tokens=500)}
 
-    tid = orch.submit_llm(_work, desc=f"Test prompt: {key}", priority=0)   # user waiting
+    tid = orch.submit_llm(_work, desc=f"Test prompt: {key}", priority=0, task=key)   # user waiting
     return {"task_id": tid}

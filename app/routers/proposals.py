@@ -85,6 +85,7 @@ def enhance_proposal_prompt(proposal_id: int):
         _work,
         desc=f"Enhance proposal {proposal_id}: {row['title'][:40]}",
         retry_meta={"type": "enhance", "proposal_id": proposal_id, "prompt": concept},
+        task="image_enhance",
     )
     return {"task_id": tid, "proposal_id": proposal_id}
 

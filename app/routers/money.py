@@ -266,7 +266,7 @@ def run_review():
         return {"proposed": len(missions), "signals_reviewed": len(sig_ids),
                 "missions": missions}
 
-    tid = orch.submit_llm(_work, desc=f"Money review: {len(signals)} signals", priority=2)  # autonomous
+    tid = orch.submit_llm(_work, desc=f"Money review: {len(signals)} signals", priority=2, task="money_gap_review")  # autonomous
     return {"task_id": tid, "signals": len(signals)}
 
 
@@ -357,7 +357,7 @@ def hunt_leads():
             c.close()
         return {"proposed": len(missions), "screened": len(fresh)}
 
-    tid = orch.submit_llm(_work, desc=f"Lead hunt: {len(fresh)} results", priority=2)  # autonomous
+    tid = orch.submit_llm(_work, desc=f"Lead hunt: {len(fresh)} results", priority=2, task="money_lead_hunt")  # autonomous
     return {"task_id": tid, "results": len(results), "fresh": len(fresh)}
 
 

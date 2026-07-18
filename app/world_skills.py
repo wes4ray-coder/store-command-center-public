@@ -16,7 +16,7 @@ from world_defs import mget, mset
 from world_balance import KNOWLEDGE_WAGE_FACTOR
 
 # gathering/craft skills (idle labour) + combat/scholarly (raid & library)
-GATHER = ["woodcutting", "mining", "farming", "fishing", "construction"]
+GATHER = ["woodcutting", "mining", "farming", "fishing", "construction", "hunting"]
 COMBAT = ["attack", "defense", "knowledge"]
 ALL_SKILLS = GATHER + COMBAT
 
@@ -27,6 +27,7 @@ SKILL_META = {
     "farming":      ("farm",    "tending crops",  "crops",  "🌾"),
     "fishing":      ("fish",    "fishing",        "fish",   "🎣"),
     "construction": ("build",   "hammering away", "planks", "🔨"),
+    "hunting":      ("hunt",    "stalking game",  "venison", "🏹"),   # the wilds feed the shop
 }
 
 NODE_SKILL = {v[0]: k for k, v in SKILL_META.items()}   # node location key → skill (reverse map)

@@ -1,18 +1,92 @@
 {
   "_readme": "Maps downloaded pixel-art packs into the world. See README.md. Empty/missing entries fall back to the world's procedural art, so this file is safe to leave partly filled. STEPS: (1) put the pack PNG(s) in this folder; (2) add each to 'atlases' with a unique id + filename; (3) fill each sprite/tile's pixel coords x,y,w,h within its atlas. The 5 structures below become department workstations (see DEPT_STATION in tab-world.js).",
-
-  "atlases": [],
-
+  "atlases": [
+    {
+      "id": "gen",
+      "src": "gen_futuristic.png"
+    }
+  ],
   "sprites": {
-    "workbench":     { "atlas": "", "x": 0, "y": 0, "w": 16, "h": 16 },
-    "furnace":       { "atlas": "", "x": 0, "y": 0, "w": 16, "h": 16 },
-    "alchemy_table": { "atlas": "", "x": 0, "y": 0, "w": 16, "h": 16 },
-    "anvil":         { "atlas": "", "x": 0, "y": 0, "w": 16, "h": 16 },
-    "sawmill":       { "atlas": "", "x": 0, "y": 0, "w": 16, "h": 16 }
+    "workbench": {
+      "atlas": "",
+      "x": 0,
+      "y": 0,
+      "w": 16,
+      "h": 16
+    },
+    "furnace": {
+      "atlas": "",
+      "x": 0,
+      "y": 0,
+      "w": 16,
+      "h": 16
+    },
+    "alchemy_table": {
+      "atlas": "",
+      "x": 0,
+      "y": 0,
+      "w": 16,
+      "h": 16
+    },
+    "anvil": {
+      "atlas": "",
+      "x": 0,
+      "y": 0,
+      "w": 16,
+      "h": 16
+    },
+    "sawmill": {
+      "atlas": "",
+      "x": 0,
+      "y": 0,
+      "w": 16,
+      "h": 16
+    }
   },
-
   "tiles": {
-    "_note": "OPTIONAL terrain override — map our tile keys to atlas cells (16x16) to replace procedural tiles. Leave empty to keep procedural terrain.",
-    "grass": null, "path": null, "floor": null, "wall": null, "water": null, "tree": null, "plaza": null
+    "_note": "OPTIONAL terrain override \u2014 map our tile keys to atlas cells (16x16) to replace procedural tiles. Leave empty to keep procedural terrain.",
+    "grass": {
+      "atlas": "gen",
+      "x": 0,
+      "y": 0,
+      "w": 64,
+      "h": 64
+    },
+    "path": {
+      "atlas": "gen",
+      "x": 64,
+      "y": 0,
+      "w": 64,
+      "h": 64
+    },
+    "floor": {
+      "atlas": "gen",
+      "x": 128,
+      "y": 0,
+      "w": 64,
+      "h": 64
+    },
+    "wall": {
+      "atlas": "gen",
+      "x": 192,
+      "y": 0,
+      "w": 64,
+      "h": 64
+    },
+    "water": {
+      "atlas": "gen",
+      "x": 320,
+      "y": 0,
+      "w": 64,
+      "h": 64
+    },
+    "tree": null,
+    "plaza": {
+      "atlas": "gen",
+      "x": 256,
+      "y": 0,
+      "w": 64,
+      "h": 64
+    }
   }
 }

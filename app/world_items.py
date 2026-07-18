@@ -32,6 +32,8 @@ CATALOG = {
     "stew":      {"name": "hearty stew",    "emoji": "🍲", "size": "s", "price": 14,  "spot": "food", "eff": {"hunger": 48}},
     "cake":      {"name": "slice of cake",  "emoji": "🍰", "size": "s", "price": 16,  "spot": "food", "eff": {"hunger": 22, "fun": 12}},
     "apple":     {"name": "apple",          "emoji": "🍎", "size": "s", "price": 5,   "spot": "food", "eff": {"hunger": 16}},
+    # supplied by HUNTERS — only on the shelf while the stockpile holds venison
+    "venison":   {"name": "venison roast",  "emoji": "🍖", "size": "s", "price": 18,  "spot": "food", "eff": {"hunger": 55, "fun": 6}, "stock": "venison"},
     # house furniture
     "book":      {"name": "novel",          "emoji": "📕", "size": "s", "price": 24,  "spot": "house"},
     "houseplant": {"name": "houseplant",    "emoji": "🪴", "size": "s", "price": 30,  "spot": "house"},
@@ -172,17 +174,30 @@ def _eat(c, a):
 
 
 def _buy_groceries(c, a):
-    """Complete a shop trip: buy 2-3 random affordable foods."""
+    """Complete a shop trip: buy 2-3 random affordable foods. Stock-backed items
+    (venison from the hunters) are only on the shelf while the stockpile has
+    them — buying one CONSUMES real stockpile, closing the hunt→food loop."""
+    import world_skills as _ws
     bought = []
     for _ in range(random.randint(2, 3)):
-        affordable = [k for k in FOODS if CATALOG[k]["price"] <= (a["coins"] or 0)]
+        affordable = []
+        for k in FOODS:
+            it = CATALOG[k]
+            if it["price"] > (a["coins"] or 0):
+                continue
+            if it.get("stock") and not _ws.can_afford(c, {it["stock"]: 1}):
+                continue                                   # hunters haven't supplied any
+            affordable.append(k)
         if not affordable:
             break
         item = random.choice(affordable)
-        a["coins"] = (a["coins"] or 0) - CATALOG[item]["price"]
-        _fund_credit(c, CATALOG[item]["price"])
+        it = CATALOG[item]
+        if it.get("stock"):
+            _ws.spend(c, {it["stock"]: 1})                 # the shelf empties for real
+        a["coins"] = (a["coins"] or 0) - it["price"]
+        _fund_credit(c, it["price"])
         _add(c, a["key"], item)
-        bought.append(CATALOG[item]["emoji"])
+        bought.append(it["emoji"])
     if bought:
         try:
             from world_defs import log_agent
@@ -281,5 +296,12 @@ def tick_agent(c, a, now):
             try:
                 import world_build
                 world_build.personal_create(c, a)
+            except Exception:
+                pass
+        # …or treat themselves to a custom LOOK (their own face in the world)
+        if random.random() < 0.0006 and (a["coins"] or 0) >= 120 and not a.get("sprite_path"):
+            try:
+                import world_build
+                world_build.agent_makeover(c, a)
             except Exception:
                 pass

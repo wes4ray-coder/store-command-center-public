@@ -609,6 +609,8 @@ def init_db():
         "ALTER TABLE world_agents ADD COLUMN downed_at REAL DEFAULT 0",
         # flux system: monotony streaks (penalise grinding one activity) + god's blessing buff
         "ALTER TABLE world_agents ADD COLUMN streak_state TEXT",
+        # self-generated appearance: custom pixel sprite (agents earn a makeover)
+        "ALTER TABLE world_agents ADD COLUMN sprite_path TEXT",
         "ALTER TABLE world_agents ADD COLUMN streak_since REAL DEFAULT 0",
         "ALTER TABLE world_agents ADD COLUMN blessed_until REAL DEFAULT 0",
         # play-god pick-up/drop: post an agent to a spot/task (RCT-style)

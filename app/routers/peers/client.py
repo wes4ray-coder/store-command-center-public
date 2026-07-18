@@ -63,6 +63,12 @@ def delegate_llm(peer_id: int, system: str, user: str, model: str = None,
     while time.time() < deadline:
         st = _call_peer(peer, "GET", f"/api/peers/rpc/job/{jid}")
         if st.get("status") == "done":
+            # JellyCoin buddy economy: their box worked for us → treasury pays their wallet
+            try:
+                import jellycoin
+                jellycoin.peer_job_credit(peer["name"], "llm")
+            except Exception:
+                pass
             return (st.get("result") or {}).get("output", "")
         if st.get("status") == "error":
             raise HTTPException(502, f"Peer job failed on {peer['name']}: {st.get('error')}")

@@ -58,6 +58,7 @@ def _loop():
             _safe("simulate",  lambda: world_sim.simulate(conn))
             _safe("autobuild", lambda: __import__("world_build").maybe_autobuild(conn))
             _safe("achieve",   lambda: world_systems.check_achievements(conn))
+            _safe("leader", lambda: __import__("world_leader").maybe_upgrade(conn))  # Mayor/Boss reinvest the fund (self-cadenced, user-gated)
 
             c = conn.cursor()
             # Scheduled cognition — the ONLY periodic LLM work. Loads a model at most
@@ -96,7 +97,7 @@ def _loop():
                 # pins the studio's activity light + raid work-in-flight FOREVER
                 # (gotcha: always time-bound busy signals). 2h >> any real render.
                 def _reap_media():
-                    for tbl in ("generations", "videos", "audio_clips", "models3d"):
+                    for tbl in ("generations", "videos", "audio_clips", "models3d", "world_props"):
                         try:
                             n = conn.execute(
                                 f"UPDATE {tbl} SET status='failed' "

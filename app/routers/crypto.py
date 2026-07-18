@@ -60,7 +60,7 @@ CRYPTO_SETTING_KEYS = [
 _CRYPTO_SECRETS = {"btc_rpc_pass", "ft_api_pass", "rh_password", "rh_mfa_secret",
                    "kraken_api_key", "kraken_api_secret"}
 # settings.key prefixes included in the key backup zip
-_BACKUP_PREFIXES = ("btc_", "ft_", "xmr_", "rh_", "money_", "kraken_")
+_BACKUP_PREFIXES = ("btc_", "ft_", "xmr_", "rh_", "money_", "kraken_", "jelly_")
 
 
 # ── schema (kept here to stay decoupled from db.py, like homelab.py) ──────────

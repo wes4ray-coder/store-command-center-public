@@ -62,6 +62,7 @@ function _renderDetail() {
       <button class="btn" style="padding:6px 10px;font-size:.76rem" onclick="worldThink(${a.id})">💭 Think</button>
       <button class="btn" style="padding:6px 10px;font-size:.76rem" onclick="worldLog(${a.id})">📔 Journal</button>
       <button class="btn" ${canItem?'':'disabled'} style="padding:6px 10px;font-size:.76rem;opacity:${canItem?1:.45}" onclick="worldWant(${a.id})">🎁 Item (${econ.item_cost}🪙)</button>
+      <button class="btn" ${(a.coins||0)>=80?'':'disabled'} style="padding:6px 10px;font-size:.76rem;opacity:${(a.coins||0)>=80?1:.45}" title="Commission a unique generated sprite for this agent (their coins; 1/day)" onclick="worldMakeover(${a.id})">🎨 New look (80🪙)</button>
     </div>
     <div style="margin-top:12px;border-top:1px solid #26324a;padding-top:8px">
       <div style="font-size:.78rem;font-weight:600;color:#e8eefc;margin-bottom:2px">🛒 Upgrade shop</div>
@@ -76,7 +77,7 @@ function _renderDetail() {
 function _playerActions(a) {
   const acts = [
     ['⛏️ Mine', 'mine', 'skill'], ['🪓 Chop', 'woodcut', 'skill'], ['🎣 Fish', 'fish', 'skill'],
-    ['🌾 Farm', 'farm', 'skill'], ['🔨 Build', 'build', 'skill'],
+    ['🌾 Farm', 'farm', 'skill'], ['🔨 Build', 'build', 'skill'], ['🏹 Hunt', 'hunt', 'skill'],
     ['📖 Study', 'library', 'spot'], ['⛪ Pray', 'church', 'spot'],
     ['🍺 Bar', 'bar', 'spot'], ['🕹️ Arcade', 'arcade', 'spot'], ['☕ Café', 'cafe', 'spot'],
     ['🛍️ Shop', 'shop', 'spot'], ['🏠 Home', 'home', 'spot'],
@@ -106,6 +107,14 @@ async function playerGo(id, loc, kind) {
   } catch (e) { toast?.(e.message); }
 }
 window.playerGo = playerGo;
+
+async function worldMakeover(id) {
+  try {
+    const r = await api(`/api/world/agent/${id}/makeover`, { method: 'POST', body: '{}' });
+    toast?.(r.ok ? '🎨 The studio is painting their new look…' : (r.msg || 'not right now'));
+  } catch (e) { toast?.(e.message); }
+}
+window.worldMakeover = worldMakeover;
 
 /* what the agent is carrying + what they've placed at home (item economy) */
 function _inventoryBlock(a) {

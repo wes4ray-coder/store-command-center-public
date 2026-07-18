@@ -16,7 +16,7 @@ import world_tech as WT
 import world_construct as WC
 
 # work types in default left→right importance order
-WORK_TYPES = ["operate", "produce", "build", "research", "mine", "woodcut", "farm", "fish", "relax"]
+WORK_TYPES = ["operate", "produce", "build", "research", "mine", "woodcut", "farm", "fish", "hunt", "help", "create", "relax"]
 WT_META = {
     "operate":  {"label": "Operate",   "icon": "💼", "skill": None},          # run their department's real job
     "produce":  {"label": "Produce",    "icon": "🏭", "skill": None},          # fill open production BILLS (world_bills)
@@ -26,9 +26,12 @@ WT_META = {
     "woodcut":  {"label": "Woodcut",    "icon": "🪓", "skill": "woodcutting"},
     "farm":     {"label": "Farm",       "icon": "🌾", "skill": "farming"},
     "fish":     {"label": "Fish",       "icon": "🎣", "skill": "fishing"},
+    "hunt":     {"label": "Hunt",       "icon": "🏹", "skill": "hunting"},
+    "help":     {"label": "Assist",     "icon": "🤝", "skill": "construction"},   # lend a hand on the town works
+    "create":   {"label": "Create",     "icon": "🎨", "skill": None},             # commission their own art
     "relax":    {"label": "Relax",      "icon": "🍺", "skill": None},
 }
-GATHER_WT = {"mine": "mine", "woodcut": "woodcut", "farm": "farm", "fish": "fish"}
+GATHER_WT = {"mine": "mine", "woodcut": "woodcut", "farm": "farm", "fish": "fish", "hunt": "hunt"}
 LEISURE = ["bar", "arcade", "tv", "park", "cafe"]
 
 
@@ -132,10 +135,38 @@ def _wg_relax(c, agent, ctx):
     return {"work_type": "relax", "state": "leisure", "location": spot, "goal": "taking a break in town", "skill": None}
 
 
+def _wg_help(c, agent, ctx):
+    """ASSIST: pitch in on the town's construction project — helping is a
+    pickable job, credited on the assist board (rate-limited by the dwell)."""
+    try:
+        import world_rank
+        world_rank.add_assist(c, agent["key"], "townwork")
+    except Exception:
+        pass
+    return {"work_type": "help", "state": "skilling", "location": "build",
+            "goal": "lending a hand on the town works", "skill": "construction"}
+
+
+def _wg_create(c, agent, ctx):
+    """CREATE: commission a personal piece (their coins; all GPU guards inside).
+    Refusals (cooldown / broke / queue busy) fall through to the next priority.
+    The learn ledger records that creating paid, so it spreads when it works."""
+    try:
+        import world_build, world_learn
+        if world_build.personal_create(c, agent):
+            world_learn.record_reward(c, agent["key"], "create", 12)
+            return {"work_type": "create", "state": "leisure", "location": "arcade",
+                    "goal": "celebrating a fresh commission", "skill": None}
+    except Exception:
+        pass
+    return None
+
+
 WORKGIVERS = {
     "operate": _wg_operate, "produce": _wg_produce, "build": _wg_build, "research": _wg_research,
     "mine": _wg_gather("mine"), "woodcut": _wg_gather("woodcut"),
-    "farm": _wg_gather("farm"), "fish": _wg_gather("fish"), "relax": _wg_relax,
+    "farm": _wg_gather("farm"), "fish": _wg_gather("fish"), "hunt": _wg_gather("hunt"),
+    "help": _wg_help, "create": _wg_create, "relax": _wg_relax,
 }
 
 

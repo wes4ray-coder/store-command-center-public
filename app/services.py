@@ -5,6 +5,7 @@ from deps import *
 
 # Video + audio generation moved to services_media.py (kept importable here).
 from services_media import *
+import model_paths as _mp
 
 
 def _run_trend_scan():
@@ -599,7 +600,7 @@ def generate_model3d_mesh(model_id: int, image_path: str, gen_script: str = None
         subprocess.run(scp_up, check=True, capture_output=True, text=True, timeout=60)
         # 2. run the chosen image→3D model on the box (HF_HOME → the 3D model folder;
         #    HF token for gated models like SF3D; device env for CPU fallback)
-        run = BOX_SSH + [f"{_device_env(device)}{_hf_token_env()}HF_HOME={NODE_HF_3D} "
+        run = BOX_SSH + [f"{_device_env(device)}{_hf_token_env()}HF_HOME={_mp.primary("3d")} "
                          f"bash {gen_script} {remote_in} {remote_out}"]
         r = subprocess.run(run, capture_output=True, text=True, timeout=1200)
         if r.returncode != 0:
@@ -668,7 +669,7 @@ def test_gen_model(key: str) -> dict:
     try:
         pick = (f'IMG={sample}; [ -f "$IMG" ] || IMG=$(find $HOME/TripoSR/examples '
                 f'-name "*.png" 2>/dev/null | head -1); '
-                f'{_hf_token_env()}HF_HOME={NODE_HF_3D} bash {script} "$IMG" {remote_out}')
+                f'{_hf_token_env()}HF_HOME={_mp.primary("3d")} bash {script} "$IMG" {remote_out}')
         r = subprocess.run(BOX_SSH + [pick], capture_output=True, text=True, timeout=1200)
         secs = int(time.time() - t0)
         if r.returncode != 0:

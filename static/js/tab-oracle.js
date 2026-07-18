@@ -95,8 +95,14 @@ function _orConfBar(c) {
 /* ── 🏆 LEADERBOARD ───────────────────────────────────────────────────────── */
 async function oracleLoadLeaderboard() {
   const pane = document.getElementById('pane-oracle-leaderboard');
-  let d;
-  try { d = await api('/api/oracle/leaderboard'); }
+  let d, llmOpts = [];
+  try {
+    const [dd, lm] = await Promise.all([
+      api('/api/oracle/leaderboard'),
+      api('/api/settings/llm-models').catch(() => ({ models: [] })),
+    ]);
+    d = dd; llmOpts = lm.models || [];
+  }
   catch (e) { pane.innerHTML = `<div class="empty"><div class="empty-icon">&#10060;</div>${esc(e.message)}</div>`; return; }
   const lb = d.leaderboard || [];
   const medal = (i) => ['🥇', '🥈', '🥉'][i] || `#${i + 1}`;
@@ -168,10 +174,67 @@ async function oracleLoadLeaderboard() {
         <tbody>${rows}</tbody>
       </table>
     </div>`
-    : `<div class="empty"><div class="empty-icon">&#128302;</div>Run your first tournament round to see analysts compete.</div>`}`;
+    : `<div class="empty"><div class="empty-icon">&#128302;</div>Run your first tournament round to see analysts compete.</div>`}
+    ${_orManage(lb, llmOpts)}`;
 
   if (_oracleRoundPoll) oraclePollRound();   // resume the live progress view if a round is running
 }
+
+/* ── 🧑‍🔬 manage analysts: add / retire / change model ── */
+function _orModelSel(id, current, llmOpts) {
+  const opts = [];
+  if (current && !llmOpts.includes(current)) opts.push(`<option value="${esc(current)}" selected>${esc(current)} (saved)</option>`);
+  opts.push(...llmOpts.map(m => `<option value="${esc(m)}" ${m === current ? 'selected' : ''}>${esc(m)}</option>`));
+  return `<select id="${id}" style="min-width:230px;max-width:340px;padding:4px 7px;background:var(--card);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:.72rem;">${opts.join('')}</select>`;
+}
+function _orManage(lb, llmOpts) {
+  const rows = lb.map(a => `
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:5px 0;">
+      <input type="text" id="or-nm-${a.id}" value="${esc(a.name)}" style="width:140px;padding:4px 7px;background:var(--card);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:.74rem;">
+      ${_orModelSel('or-md-' + a.id, a.model || '', llmOpts)}
+      <button class="btn-sm" onclick="oracleSaveAgent(${a.id})" title="Save this analyst's name/model — future rounds use the new model; past scores stay theirs.">Save</button>
+      <button class="btn-sm" onclick="oracleDeleteAgent(${a.id}, '${esc(a.name)}')" title="Retire this analyst from the tournament (its history stays in the DB).">&#128465;&#65039;</button>
+    </div>`).join('');
+  return `
+    <div class="settings-group" style="max-width:900px;margin-top:16px;">
+      <div class="settings-group-title">&#129489;&#8205;&#128300; Manage analysts</div>
+      <div style="font-size:.72rem;color:var(--muted);margin-bottom:8px;">Any LM Studio model on the node can compete. Change a model to re-arm an analyst; retire ones that waste GPU time. Use the <i>active</i> checkbox above to bench without retiring.</div>
+      ${rows}
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:10px;padding-top:8px;border-top:1px solid var(--border);">
+        <input type="text" id="or-add-name" placeholder="Analyst name" style="width:140px;padding:4px 7px;background:var(--card);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:.74rem;">
+        ${_orModelSel('or-add-model', '', llmOpts)}
+        <button class="btn-sm primary" onclick="oracleAddAgent()">+ Add analyst</button>
+      </div>
+    </div>`;
+}
+async function oracleAddAgent() {
+  const name = document.getElementById('or-add-name')?.value?.trim();
+  const model = document.getElementById('or-add-model')?.value;
+  if (!name || !model) { toast('Name and model are both required', 'error'); return; }
+  try {
+    await api('/api/oracle/agents', { method: 'POST', body: JSON.stringify({ name, model }) });
+    toast(`🔮 ${name} joins the tournament`);
+    _oracleLoaded.leaderboard = false; oracleSub('leaderboard');
+  } catch (e) { toast('Error: ' + e.message, 'error'); }
+}
+async function oracleSaveAgent(id) {
+  const name = document.getElementById('or-nm-' + id)?.value?.trim();
+  const model = document.getElementById('or-md-' + id)?.value;
+  try {
+    await api(`/api/oracle/agents/${id}`, { method: 'POST', body: JSON.stringify({ name, model }) });
+    toast('Analyst updated');
+    _oracleLoaded.leaderboard = false; oracleSub('leaderboard');
+  } catch (e) { toast('Error: ' + e.message, 'error'); }
+}
+async function oracleDeleteAgent(id, name) {
+  if (!confirm(`Retire ${name} from the tournament?`)) return;
+  try {
+    await api(`/api/oracle/agents/${id}`, { method: 'DELETE' });
+    toast(`${name} retired`);
+    _oracleLoaded.leaderboard = false; oracleSub('leaderboard');
+  } catch (e) { toast('Error: ' + e.message, 'error'); }
+}
+window.oracleAddAgent = oracleAddAgent; window.oracleSaveAgent = oracleSaveAgent; window.oracleDeleteAgent = oracleDeleteAgent;
 window.oracleLoadLeaderboard = oracleLoadLeaderboard;
 
 async function oracleToggle(id, active) {

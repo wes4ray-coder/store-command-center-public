@@ -4,7 +4,14 @@ async function loadPromptsEditor() {
   if (!root) return;
   root.innerHTML = '<div style="color:var(--muted);font-size:.8rem;">Loading&#8230;</div>';
   try {
-    const data = await api('/api/prompts');
+    const [data, lm, allSettings] = await Promise.all([
+      api('/api/prompts'),
+      api('/api/settings/llm-models').catch(() => ({ models: [] })),
+      api('/api/settings').catch(() => ({ settings: {} })),
+    ]);
+    const llmOpts = lm.models || [];
+    const settings = allSettings.settings || allSettings || {};
+    const taskModel = k => settings['task_model_' + k] || '';
     const prompts = data.prompts || [];
     const byCat = {};
     prompts.forEach(p => { (byCat[p.category] = byCat[p.category] || []).push(p); });
@@ -21,14 +28,23 @@ async function loadPromptsEditor() {
       for (const p of list) {
         const edited = p.overridden ? `<span class="prompt-badge edited">edited</span>` : '';
         const tmpl   = p.templated ? `<span class="prompt-badge tmpl">templated</span>` : '';
+        const tm = taskModel(p.key);
+        const tmBadge = tm ? `<span class="prompt-badge" style="background:rgba(120,205,150,.15);color:#8fd0a0">🧠 ${esc(tm.split('/').pop())}</span>` : '';
+        const mOpts = [`<option value="">— global Text LLM —</option>`]
+          .concat(tm && !llmOpts.includes(tm) ? [`<option value="${esc(tm)}" selected>${esc(tm)} (saved)</option>`] : [])
+          .concat(llmOpts.map(m => `<option value="${esc(m)}" ${m === tm ? 'selected' : ''}>${esc(m)}</option>`));
         const hay = (p.label + ' ' + p.category + ' ' + (p.help || '') + ' ' + p.key).toLowerCase();
         h += `<details class="settings-group prompt-item" data-cat="${esc(cat)}" data-edited="${p.overridden ? 1 : 0}" data-hay="${esc(hay)}">
-          <summary><span class="prompt-title">${esc(p.label)}</span>${edited}${tmpl}</summary>
+          <summary><span class="prompt-title">${esc(p.label)}</span>${edited}${tmpl}${tmBadge}</summary>
           ${p.help ? `<div class="prompt-help">${esc(p.help)}</div>` : ''}
           <textarea class="prompt-ta" id="pt-${esc(p.key)}" spellcheck="false">${esc(p.value || '')}</textarea>
           <div class="prompt-actions">
             <button class="btn-sm primary" onclick="savePrompt('${esc(p.key)}')">&#128190; Save</button>
             <button class="btn-sm" onclick="resetPrompt('${esc(p.key)}')">&#8635; Reset to default</button>
+            <label style="display:inline-flex;align-items:center;gap:5px;font-size:.7rem;color:var(--muted);margin-left:auto;"
+              title="Which LLM runs THIS task. Blank = the global Text LLM (Settings → Models). The queue loads the chosen model when the task runs — pick smaller/faster models for simple tasks, bigger ones where quality matters.">🧠
+              <select onchange="setTaskModel('${esc(p.key)}', this.value)"
+                style="max-width:240px;padding:3px 6px;background:var(--card);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:.7rem;">${mOpts.join('')}</select></label>
             <span class="prompt-msg" id="pm-${esc(p.key)}"></span>
           </div>
           <div class="prompt-test">
@@ -82,6 +98,14 @@ async function testPrompt(key) {
     out.textContent = 'Error: ' + e.message;
   }
 }
+async function setTaskModel(key, model) {
+  try {
+    await api('/api/settings', { method: 'PATCH', body: JSON.stringify({ ['task_model_' + key]: model }) });
+    toast(model ? `🧠 ${key} → ${model.split('/').pop()}` : `${key} → global Text LLM`);
+  } catch (e) { toast('Error: ' + e.message, 'error'); }
+}
+window.setTaskModel = setTaskModel;
+
 async function savePrompt(key) {
   const ta = document.getElementById('pt-' + key);
   const msg = document.getElementById('pm-' + key);

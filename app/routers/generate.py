@@ -78,6 +78,7 @@ def enhance_prompt(req: EnhanceRequest):
         desc=f"Enhance: {prompt[:50]}",
         retry_meta={"type": "enhance", "prompt": prompt},
         priority=0,   # user clicked Enhance and is waiting
+        task="image_enhance",
     )
     return {"task_id": tid}
 
@@ -125,7 +126,7 @@ Return ONLY valid JSON with keys:
             data = {"description": raw, "enhanced_prompt": raw, "title": "Image Design", "tags": ""}
         return {"result": data}
 
-    tid = orch.submit_llm(_work, desc="Image research")
+    tid = orch.submit_llm(_work, desc="Image research", task="image_research")
     return {"task_id": tid}
 
 @router.post("/api/research-prompt")
@@ -145,6 +146,7 @@ def research_prompt(req: EnhanceRequest):
         _work,
         desc=f"Research: {prompt[:50]}",
         retry_meta={"type": "research", "prompt": prompt},
+        task="image_research",
     )
     return {"task_id": tid}
 
@@ -197,7 +199,7 @@ def generate_listing_info(design_id: int):
                     pass  # skip continuation to keep it simple
         if not title: title = prompt[:60]
         return {"title": title, "description": desc, "tags": tags, "source": "ai"}
-    tid = orch.submit_llm(_work, desc=f"Listing info: {prompt[:40]}")
+    tid = orch.submit_llm(_work, desc=f"Listing info: {prompt[:40]}", task="listing_copy")
     return {"task_id": tid, "ready": False}
 
 @router.post("/api/ai/suggest-price")
@@ -271,5 +273,5 @@ def ai_suggest_price(data: dict):
         price_cents = int(round(price * 100))
         return {"price_cents": price_cents, "price_dollars": price_cents / 100, "reasoning": reason or f"AI-suggested ${price:.2f} for {product_type}"}
 
-    tid = orch.submit_llm(_work, desc=f"Price suggest: {product_type}")
+    tid = orch.submit_llm(_work, desc=f"Price suggest: {product_type}", task="pricing")
     return {"task_id": tid}

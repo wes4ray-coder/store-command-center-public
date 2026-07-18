@@ -73,6 +73,115 @@ function _stateBadge(ctx, a, x, y, top) {
   }
 }
 
+/* ── what is this agent ACTUALLY doing? → {key, swing} or null ──────────────
+   swing = play the strike animation. Fishing/farming/desk/study don't swing —
+   their tool overlay carries the action instead. */
+function _actionOf(a) {
+  if (a.state === 'skilling') {
+    return { woodcut: { key: 'chop', swing: 1 }, mine: { key: 'mine', swing: 1 },
+             build: { key: 'build', swing: 1 }, farm: { key: 'farm', swing: 0 },
+             fish: { key: 'fish', swing: 0 } }[a.location] || { key: 'mine', swing: 1 };
+  }
+  if (a.state === 'defending')
+    return a.role === 'build' ? { key: 'build', swing: 1 }
+         : a.role === 'medic' ? { key: 'medic', swing: 0 } : { key: 'fight', swing: 1 };
+  if (a.state === 'working') return { key: 'desk', swing: 0 };
+  if (a.state === 'studying') return { key: 'study', swing: 0 };
+  return null;
+}
+
+/* ── held TOOLS: a matching implement drawn in-hand per action ──────────────── */
+function _heldTool(ctx, key, x, y) {
+  const t = performance.now();
+  ctx.save();
+  if (key === 'mine' || key === 'chop' || key === 'build' || key === 'fight') {
+    // swing in sync-ish with the strike animation
+    const ang = Math.sin(t / 160) * 0.85 - 0.5;
+    ctx.translate(x + 5, y - 10); ctx.rotate(ang);
+    ctx.strokeStyle = '#7a5230'; ctx.lineWidth = 1.6;
+    ctx.beginPath(); ctx.moveTo(0, 3); ctx.lineTo(0, -7); ctx.stroke();     // haft
+    if (key === 'mine') {                                                   // pick head
+      ctx.strokeStyle = '#9aa3b2'; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.moveTo(-4, -8); ctx.quadraticCurveTo(0, -11, 4, -8); ctx.stroke();
+    } else if (key === 'chop') {                                            // axe blade
+      ctx.fillStyle = '#aeb6c4'; ctx.beginPath();
+      ctx.moveTo(0, -8); ctx.lineTo(4.5, -9.5); ctx.lineTo(4.5, -5.5); ctx.closePath(); ctx.fill();
+    } else if (key === 'build') {                                           // hammer head
+      ctx.fillStyle = '#8a919f'; ctx.fillRect(-2.5, -9.5, 5, 3);
+    } else {                                                                // sword
+      ctx.strokeStyle = '#cdd6e4'; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.moveTo(0, -7); ctx.lineTo(0, -14); ctx.stroke();
+      ctx.strokeStyle = '#e8c14a'; ctx.lineWidth = 1.2;
+      ctx.beginPath(); ctx.moveTo(-2.5, -6.5); ctx.lineTo(2.5, -6.5); ctx.stroke();
+    }
+  } else if (key === 'fish') {                                              // rod + line + bobber
+    ctx.strokeStyle = '#7a5230'; ctx.lineWidth = 1.4;
+    ctx.beginPath(); ctx.moveTo(x + 3, y - 8); ctx.lineTo(x + 12, y - 16); ctx.stroke();
+    const bob = Math.sin(t / 600) * 1.5;
+    ctx.strokeStyle = 'rgba(220,230,245,.6)'; ctx.lineWidth = 0.8;
+    ctx.beginPath(); ctx.moveTo(x + 12, y - 16); ctx.lineTo(x + 15, y + 4 + bob); ctx.stroke();
+    ctx.fillStyle = '#e0483b'; ctx.beginPath(); ctx.arc(x + 15, y + 5 + bob, 1.6, 0, 6.283); ctx.fill();
+    if (Math.floor(t / 2400) % 4 === 0) {                                   // occasional ripple
+      const k = (t % 2400) / 2400;
+      ctx.strokeStyle = `rgba(160,210,250,${0.5 * (1 - k)})`; ctx.lineWidth = 0.8;
+      ctx.beginPath(); ctx.arc(x + 15, y + 6, 2 + k * 6, 0, 6.283); ctx.stroke();
+    }
+  } else if (key === 'farm') {                                              // slow hoe sweep
+    const ang = 0.5 + Math.sin(t / 520) * 0.45;
+    ctx.translate(x + 5, y - 9); ctx.rotate(ang);
+    ctx.strokeStyle = '#7a5230'; ctx.lineWidth = 1.4;
+    ctx.beginPath(); ctx.moveTo(0, 4); ctx.lineTo(0, -8); ctx.stroke();
+    ctx.fillStyle = '#8a919f'; ctx.fillRect(-3.5, -9.5, 4, 2);
+  } else if (key === 'study') {                                             // open book in hands
+    ctx.fillStyle = '#efe6d2'; ctx.fillRect(x - 5, y - 10, 4.5, 3.5); ctx.fillRect(x + 0.5, y - 10, 4.5, 3.5);
+    ctx.strokeStyle = '#5b3a22'; ctx.lineWidth = 0.7; ctx.strokeRect(x - 5, y - 10, 10, 3.5);
+  } else if (key === 'medic') {                                             // medkit
+    ctx.fillStyle = '#efe6d2'; ctx.fillRect(x + 4, y - 8, 6, 4.5);
+    ctx.fillStyle = '#e0483b'; ctx.fillRect(x + 6.4, y - 7.4, 1.2, 3.2); ctx.fillRect(x + 5.4, y - 6.4, 3.2, 1.2);
+  }
+  ctx.restore();
+}
+
+/* ── UNIQUE bodies: per-agent clothing tint + accessory over the shared sheet ── */
+const _tintCv = document.createElement('canvas'); _tintCv.width = 96; _tintCv.height = 96;
+const _tintCtx = _tintCv.getContext('2d');
+function _drawTintedActor(ctx, a, facing, mode, x, y, h) {
+  _tintCtx.clearRect(0, 0, 96, 96);
+  if (!WA.drawActor(_tintCtx, facing, mode, 48, 76, h)) return false;
+  _tintCtx.globalCompositeOperation = 'source-atop';                        // clothe them in their colour
+  _tintCtx.globalAlpha = 0.28;
+  _tintCtx.fillStyle = a.color || '#8ab';
+  _tintCtx.fillRect(0, 0, 96, 96);
+  _tintCtx.globalAlpha = 1;
+  // accessory by identity: none / headband / cap / hood
+  const style = (a.id || 0) % 4, headY = 76 - h * 0.80;
+  if (style === 1) { _tintCtx.fillStyle = _hairColor(a); _tintCtx.fillRect(40, headY + 3, 16, 2.5); }
+  else if (style === 2) { _tintCtx.fillStyle = a.color || '#8ab'; _tintCtx.fillRect(41, headY - 1, 14, 4); _tintCtx.fillRect(46, headY + 3, 12, 1.8); }
+  else if (style === 3) { _tintCtx.strokeStyle = 'rgba(20,24,34,.85)'; _tintCtx.lineWidth = 2.2; _tintCtx.beginPath(); _tintCtx.arc(48, headY + 5, 8, Math.PI, 0); _tintCtx.stroke(); }
+  _tintCtx.globalCompositeOperation = 'source-over';
+  ctx.drawImage(_tintCv, x - 48, y - 76, 96, 96);
+  return true;
+}
+
+/* ── SELF-GENERATED look: the agent's own commissioned sprite ──────────────── */
+const _agentImgs = {};
+function _drawCustomSprite(ctx, a, x, y, moving, s) {
+  let im = _agentImgs[a.sprite_path];
+  if (im === undefined) {
+    im = new Image(); im.onerror = () => { _agentImgs[a.sprite_path] = null; };
+    im.src = a.sprite_path; _agentImgs[a.sprite_path] = im;
+  }
+  if (!im || !im.complete || !im.naturalWidth) return false;
+  const H = 40, W = 40;
+  const hop = moving ? Math.abs(Math.sin((s.bob || 0) * 3)) * 2 : 0;
+  ctx.save();
+  ctx.imageSmoothingEnabled = false;
+  if (s.dir === 'left') { ctx.translate(2 * x, 0); ctx.scale(-1, 1); }
+  ctx.drawImage(im, x - W / 2, y - H - hop + 2, W, H);
+  ctx.restore();
+  return true;
+}
+
 /* pixel character — a little person with hair, shirt (agent colour), a face that
    turns to face its walking direction, and a 2-frame walk. */
 function _character(ctx, s, moving) {
@@ -87,16 +196,23 @@ function _character(ctx, s, moving) {
   ctx.fillStyle = 'rgba(0,0,0,.30)'; ctx.beginPath(); ctx.ellipse(x, y + 1, 6, 2.4, 0, 0, 6.283); ctx.fill();
 
   let top = y - 24;    // where labels/emblems sit above the head
-  const labouring = a.state === 'working' || a.state === 'skilling' || a.state === 'defending';  // all swing the work anim
-  const mode = labouring ? 'work' : (moving ? 'walk' : 'idle');
-  const facing = labouring ? 'down' : dir;               // face the workstation / node while labouring
+  // WHAT ARE THEY ACTUALLY DOING? Only true swinging work plays the swing
+  // animation — no more pickaxing at fish, deskwork or books. Each action also
+  // gets a matching held TOOL drawn in-hand.
+  const ACT = _actionOf(a);
+  const mode = ACT && ACT.swing ? 'work' : (moving ? 'walk' : 'idle');
+  const facing = ACT ? 'down' : dir;                     // face the task while acting
   // fighters lunge forward at the enemy; builders hold at the wall
   let lx = 0, ly = 0;
   if (a.state === 'defending' && a.role !== 'build') { const t = Math.sin(performance.now() / 130 + a.id); lx = t * 3; ly = -Math.abs(t) * 2; }
-  if (window.WA && WA.charsReady && WA.drawActor(ctx, facing, mode, x + lx, y + 2 + ly, 38)) {
-    // real animated villager — mark identity with an agent-colour foot ring
+  const drew = a.sprite_path
+    ? _drawCustomSprite(ctx, a, x + lx, y + 2 + ly, moving, s)
+    : (window.WA && WA.charsReady && _drawTintedActor(ctx, a, facing, mode, x + lx, y + 2 + ly, 38));
+  if (drew) {
+    // identity: agent-colour foot ring (tint/accessory/custom sprite carry the rest)
     ctx.strokeStyle = c; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.ellipse(x, y + 2, 6, 2.6, 0, 0, 6.283); ctx.stroke();
     top = y - 26;
+    if (ACT) _heldTool(ctx, ACT.key, x + lx, y + ly);
     if (sel) { ctx.strokeStyle = '#fff'; ctx.lineWidth = 1; ctx.strokeRect(x - 12, y - 26, 24, 30); }
   } else {
     // ── procedural fallback villager ──

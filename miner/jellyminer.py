@@ -125,6 +125,10 @@ def main():
     ap.add_argument("--list", action="store_true", help="list OpenCL GPU devices and exit")
     ap.add_argument("--batch", type=int, default=1 << 22, help="nonces per kernel launch")
     ap.add_argument("--refresh", type=float, default=20.0, help="seconds between getwork refreshes")
+    ap.add_argument("--throttle", type=int, default=0, metavar="PCT",
+                    help="percent of time to idle between batches (0-90). Use ~50 on a "
+                         "modern card that's ALSO running AI (LM Studio etc.) so mining "
+                         "fills the gaps instead of fighting for the GPU")
     args = ap.parse_args()
 
     devs = gpu_devices()
@@ -137,13 +141,16 @@ def main():
               "and none will be added. Install your GPU's OpenCL driver (old NVIDIA: legacy\n"
               "driver; old AMD: mesa/rusticl or amdgpu) and retry. `clinfo` helps debug.")
         return 2
+    throttle = min(90, max(0, args.throttle))
     dev = devs[min(args.device, len(devs) - 1)]
     gpu_name = dev.name.strip()
-    print(f"⛏️  JellyMiner on: {gpu_name}  (OpenCL, batch {args.batch})")
+    print(f"⛏️  JellyMiner on: {gpu_name}  (OpenCL, batch {args.batch}"
+          + (f", throttle {throttle}%" if throttle else "") + ")")
 
     ctx = cl.Context([dev])
     queue = cl.CommandQueue(ctx)
     prog = cl.Program(ctx, KERNEL).build()
+    kern = cl.Kernel(prog, "mine")      # retrieve once — avoids per-launch rebuild cost
     mf = cl.mem_flags
     out_np = np.zeros(2, dtype=np.uint32)
     out_buf = cl.Buffer(ctx, mf.READ_WRITE | mf.COPY_HOST_PTR, hostbuf=out_np)
@@ -172,14 +179,17 @@ def main():
 
         base, hashes, t0, found = 0, 0, time.time(), None
         while time.time() - t0 < args.refresh and base < 0xFFFFFFFF:
+            tb = time.time()
             out_np[:] = 0
             cl.enqueue_copy(queue, out_buf, out_np)
-            prog.mine(queue, (args.batch,), None, hdr_buf,
-                      np.uint32(base), np.uint64(max(1, target_hi)), out_buf)
+            kern(queue, (args.batch,), None, hdr_buf,
+                 np.uint32(base), np.uint64(max(1, target_hi)), out_buf)
             cl.enqueue_copy(queue, out_np, out_buf)
             queue.finish()
             hashes += args.batch
             base += args.batch
+            if throttle:    # politeness for modern cards that also run AI workloads
+                time.sleep((time.time() - tb) * throttle / (100 - throttle))
             if out_np[0]:
                 cand = int(out_np[1])
                 if verify_cpu(header76, cand, target):   # exact check (GPU compares 64 bits)

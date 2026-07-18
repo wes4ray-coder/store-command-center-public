@@ -18,12 +18,13 @@ window.WM = (function () {
   // popular shortcuts reinforce themselves into real roads organically.
   let wear = {};                                  // "c,r" -> step count
   let wearDirty = {};                             // un-pushed increments (synced to backend)
-  const WEAR_STAGES = [40, 140, 320];             // steps → dirt / packed / cobbled
+  const WEAR_STAGES = [110, 320, 700];            // steps → dirt / packed / cobbled (slow — a trail is EARNED)
   const WEAR_COST = [3, 2.2, 1.6, 1.05];          // grass walk-cost by wear stage
   function bumpWear(c, r) {
     if (!inb(c, r) || grid[r][c] !== T.GRASS) return;
+    if (Math.random() > 0.4) return;              // not every footstep scuffs — keeps the town green
     const k = c + ',' + r;
-    wear[k] = Math.min(600, (wear[k] || 0) + 1);
+    wear[k] = Math.min(1200, (wear[k] || 0) + 1);
     wearDirty[k] = (wearDirty[k] || 0) + 1;
   }
   function wearStage(c, r) {
@@ -206,6 +207,7 @@ window.WM = (function () {
     _placeNode('mine', COLS - 15, 15, CX, CY);
     _placeNode('farm', 15, ROWS - 15, CX, CY);
     _placeNode('build', CX + 15, CY + 11, CX, CY);
+    _placeNode('hunt', COLS - 14, ROWS - 14, CX, CY);   // hunting grounds, deep in the wilds with the deer
     _placeFishNode(CX, CY);
   }
 
@@ -260,6 +262,14 @@ window.WM = (function () {
   function _stamp(b) {
     for (let r = b.r; r < b.r + b.h; r++) for (let c = b.c; c < b.c + b.w; c++) if (inb(c, r)) grid[r][c] = T.WALL;
     for (let r = b.r + 1; r < b.r + b.h - 1; r++) for (let c = b.c + 1; c < b.c + b.w - 1; c++) if (inb(c, r)) grid[r][c] = T.FLOOR;
+    if (b.kind === 'hq') {                    // organic HQ: chamfered corners (octagon-ish)
+      for (const [cc, rr, sx, sy] of [[b.c, b.r, 1, 1], [b.c + b.w - 1, b.r, -1, 1],
+                                      [b.c, b.r + b.h - 1, 1, -1], [b.c + b.w - 1, b.r + b.h - 1, -1, -1]]) {
+        if (inb(cc, rr)) grid[rr][cc] = T.GRASS;                       // cut the sharp corner
+        if (inb(cc + sx, rr)) grid[rr][cc + sx] = T.WALL;              // diagonal wall step
+        if (inb(cc, rr + sy)) grid[rr + sy][cc] = T.WALL;
+      }
+    }
     let dc, dr;
     if (b.door === 'N') { dc = b.c + (b.w / 2 | 0); dr = b.r; }
     else if (b.door === 'W') { dc = b.c; dr = b.r + (b.h / 2 | 0); }
@@ -698,11 +708,18 @@ window.WM = (function () {
       x.fillStyle = 'rgba(0,0,0,.18)'; x.fillRect(px, py + (r % 2 ? 6 : 13), TILE, 1);
       x.fillStyle = 'rgba(255,220,170,.06)'; x.fillRect(px, py + 1, TILE, 1);
     } else if (t === T.WALL) {                           // SOLID stone wall (mortar courses + top light / base shadow)
-      x.fillStyle = v < .5 ? '#8b909c' : '#7e838f'; x.fillRect(px, py, TILE, TILE);
-      x.fillStyle = 'rgba(0,0,0,.17)'; for (let ry = 5; ry < TILE; ry += 6) x.fillRect(px, py + ry, TILE, 1);      // horizontal courses
-      const soff = (r % 2) ? 10 : 0; x.fillStyle = 'rgba(0,0,0,.15)'; for (let rx = -soff; rx < TILE; rx += 10) x.fillRect(px + rx + 9, py, 1, 6);  // staggered joints
-      x.fillStyle = 'rgba(255,255,255,.14)'; x.fillRect(px, py, TILE, 2);           // top light
-      x.fillStyle = 'rgba(0,0,0,.32)'; x.fillRect(px, py + TILE - 2, TILE, 2);      // base shadow
+      // THINNER read: where a wall borders interior floor, show a sliver of the
+      // room's floor along that edge so walls feel like walls, not solid blocks
+      const fL = c > 0 && grid[r][c - 1] === T.FLOOR, fR = c < COLS - 1 && grid[r][c + 1] === T.FLOOR;
+      const fU = r > 0 && grid[r - 1][c] === T.FLOOR, fD = r < ROWS - 1 && grid[r + 1][c] === T.FLOOR;
+      x.fillStyle = '#7a5230'; x.fillRect(px, py, TILE, TILE);        // floor peeks through insets
+      const ix = px + (fL ? 4 : 0), iy = py + (fU ? 4 : 0);
+      const iw = TILE - (fL ? 4 : 0) - (fR ? 4 : 0), ih = TILE - (fU ? 4 : 0) - (fD ? 4 : 0);
+      x.fillStyle = v < .5 ? '#8b909c' : '#7e838f'; x.fillRect(ix, iy, iw, ih);
+      x.fillStyle = 'rgba(0,0,0,.17)'; for (let ry = 5; ry < ih; ry += 6) x.fillRect(ix, iy + ry, iw, 1);      // horizontal courses
+      const soff = (r % 2) ? 10 : 0; x.fillStyle = 'rgba(0,0,0,.15)'; for (let rx = -soff; rx < iw; rx += 10) x.fillRect(ix + rx + 9, iy, 1, 6);  // staggered joints
+      x.fillStyle = 'rgba(255,255,255,.14)'; x.fillRect(ix, iy, iw, 2);           // top light
+      x.fillStyle = 'rgba(0,0,0,.32)'; x.fillRect(ix, iy + ih - 2, iw, 2);      // base shadow
       return;
     } else if (t === T.WALL_UNUSED_BRICK) {              // (legacy procedural brick — no longer reached)
       x.fillStyle = '#8a5a44'; x.fillRect(px, py, TILE, TILE);

@@ -375,7 +375,7 @@ def propose_model3d(model_id: int):
         c.commit(); c.close()
         return {"model_id": model_id, **data, "price_cents": price_cents}
 
-    tid = orch.submit_llm(_work, desc=f"Propose 3D listing: {row['file_name'][:40]}")
+    tid = orch.submit_llm(_work, desc=f"Propose 3D listing: {row['file_name'][:40]}", task="threed_listing")
     return {"task_id": tid, "model_id": model_id}
 
 
@@ -513,7 +513,7 @@ def enhance_3d(req: EnhanceReq):
         import re as _re
         out = _re.sub(r'<think>.*?</think>', '', out, flags=_re.DOTALL).strip().strip('"')
         return {"enhanced": out, "original": idea}
-    tid = orch.submit_llm(_work, desc=f"Enhance 3D: {idea[:40]}")
+    tid = orch.submit_llm(_work, desc=f"Enhance 3D: {idea[:40]}", task="threed_enhance")
     return {"task_id": tid}
 
 

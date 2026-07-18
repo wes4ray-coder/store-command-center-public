@@ -184,7 +184,7 @@ def enhance_audio_prompt(req: EnhancePromptReq):
         cleaned = cleaned.strip().strip('"*').strip()
         return {"enhanced": cleaned, "original": idea}
 
-    tid = orch.submit_llm(_work, desc=f"Enhance audio: {idea[:40]}", priority=0)   # user waiting
+    tid = orch.submit_llm(_work, desc=f"Enhance audio: {idea[:40]}", priority=0, task=("audio_voice" if req.kind == "voice" else "audio_music"))   # user waiting
     return {"task_id": tid}
 
 

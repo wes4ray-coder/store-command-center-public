@@ -36,6 +36,8 @@ SECRET_KEYS = {
     "wallet_mnemonic",
     # Kraken exchange API credentials (real account)
     "kraken_api_key", "kraken_api_secret",
+    # JellyCoin GPU-rig shared token (LAN mining auth)
+    "jelly_miner_token",
 }
 
 

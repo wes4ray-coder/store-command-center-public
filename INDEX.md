@@ -4,6 +4,20 @@
 
 Verified 2026-07-18 against the live code: **20 nav tabs**, **36 routers** (+ empty `__init__.py`), **450 endpoints**.
 
+> **See also [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)** — the *patterns* behind this map (router-package layout, the classic-script shared-global SPA model, the money-gate system, how to add a tab/endpoint) plus the two verification harnesses.
+>
+> **2026-07-18 refactor note** — ten oversized files were split for small-context agents. Paths in older sections may name the pre-split file; the current structure is:
+> - `routers/github.py` → package `routers/github/` (`_base`, `repos`, `models`, `jobs`)
+> - `routers/peers.py` → package `routers/peers/` (`_base`, `api`, `rpc`, `client`)
+> - `swarm.py` → package `swarm/` (`_base`, `llm`, `workspace`, `systasks`, `engine`)
+> - `deps.py` → extracted `auth_core.py` + `llm_client.py` (deps still re-exports them)
+> - `static/js/app-main.js` → `app-core` (kernel, loads first) + `app-nav/queue/studio` + `tab-dashboard/designs/products/trends/agent`
+> - `network-security.js` → `sec-core` + `sec-command/connections/engines/dns/system`
+> - `tab-settings.js` → `settings-core` + `settings-models/prompts/updates-github/peers`
+> - `tab-models.js` → `tab-models` (slim) + `models-image/video-audio/3d`
+> - `tab-resell.js` → `tab-resell` (slim) + `resell-new/listings/offers`
+> - `world-render.js` → `world-render` (core) + `world-render-buildings/combat/overlays/agents`
+
 ## All tabs (authoritative: `static/index.html` nav + `renderView()` in `static/js/app-main.js`)
 
 | view key | Nav label | Section | Router(s) |

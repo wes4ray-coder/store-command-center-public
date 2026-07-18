@@ -13,14 +13,97 @@ function _jlyStat(label, val, hint) {
     <div style="font-size:1.05rem;font-weight:700;margin-top:2px;">${val}</div></div>`;
 }
 
+/* ── tiny SVG chart kit (dataviz-skill spec: thin marks, recessive grid, muted
+      text ink, hover tooltip on every plot, one series per chart → no legend) ── */
+function _jlyChart(series, ys, { color, fmt, refY = null, refLabel = '' }) {
+  const W = 320, H = 120, PL = 44, PR = 8, PT = 8, PB = 18;
+  const pts = series.map((s, i) => ({ x: i, y: ys[i], t: s.t, h: s.h }))
+                    .filter(p => p.y != null && isFinite(p.y));
+  if (pts.length < 2) return `<div style="color:var(--muted);font-size:.74rem;padding:20px 0;">not enough blocks yet</div>`;
+  let lo = Math.min(...pts.map(p => p.y)), hi = Math.max(...pts.map(p => p.y));
+  if (refY != null) { lo = Math.min(lo, refY); hi = Math.max(hi, refY); }
+  if (hi === lo) hi = lo + 1;
+  const X = i => PL + (i / (pts.length - 1)) * (W - PL - PR);
+  const Y = v => PT + (1 - (v - lo) / (hi - lo)) * (H - PT - PB);
+  const path = pts.map((p, i) => `${i ? 'L' : 'M'}${X(i).toFixed(1)},${Y(p.y).toFixed(1)}`).join('');
+  const grid = [lo, (lo + hi) / 2, hi].map(v =>
+    `<line x1="${PL}" y1="${Y(v)}" x2="${W - PR}" y2="${Y(v)}" stroke="var(--border,#2a2f3d)" stroke-width="1"/>
+     <text x="${PL - 5}" y="${Y(v) + 3}" text-anchor="end" font-size="8.5" fill="var(--muted)">${fmt(v)}</text>`).join('');
+  const tfmt = t => new Date(t * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  const ref = refY == null ? '' :
+    `<line x1="${PL}" y1="${Y(refY)}" x2="${W - PR}" y2="${Y(refY)}" stroke="var(--muted)" stroke-width="1" stroke-dasharray="4 3"/>
+     <text x="${W - PR}" y="${Y(refY) - 3}" text-anchor="end" font-size="8" fill="var(--muted)">${esc(refLabel)}</text>`;
+  const data = esc(JSON.stringify(pts.map(p => [p.h, p.y, p.t])));
+  return `<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;display:block;cursor:crosshair"
+       data-pts="${data}" data-lo="${lo}" data-hi="${hi}" data-pl="${PL}" data-pr="${PR}"
+       onmousemove="_jlyHover(event,this)" onmouseleave="_jlyHoverOff(this)">
+    ${grid}${ref}
+    <path d="${path}" fill="none" stroke="${color}" stroke-width="2" stroke-linejoin="round"/>
+    <circle r="4" fill="${color}" stroke="var(--surface,#161a22)" stroke-width="2" style="display:none"/>
+    <text x="${PL}" y="${H - 4}" font-size="8.5" fill="var(--muted)">${tfmt(pts[0].t)}</text>
+    <text x="${W - PR}" y="${H - 4}" text-anchor="end" font-size="8.5" fill="var(--muted)">${tfmt(pts[pts.length - 1].t)}</text>
+  </svg>`;
+}
+function _jlyChartInt(v) { return Math.round(v).toLocaleString(); }
+function _jlyChartNum(v) { return (Math.abs(v) >= 100 ? Math.round(v) : v.toFixed(1)).toLocaleString(); }
+
+function _jlyHover(ev, svg) {
+  const pts = JSON.parse(svg.dataset.pts);
+  const r = svg.getBoundingClientRect();
+  const PL = +svg.dataset.pl, PR = +svg.dataset.pr;
+  const fx = (ev.clientX - r.left) / r.width * 320;
+  const i = Math.max(0, Math.min(pts.length - 1,
+    Math.round((fx - PL) / (320 - PL - PR) * (pts.length - 1))));
+  const [h, y, t] = pts[i];
+  const cx = PL + i / (pts.length - 1) * (320 - PL - PR);
+  const dot = svg.querySelector('circle');
+  const lo = +svg.dataset.lo, hi = +svg.dataset.hi;
+  dot.style.display = '';
+  dot.setAttribute('cx', cx);
+  dot.setAttribute('cy', 8 + (1 - (y - lo) / ((hi - lo) || 1)) * (120 - 8 - 18));
+  let tip = svg.parentElement.querySelector('.jly-tip');
+  if (!tip) {
+    tip = document.createElement('div');
+    tip.className = 'jly-tip';
+    tip.style.cssText = 'position:absolute;pointer-events:none;background:var(--surface2,#1e2330);border:1px solid var(--border,#2a2f3d);border-radius:6px;padding:4px 8px;font-size:.68rem;color:var(--text,#e2e8f0);white-space:nowrap;z-index:5;';
+    svg.parentElement.style.position = 'relative';
+    svg.parentElement.appendChild(tip);
+  }
+  tip.style.display = '';
+  tip.textContent = `block ${h} · ${(Math.abs(y) >= 100 ? Math.round(y).toLocaleString() : y.toFixed(1))} · ${new Date(t * 1000).toLocaleTimeString()}`;
+  tip.style.left = Math.min(r.width - 130, Math.max(0, (cx / 320) * r.width + 8)) + 'px';
+  tip.style.top = '4px';
+}
+function _jlyHoverOff(svg) {
+  svg.querySelector('circle').style.display = 'none';
+  const tip = svg.parentElement.querySelector('.jly-tip');
+  if (tip) tip.style.display = 'none';
+}
+window._jlyHover = _jlyHover; window._jlyHoverOff = _jlyHoverOff;
+
+function _jlyBars(perRig) {
+  if (!perRig.length) return `<div style="color:var(--muted);font-size:.74rem;padding:20px 0;">no blocks mined yet</div>`;
+  const max = Math.max(...perRig.map(r => r.blocks));
+  return perRig.map(r => `
+    <div style="display:flex;align-items:center;gap:8px;margin:6px 0;" title="${esc(r.miner)}: ${r.blocks} blocks">
+      <div style="width:90px;font-size:.72rem;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(r.miner)}</div>
+      <div style="flex:1;background:var(--surface,#161a22);border-radius:4px;height:14px;">
+        <div style="width:${Math.max(2, r.blocks / max * 100)}%;height:100%;background:#6c63ff;border-radius:4px;"></div>
+      </div>
+      <div style="font-size:.72rem;color:var(--muted);min-width:40px;text-align:right;">${r.blocks.toLocaleString()}</div>
+    </div>`).join('');
+}
+
 async function cryptoLoadJelly() {
   const pane = document.getElementById('pane-crypto-jelly');
-  let st, wal, tok, nfts, missions, blocks, ws;
+  let st, wal, tok, nfts, missions, blocks, ws, pb, stats;
   try {
-    [st, wal, tok, nfts, missions, blocks, ws] = await Promise.all([
+    [st, wal, tok, nfts, missions, blocks, ws, pb, stats] = await Promise.all([
       api('/api/jelly/status'), api('/api/jelly/wallets'), api('/api/jelly/miner-token'),
       api('/api/jelly/nft/list'), api('/api/jelly/missions'), api('/api/jelly/blocks?limit=8'),
       api('/api/world/settings').catch(() => ({ settings: {} })),
+      api('/api/jelly/peer-billing').catch(() => null),
+      api('/api/jelly/stats').catch(() => null),
     ]);
   } catch (e) {
     pane.innerHTML = `<div class="empty"><div class="empty-icon">&#10060;</div>${esc(e.message)}</div>`;
@@ -46,6 +129,20 @@ async function cryptoLoadJelly() {
       ${_jlyStat('Boosts pending', st.boosts_pending, 'Skilling tickets waiting to pay out inside the next mined blocks.')}
       ${_jlyStat('NFTs', st.nft_count)}
     </div>
+
+    ${stats && (stats.series || []).length > 2 ? `<div class="settings-group" style="margin-bottom:16px;">
+      <div class="settings-group-title">📊 Network graphs ${hlp('Derived live from the block table. Hover any chart for per-block values. Difficulty retargets every 20 blocks toward the dashed 60-second block goal.')}</div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px;">
+        <div><div style="font-size:.72rem;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px;">Difficulty</div>
+          ${_jlyChart(stats.series, stats.series.map(s => s.difficulty), { color: '#6c63ff', fmt: _jlyChartInt })}</div>
+        <div><div style="font-size:.72rem;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px;">Block interval (sec)</div>
+          ${_jlyChart(stats.series, stats.series.map(s => s.interval), { color: '#f59e0b', fmt: _jlyChartInt, refY: stats.target_block_sec, refLabel: 'target ' + stats.target_block_sec + 's' })}</div>
+        <div><div style="font-size:.72rem;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px;">Supply (JLY)</div>
+          ${_jlyChart(stats.series, stats.series.map(s => s.supply), { color: '#00d4aa', fmt: _jlyChartInt })}</div>
+        <div><div style="font-size:.72rem;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px;">Blocks by rig</div>
+          ${_jlyBars(stats.per_rig || [])}</div>
+      </div>
+    </div>` : ''}
 
     <div class="settings-group" style="margin-bottom:16px;">
       <div class="settings-group-title">⛏️ GPU rigs ${hlp('Any LAN box with an OpenCL GPU can mine — even cards far too old for AI. The miner refuses to run on CPU by design.')}</div>
@@ -76,6 +173,24 @@ async function cryptoLoadJelly() {
         ${companyOn ? '⏸ Turn off' : '▶ Turn on'} skilling boosts</button>
       <span style="font-size:.7rem;color:var(--muted);margin-left:8px;">(same toggle lives in God Console → Company Settings)</span>
     </div>
+
+    ${pb ? `<div class="settings-group" style="margin-bottom:16px;">
+      <div class="settings-group-title">🤝 Buddy compute ${hlp('JLY meters the peer network\'s shared AI helper: a buddy\'s box doing LLM work for us EARNS their peer wallet JLY from the treasury; a buddy running jobs on our node SPENDS theirs. Broke buddies are comped, never blocked. Buddies see their balance via /api/peers/rpc/wallet.')}
+        <span style="font-size:.62rem;font-weight:700;background:${pb.enabled ? 'rgba(34,197,94,.16)' : 'rgba(148,163,184,.16)'};color:${pb.enabled ? 'var(--green)' : 'var(--muted)'};border-radius:10px;padding:2px 8px;margin-left:8px;text-transform:uppercase;">${pb.enabled ? 'on' : 'off'}</span>
+      </div>
+      <div style="font-size:.78rem;color:var(--muted);line-height:1.7;">
+        ${(pb.peer_wallets || []).length
+          ? 'Buddy balances: ' + pb.peer_wallets.map(p => `<b>${esc(p.name.replace('peer:', ''))}</b> ${_jlyFmt(p.balance)} JLY`).join(' · ')
+          : 'No buddy wallets yet — they appear the first time a paired peer runs or lends a job.'}
+        ${pb.comped_jobs ? ` · ${pb.comped_jobs} job(s) comped so far` : ''}
+      </div>
+      <div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;margin-top:10px;">
+        <div class="field" style="margin:0;"><label>JLY per LLM job ${hlp('Embedding jobs cost 1/10th of this.')}</label>
+          <input id="jly-pb-price" type="number" step="0.1" min="0" value="${pb.price_jly}" style="width:90px;"></div>
+        <button class="btn-sm" onclick="jellyPeerBilling(${pb.enabled ? 'false' : 'true'})">${pb.enabled ? '⏸ Turn off' : '▶ Turn on'} billing</button>
+        <button class="btn-sm" onclick="jellyPeerBilling(${pb.enabled})">💾 Save price</button>
+      </div>
+    </div>` : ''}
 
     <div class="settings-group" style="margin-bottom:16px;">
       <div class="settings-group-title">👛 Wallets</div>
@@ -133,6 +248,22 @@ async function cryptoLoadJelly() {
         </div>`).join('') || `<div style="font-size:.76rem;color:var(--muted);">No missions yet.</div>`}
     </div>
 
+    <div class="settings-group" style="margin-bottom:16px;">
+      <div class="settings-group-title">📜 Docs, security &amp; backups ${hlp('The white paper defines the coin (PoW spec, tokenomics, what it is and is not); the security doc covers the rig-token protocol, work integrity, and the incident playbook. Chain state lives in the store DB, so Settings → Backups snapshots cover it; the rig token ships in the Crypto key-backup zip.')}</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;">
+        <button class="btn-sm" onclick="jellyShowDoc('whitepaper','📜 JellyCoin White Paper')">📜 White paper</button>
+        <button class="btn-sm" onclick="jellyShowDoc('security','🛡️ Security protocols & backups')">🛡️ Security &amp; backups</button>
+        <a class="btn-sm" style="text-decoration:none;" href="https://github.com/youruser/jellycoin-core" target="_blank">🌐 Public core repo</a>
+      </div>
+      <div id="jly-doc-panel" style="display:none;margin-top:12px;">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
+          <div id="jly-doc-title" style="font-weight:700;font-size:.85rem;"></div>
+          <button class="btn-sm" onclick="document.getElementById('jly-doc-panel').style.display='none'">✕ Close</button>
+        </div>
+        <pre id="jly-doc-body" style="white-space:pre-wrap;font-size:.74rem;line-height:1.6;color:var(--text);background:var(--surface,#161a22);border:1px solid var(--border,#2a2f3d);border-radius:10px;padding:14px;max-height:420px;overflow-y:auto;"></pre>
+      </div>
+    </div>
+
     <div class="settings-group">
       <div class="settings-group-title">⛓️ Recent blocks</div>
       <table class="mini-table" style="width:100%;font-size:.74rem;">
@@ -156,6 +287,28 @@ async function jellyToggleCompany(on) {
   } catch (e) { toast?.(e.message); }
 }
 window.jellyToggleCompany = jellyToggleCompany;
+
+async function jellyShowDoc(name, title) {
+  try {
+    const r = await fetch(API + '/api/jelly/doc/' + name);   // same base the api() helper uses
+    if (!r.ok) throw new Error('doc fetch failed: ' + r.status);
+    document.getElementById('jly-doc-title').textContent = title;
+    document.getElementById('jly-doc-body').textContent = await r.text();
+    document.getElementById('jly-doc-panel').style.display = '';
+    document.getElementById('jly-doc-panel').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  } catch (e) { toast?.(e.message); }
+}
+window.jellyShowDoc = jellyShowDoc;
+
+async function jellyPeerBilling(enabled) {
+  const body = { enabled: !!enabled,
+    price_jly: parseFloat(document.getElementById('jly-pb-price')?.value || '1') };
+  try {
+    await api('/api/jelly/peer-billing', { method: 'POST', body: JSON.stringify(body) });
+    toast?.('Buddy compute billing saved ✓'); _jlyReload();
+  } catch (e) { toast?.(e.message); }
+}
+window.jellyPeerBilling = jellyPeerBilling;
 
 async function jellyTransfer(fromOverride) {
   const from = fromOverride || document.getElementById('jly-tx-from').value.trim();

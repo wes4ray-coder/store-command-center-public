@@ -15,9 +15,9 @@ function _drawWear(ctx) {
     if (WM.tileAt && WM.tileAt(c, r) !== 0) continue;        // trails only form on grass
     const st = WM.wearStage(c, r); if (!st) continue;
     const x = c * T, y = r * T, h = ((c * 73856093) ^ (r * 19349663)) >>> 0;
-    if (st === 1) {                                          // scuffed dirt
-      ctx.fillStyle = 'rgba(122,94,60,.42)';
-      ctx.beginPath(); ctx.ellipse(x + T / 2, y + T / 2, T * 0.42, T * 0.34, 0, 0, 6.283); ctx.fill();
+    if (st === 1) {                                          // scuffed dirt — subtle, the grass survives
+      ctx.fillStyle = 'rgba(122,94,60,.26)';
+      ctx.beginPath(); ctx.ellipse(x + T / 2, y + T / 2, T * 0.34, T * 0.26, 0, 0, 6.283); ctx.fill();
     } else if (st === 2) {                                   // packed earth + pebbles
       ctx.fillStyle = 'rgba(133,104,68,.85)'; ctx.fillRect(x + 1, y + 1, T - 2, T - 2);
       ctx.fillStyle = 'rgba(90,70,45,.5)'; ctx.fillRect(x + (h % 12) + 2, y + ((h >> 4) % 12) + 2, 3, 2);

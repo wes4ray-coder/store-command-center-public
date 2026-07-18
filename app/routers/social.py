@@ -254,5 +254,5 @@ def generate_caption(req: CaptionIn):
             cap = _re.sub(r"#\w+", "", raw).strip().strip('"')[:300]
             tags = " ".join(_re.findall(r"#\w+", raw))
         return {"caption": cap, "hashtags": tags, "topic": topic}
-    tid = orch.submit_llm(_work, desc=f"Social caption: {topic[:40]}")
+    tid = orch.submit_llm(_work, desc=f"Social caption: {topic[:40]}", task="social_caption")
     return {"task_id": tid}

@@ -168,6 +168,32 @@ Return ONLY valid JSON with keys:
                      "PROPOSAL for the owner to approve; do not claim anything is already live.",
               help="Drafts JLY promo/perk/sell missions (Crypto → JellyCoin). Every draft waits "
                    "for your approval — agents never post or sell on their own."),
+    # ── Money & Mail ──
+    PromptDef("money_gap_review", "Money: demand-gap review", "Assistant",
+              ref=("routers.money", "MONEY_GAP_REVIEW_PROMPT"),
+              help="Reviews shop search queries vs the catalog and proposes real-dollar "
+                   "missions (product gaps, income ideas). Runs on the Money tab's cadence; "
+                   "every mission still waits for your approval."),
+    PromptDef("money_lead_hunt", "Money: carpentry lead screen", "Assistant",
+              ref=("routers.money", "LEAD_HUNT_PROMPT"),
+              help="Screens web-search results for REAL local carpentry work leads and "
+                   "drafts carpentry_lead missions (approval-gated)."),
+    PromptDef("mail_quote", "Mail: carpentry quote draft", "Assistant",
+              ref=("routers.mail", "_QUOTE_SYS"),
+              help="Drafts the labor-quote email reply (fixed terms baked in). Draft only — "
+                   "nothing sends until you press Send reply."),
+    # ── The Company (world) ──
+    PromptDef("world_music_lyrics", "Company music: agent lyrics", "Studio",
+              inline="You are {agent}, a musician in a small creative company, writing an original "
+                     "song for the company store. Theme: {theme}. Write SHORT original lyrics — "
+                     "2 verses and a chorus, under 120 words total, no explicit content, no real "
+                     "artist/brand names. Plain text only: verse lines separated by newlines, the "
+                     "chorus prefixed with 'Chorus:'. No commentary, titles, or markdown — just "
+                     "the lyrics.",
+              templated=True,
+              help="When 'agents write their own lyrics' is on (Company Settings), this writes "
+                   "the lyrics an agent sings on an ACE-Step vocal track. {agent} = the composer's "
+                   "name, {theme} = the music idea."),
 ]
 
 _BY_KEY = {p.key: p for p in PROMPTS}

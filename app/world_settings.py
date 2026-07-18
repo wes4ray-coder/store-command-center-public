@@ -38,6 +38,13 @@ DEFAULTS = {
     # world_auto creation (all its gates still apply), and how often at most.
     "world_bills_drive":      "0",
     "world_bills_drive_interval_min": "30",
+    # music: agents may write their OWN lyrics and record a full vocal song via
+    # ACE-Step (when installed on the GPU node) instead of a short instrumental.
+    "world_music_lyrics":     "1",
+    # leaders: Mayor/Boss file REAL dev-swarm upgrade jobs from the company fund
+    # (charged only when you APPROVE the job in the Dev Swarm tab).
+    "world_leader_upgrades":  "1",
+    "world_leader_upgrade_hours": "12",
     # world
     "world_theme":            "futuristic",
     # pixel-art sprite generation — the model+LoRA the world-builder renders with.
@@ -50,10 +57,12 @@ DEFAULTS = {
 INT_KEYS = {"world_llm_interval_min", "world_active_start", "world_active_end",
             "world_meeting_interval_min", "world_min_item_cost", "world_min_price_cents",
             "world_max_discount_pct", "world_vision_candidates", "world_vision_retries",
-            "world_vision_min_score", "world_bills_drive_interval_min"}
+            "world_vision_min_score", "world_bills_drive_interval_min",
+            "world_leader_upgrade_hours"}
 BOOL_KEYS = {"world_llm_enabled", "world_meetings_enabled", "world_incidents_enabled",
              "world_allow_free", "world_require_review", "world_vision_enabled",
-             "world_crypto_mining_enabled", "world_bills_drive"}
+             "world_crypto_mining_enabled", "world_bills_drive", "world_music_lyrics",
+             "world_leader_upgrades"}
 
 
 def get_all(conn=None):

@@ -29,6 +29,9 @@ async function loadStats() {
 
 /* ══ DASHBOARD ══ */
 async function renderDashboard() {
+  // guard at the sink: whatever calls this late (stale timer, queued promise,
+  // reconnect), it must never clobber another active view's main-content.
+  if (typeof _currentView !== 'undefined' && _currentView !== 'dashboard') return;
   const [statsR, gensR, jobsR, portalR, homelabR] = await Promise.allSettled([
     api('/api/stats'),
     api('/api/generations?status=generating'),
@@ -113,6 +116,8 @@ async function renderDashboard() {
           <button class="btn-sm" onclick="switchView('homelab')">&#128268; Services</button>
         </div>`;
 
+  // re-check after the awaits — the user may have switched views mid-fetch
+  if (typeof _currentView !== 'undefined' && _currentView !== 'dashboard') return;
   document.getElementById('main-content').innerHTML = h;
 }
 

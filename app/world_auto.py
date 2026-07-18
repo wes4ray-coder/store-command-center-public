@@ -365,15 +365,76 @@ def rework_image(base_prompt, ptype="Art", agent=None, reason=""):
     return {"ok": True, "gen_id": gid, "agent": agent}
 
 
+_acestep = {"ok": None, "t": 0.0}
+
+
+def _acestep_ok():
+    """Is ACE-Step (vocal songs) installed on the GPU node? Cached 10 min — it's
+    an ssh round-trip. Any failure = not available (fall back to instrumental)."""
+    now = time.time()
+    if _acestep["ok"] is not None and now - _acestep["t"] < 600:
+        return _acestep["ok"]
+    try:
+        import subprocess
+        from config import BOX_SSH
+        r = subprocess.run(BOX_SSH + ["[ -f ~/ACE-Step/acestep/pipeline_ace_step.py ] "
+                                      "&& [ -x ~/ace-venv/venv/bin/python3 ]"],
+                           capture_output=True, timeout=15)
+        _acestep["ok"] = r.returncode == 0
+    except Exception:
+        _acestep["ok"] = False
+    _acestep["t"] = now
+    return _acestep["ok"]
+
+
+def _write_lyrics(agent, theme):
+    """The agent writes its own short lyrics via the store LLM proxy (rides the
+    GPU queue). Returns lyrics text or None — any failure means instrumental."""
+    try:
+        from prompts import get_prompt
+        sysp = get_prompt("world_music_lyrics").format(agent=agent, theme=theme)
+        import model_registry
+        body = {"model": model_registry.for_task("world_music_lyrics")
+                         or model_registry.resolve("enhance_model"),
+                "messages": [{"role": "system", "content": sysp},
+                             {"role": "user", "content": f"Write the song now. Theme: {theme}"}],
+                "max_tokens": 400, "temperature": 0.9, "stream": False}
+        r = httpx.post(f"{_LOCAL}/api/llm/v1/chat/completions", json=body, timeout=300)
+        txt = (r.json()["choices"][0]["message"]["content"] or "").strip()
+        txt = txt.strip("`").removeprefix("Lyrics:").strip()
+        return txt if 30 <= len(txt) <= 1200 else None
+    except Exception:
+        logger.exception("agent lyrics failed — falling back to instrumental")
+        return None
+
+
 def _create_audio():
     conn = get_conn()
     try:
         prompt = _fresh_prompt(conn, MUSIC_IDEAS, "audio_clips")
         agent = _pick_agent(conn, "audio")
+    finally:
+        conn.close()
+
+    # The agent may choose to SING: own lyrics + a full vocal song via ACE-Step
+    # (Company Settings toggle; needs ACE-Step installed on the node). Roughly
+    # half take the mic when allowed; everything else stays instrumental.
+    lyrics, engine, model_id, duration = None, "musicgen", "facebook/musicgen-small", 8
+    try:
+        import world_settings as WSET
+        if WSET.b("world_music_lyrics") and random.random() < 0.5 and _acestep_ok():
+            lyrics = _write_lyrics(agent, prompt)
+            if lyrics:
+                engine, model_id, duration = "acestep", "ACE-Step/ACE-Step-v1-3.5B", 60
+    except Exception:
+        logger.exception("lyrics decision failed — instrumental")
+
+    conn = get_conn()
+    try:
         cur = conn.execute(
             "INSERT INTO audio_clips (kind,prompt,engine,model_id,duration,lyrics,status) "
             "VALUES ('music',?,?,?,?,?, 'queued')",
-            (prompt, "musicgen", "facebook/musicgen-small", 8, None))
+            (prompt, engine, model_id, duration, lyrics))
         cid = cur.lastrowid
         conn.commit()
     finally:
@@ -391,15 +452,17 @@ def _create_audio():
                 kind="warning", from_agent=agent)
         return {"ok": False, "clip_id": cid, "error": "audio did not complete"}
 
+    sang = " — with their own lyrics, sung" if lyrics else ""
     wo.pray("publish_wordpress",
             f"Publish new track: {prompt[:44]}",
-            detail=f"{agent} composed a fresh track. Publishing to example.com is free.",
+            detail=f"{agent} composed a fresh track{sang}. Publishing to example.com is free.",
             cost_cents=0,
-            payload={"type": "audio", "clip_id": cid, "path": row["audio_path"], "prompt": prompt},
+            payload={"type": "audio", "clip_id": cid, "path": row["audio_path"], "prompt": prompt,
+                     "lyrics": lyrics},
             agent_name=agent)
-    wo.note(f"🎵 {agent} finished a new track and prays for it to be heard.",
-            kind="need", from_agent=agent)
-    return {"ok": True, "clip_id": cid, "agent": agent, "prompt": prompt}
+    wo.note(f"🎵 {agent} {'wrote and SANG an original song' if lyrics else 'finished a new track'} "
+            "and prays for it to be heard.", kind="need", from_agent=agent)
+    return {"ok": True, "clip_id": cid, "agent": agent, "prompt": prompt, "lyrics": bool(lyrics)}
 
 
 def _create_video():

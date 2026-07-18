@@ -140,6 +140,22 @@ def world_state():
     }
 
 
+@router.post("/api/world/agent/{agent_id}/makeover")
+def agent_makeover_ep(agent_id: int):
+    """Commission a custom generated sprite for this agent (paid from their coins;
+    all GPU guards inside world_build.agent_makeover)."""
+    conn = get_conn()
+    try:
+        row = conn.execute("SELECT * FROM world_agents WHERE id=?", (agent_id,)).fetchone()
+        if not row:
+            raise HTTPException(404, "no such agent")
+        res = world_build.agent_makeover(conn.cursor(), dict(row))
+        conn.commit()
+        return res
+    finally:
+        conn.close()
+
+
 @router.post("/api/world/agent/{agent_id}/rename")
 def rename_agent(agent_id: int, body: dict = Body(...)):
     name = (body.get("name") or "").strip()[:32]
@@ -364,6 +380,31 @@ def world_bills_delete(bid: int):
         return {"ok": True}
     finally:
         conn.close()
+
+
+@router.get("/api/world/tileset")
+def world_tileset_status():
+    """Generated-terrain-tileset status (state/progress + whether one is installed)."""
+    import world_tileset
+    return world_tileset.status()
+
+
+@router.post("/api/world/tileset")
+def world_tileset_generate(body: dict = Body(default={})):
+    """Generate a terrain tileset from the world theme (or a custom one) with the
+    pixel-art pipeline. Runs in the background; poll GET for progress."""
+    import world_tileset
+    if not world_tileset.start_generate(body.get("theme")):
+        raise HTTPException(409, "A tileset generation is already running.")
+    return {"ok": True, "note": "Generating 6 terrain tiles — watch the status."}
+
+
+@router.delete("/api/world/tileset")
+def world_tileset_remove():
+    """Back to procedural terrain (removes the generated atlas + tile mappings)."""
+    import world_tileset
+    world_tileset.remove()
+    return {"ok": True}
 
 
 @router.post("/api/world/raid")

@@ -488,10 +488,16 @@ _SCP = ["scp", "-o", "StrictHostKeyChecking=no", "-o", "BatchMode=yes", "-o", "C
 
 
 def audio_models_dir() -> str:
-    """Node-side directory the audio models live in (STORE_AUDIO_MODELS_DIR), e.g. the
-    per-category SSD folder. Empty = use the node's default HF cache. Sets HF_HOME so
-    MusicGen/MMS/Stable-Audio cache there; ACE-Step uses <dir>/ace-step."""
-    return (os.environ.get("STORE_AUDIO_MODELS_DIR") or "").strip().rstrip("/")
+    """Node-side directory the audio models live in. The live `models_dir_audio`
+    setting (Settings → 🧠 Models → 📁 Storage) wins; falls back to the
+    STORE_AUDIO_MODELS_DIR / STORE_HF_AUDIO env values. Empty = the node's default
+    HF cache. Sets HF_HOME so MusicGen/MMS/Stable-Audio cache there; ACE-Step
+    uses <dir>/ace-step."""
+    try:
+        import model_paths
+        return model_paths.primary("audio")
+    except Exception:
+        return (os.environ.get("STORE_AUDIO_MODELS_DIR") or "").strip().rstrip("/")
 
 
 def _audio_env(engine: str = "") -> str:

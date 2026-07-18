@@ -420,6 +420,52 @@ def toggle_agent(aid: int, body: AgentToggle):
     return {"ok": True}
 
 
+class AgentIn(BaseModel):
+    name: str = ""
+    model: str = ""
+
+
+@router.post("/api/oracle/agents")
+def add_agent(body: AgentIn):
+    """Add an analyst: any LM Studio model id can compete. Starts active."""
+    name, model = body.name.strip(), body.model.strip()
+    if not name or not model:
+        raise HTTPException(400, "name and model are both required")
+    conn = get_conn()
+    if conn.execute("SELECT 1 FROM oracle_agents WHERE name=?", (name,)).fetchone():
+        conn.close(); raise HTTPException(400, f"An analyst named '{name}' already exists")
+    aid = conn.execute("INSERT INTO oracle_agents (name,model,active) VALUES (?,?,1)",
+                       (name, model)).lastrowid
+    conn.commit(); conn.close()
+    return {"ok": True, "id": aid}
+
+
+@router.post("/api/oracle/agents/{aid}")
+def update_agent(aid: int, body: AgentIn):
+    """Rename an analyst and/or point it at a different model (empty field = keep)."""
+    conn = get_conn()
+    row = conn.execute("SELECT * FROM oracle_agents WHERE id=?", (aid,)).fetchone()
+    if not row:
+        conn.close(); raise HTTPException(404, "No such analyst")
+    name = body.name.strip() or row["name"]
+    model = body.model.strip() or row["model"]
+    conn.execute("UPDATE oracle_agents SET name=?, model=? WHERE id=?", (name, model, aid))
+    conn.commit(); conn.close()
+    return {"ok": True}
+
+
+@router.delete("/api/oracle/agents/{aid}")
+def delete_agent(aid: int):
+    """Retire an analyst from the tournament. Its past predictions/lessons stay in
+    the DB (history is honest) but it stops appearing anywhere and never runs again."""
+    conn = get_conn()
+    if not conn.execute("SELECT 1 FROM oracle_agents WHERE id=?", (aid,)).fetchone():
+        conn.close(); raise HTTPException(404, "No such analyst")
+    conn.execute("DELETE FROM oracle_agents WHERE id=?", (aid,))
+    conn.commit(); conn.close()
+    return {"ok": True}
+
+
 @router.get("/api/oracle/predictions")
 def list_predictions(status: Optional[str] = None, agent_id: Optional[int] = None, limit: int = 100):
     q = "SELECT * FROM oracle_predictions WHERE 1=1"

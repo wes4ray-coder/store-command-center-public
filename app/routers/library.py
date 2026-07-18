@@ -179,7 +179,7 @@ def library_rip(body: dict):
         md = f"{md}\n\n---\n*Archived from {url}*"
         return {"doc": library.save_library_doc(category, title, md)}
 
-    tid = orch.submit_llm(_work, desc=f"Rip: {title[:40]}")
+    tid = orch.submit_llm(_work, desc=f"Rip: {title[:40]}", task="library_rip")
     return {"task_id": tid}
 
 
@@ -252,7 +252,7 @@ def library_audit_ai():
         md = _call_lmstudio(get_prompt('library_gap'), summary, max_tokens=1200).strip()
         doc = library.save_library_doc("audits", "Library Gap Analysis", md or "_No suggestions._")
         return {"doc": doc, "suggestions": md}
-    tid = orch.submit_llm(_work, desc="Library gap analysis")
+    tid = orch.submit_llm(_work, desc="Library gap analysis", task="library_gap")
     return {"task_id": tid}
 
 
@@ -290,7 +290,7 @@ def _doc_llm_job(category: str, path: str, system: str, mode: str):
             new = f"{out}\n\n---\n\n{content}"
             path_obj.write_text(new, encoding="utf-8")
             return {"updated": f"{category}/{path}", "mode": "summarize"}
-    return {"task_id": orch.submit_llm(_work, desc=f"{mode}: {path[:40]}")}
+    return {"task_id": orch.submit_llm(_work, desc=f"{mode}: {path[:40]}", task=("library_enrich" if mode == "enrich" else "library_summary"))}
 
 @router.post("/api/library/enrich")
 def library_enrich(body: dict):

@@ -51,9 +51,13 @@ window.WA = (function () {
       const r = await fetch((base || '/store/static/world_assets/tilesets') + '/manifest.json', { cache: 'no-cache' });
       if (r.ok) {
         manifest = await r.json();
-        await Promise.all((manifest.atlases || []).map(a => _load(a.src && a.src.startsWith('/') ? a.src : (base || '/store/static/world_assets/tilesets') + '/' + a.src)
-          .then(ok => { if (ok) manifest.__atlas = Object.assign(manifest.__atlas || {}, { [a.id]: img[a.src] }); })));
-        ready = !!(manifest && (manifest.atlases || []).length && (manifest.atlases || []).some(a => img[a.src]));
+        // key by the RESOLVED url — _load stores img[url], so the old img[a.src]
+        // (bare filename) lookup never matched and atlases could never go ready
+        await Promise.all((manifest.atlases || []).map(a => {
+          const url = a.src && a.src.startsWith('/') ? a.src : (base || '/store/static/world_assets/tilesets') + '/' + a.src;
+          return _load(url).then(ok => { if (ok) manifest.__atlas = Object.assign(manifest.__atlas || {}, { [a.id]: img[url] }); });
+        }));
+        ready = !!(manifest && (manifest.atlases || []).length && manifest.__atlas && Object.keys(manifest.__atlas).length);
       }
     } catch (e) { /* no manifest → procedural terrain/structures */ }
 

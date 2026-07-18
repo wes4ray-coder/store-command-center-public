@@ -41,7 +41,7 @@ def agent_chat(req: AgentChatRequest):
     def _work():
         return {"reply": _call_lmstudio(get_prompt('assistant'), msg, max_tokens=1500)}
 
-    tid = orch.submit_llm(_work, desc=f"Assistant: {msg[:40]}", priority=0)   # user waiting on chat
+    tid = orch.submit_llm(_work, desc=f"Assistant: {msg[:40]}", priority=0, task="assistant")   # user waiting on chat
     # Chat is interactive — wait for the queued job to finish (big reasoning models are slow).
     for _ in range(180):          # up to ~6 min
         t = orch.poll(tid)

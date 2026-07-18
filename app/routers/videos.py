@@ -180,7 +180,7 @@ def generate_chain_prompts(req: ChainPromptsRequest):
         lines = [l for l in lines if len(l) > 20]
         return {"prompts": lines[:req.num_segments], "raw": raw[:200]}
 
-    tid = orch.submit_llm(_work, desc=f"Chain prompts: {req.concept[:50]}")
+    tid = orch.submit_llm(_work, desc=f"Chain prompts: {req.concept[:50]}", task="video_chain")
     return {"task_id": tid}
 
 @router.get("/api/videos")

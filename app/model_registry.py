@@ -80,3 +80,10 @@ def set_model(key: str, value: str):
         conn.commit()
     finally:
         conn.close()
+
+
+def for_task(prompt_key: str) -> str:
+    """Model for ONE specific LLM task (the per-prompt picker in Settings →
+    Prompts). Setting `task_model_<key>`; blank = no override — the caller keeps
+    its default (usually the global Text LLM)."""
+    return get_setting(f"task_model_{prompt_key}", "") or ""
