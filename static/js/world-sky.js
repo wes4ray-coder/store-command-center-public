@@ -83,6 +83,15 @@ const WSKY = (() => {
     const i = new Image(); i.onload = () => { _moonImg = i; }; i.onerror = () => { _moonImg = null; }; i.src = url;
   }
 
+  // Where the moon currently is on screen, in CSS px, + whether it's visibly up. Lets the
+  // click handler hit-test "clicked the moon" to travel to the moon map (Phase 4).
+  function moonScreenRect(canvas) {
+    if (window._wskyMoonOn === false || _nightAmt() <= 0.02) return { visible: false };
+    const w = canvas._cssW || canvas.clientWidth, h = canvas._cssH || canvas.clientHeight, p = _moonPhase();
+    const mr = 0.075 * Math.min(w, h);
+    return { visible: true, mx: (-0.08 + 1.16 * p) * w, my: h * (0.26 - 0.10 * Math.sin(p * Math.PI)), mr };
+  }
+
   // ── the moon (SCREEN space) — drifts across the sky at night, mainly when zoomed out ──
   function drawMoon(ctx, canvas, scale) {
     if (window._wskyMoonOn === false) return;          // moon layer toggled off (world_moon_enabled)
@@ -178,6 +187,6 @@ const WSKY = (() => {
     ctx.restore();
   }
 
-  return { drawSpace, spaceAmount, drawMoon, drawGroundShadow, setMoonImage, drawClouds };
+  return { drawSpace, spaceAmount, drawMoon, drawGroundShadow, setMoonImage, drawClouds, moonScreenRect };
 })();
 window.WSKY = WSKY;

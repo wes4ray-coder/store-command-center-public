@@ -496,10 +496,9 @@
       <div class="nav-group-items">
         <div class="nav-item active" data-view="dashboard"><span class="nav-icon">&#128202;</span><span>Dashboard</span></div>
         <div class="nav-item" data-view="world"><span class="nav-icon">&#127749;</span><span>The Company</span></div>
-        <div class="nav-item" data-view="treasury"><span class="nav-icon">&#127974;</span><span>Treasury</span></div>
-        <div class="nav-item" data-view="crypto"><span class="nav-icon">&#8383;</span><span>Crypto</span></div>
+        <!-- Finance = old Treasury + Money + Wallets + Crypto tabs as sub-tab panes (tab-finance.js) -->
+        <div class="nav-item" data-view="finance"><span class="nav-icon">&#128176;</span><span>Finance</span></div>
         <div class="nav-item" data-view="oracle"><span class="nav-icon">&#128302;</span><span>Oracle</span></div>
-        <div class="nav-item" data-view="wallets"><span class="nav-icon">&#128092;</span><span>Wallets</span></div>
       </div>
     </div>
     <div class="nav-group" data-group="studio">
@@ -516,7 +515,6 @@
         <div class="nav-item" data-view="etsy-printify"><span class="nav-icon">&#128717;</span><span>Etsy / Printify</span><span class="nav-badge warn" id="badge-ep">0</span></div>
         <div class="nav-item" data-view="portal"><span class="nav-icon">&#127760;</span><span>Portal &#8594; WordPress</span></div>
         <div class="nav-item" data-view="social"><span class="nav-icon">&#128241;</span><span>Social</span><span class="nav-badge" id="badge-social">0</span></div>
-        <div class="nav-item" data-view="money"><span class="nav-icon">&#128176;</span><span>Money</span></div>
         <div class="nav-item" data-view="mail"><span class="nav-icon">&#9993;&#65039;</span><span>Mail &amp; Quotes</span></div>
         <div class="nav-item" data-view="cults3d"><span class="nav-icon">&#128424;&#65039;</span><span>Cults3D</span></div>
         <div class="nav-item" data-view="resell"><span class="nav-icon">&#128247;</span><span>Resell</span></div>
@@ -793,6 +791,7 @@
   <script src='/store/static/js/world-factory.js'></script>
   <script src='/store/static/js/world-map.js'></script>
   <script src='/store/static/js/world-sky.js'></script>
+  <script src='/store/static/js/world-moon-map.js'></script>
   <script src='/store/static/js/world-render.js'></script>
   <script src='/store/static/js/world-render-buildings.js'></script>
   <script src='/store/static/js/world-render-combat.js'></script>
@@ -811,6 +810,7 @@
   <script src='/store/static/js/world-control.js'></script>
   <script src='/store/static/js/world-worktab.js'></script>
   <script src='/store/static/js/world-roster.js'></script>
+  <script src='/store/static/js/tab-finance.js'></script>
   <script src='/store/static/js/tab-treasury.js'></script>
   <script src='/store/static/js/tab-world.js'></script>
   <script src='/store/static/js/world-sound.js'></script>

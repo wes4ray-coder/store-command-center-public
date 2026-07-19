@@ -39,6 +39,7 @@ function _stepAgents(dt) {
 
 /* ── DRAW (camera-transformed tile world) ── */
 function _drawWorld(ctx, canvas) {
+  if (window.WMOON && WMOON.active()) { WMOON.draw(ctx, canvas); return; }   // on the Moon → the lunar map replaces the town
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
   const cam = WM.camera;
   ctx.setTransform(1, 0, 0, 1, 0, 0);

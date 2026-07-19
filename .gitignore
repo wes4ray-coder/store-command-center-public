@@ -8,8 +8,10 @@ __pycache__/
 .env
 
 # Runtime data — store.db holds credentials (settings table); never commit it.
-# A fresh DB is created on first run (init_db).
+# A fresh DB is created on first run (init_db). The -shm/-wal siblings are
+# SQLite's live journal files — transient, but present whenever the app runs.
 store.db
+store.db-*
 backups/
 *.tar.gz
 
@@ -36,6 +38,13 @@ world_agents/
 # never be committed/shipped; each install rebuilds its own (setup.sh --with-graphify).
 graphify-out*/
 
+# Drop-in plugins — user-installed add-ons are never tracked, so they survive
+# store updates (that's the whole point of the plugin system). Keep the author
+# contract doc tracked. (`plugins/*`, not `plugins/`: git can't re-include a
+# file inside a fully-ignored directory.)
+plugins/*
+!plugins/README.md
+
 # runtime-generated working dirs (not source): staged design renders awaiting
 # review, archived job snapshots, and inbound mail attachments.
 designs/pending/
@@ -43,4 +52,7 @@ designs/approved/thumbs/
 archive/
 mail_attachments/
 models3d/generated/
+models3d/backlog/
+models3d/hero/
+models3d/renders/
 videos/

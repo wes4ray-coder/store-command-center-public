@@ -303,7 +303,9 @@ async function renderWorld() {
     if (mn) {
       window._wskyMoonOn = mn.enabled !== false;
       window._wskyMoonDay = !!mn.daytime;
-      if (window.WSKY && WSKY.setMoonImage) WSKY.setMoonImage(mn.has_image && mn.url ? '/store/static/' + mn.url : null);
+      const murl = mn.has_image && mn.url ? '/store/static/' + mn.url : null;
+      if (window.WSKY && WSKY.setMoonImage) WSKY.setMoonImage(murl);       // the moon disc in the sky
+      if (window.WMOON && WMOON.setMoonTexture) WMOON.setMoonTexture(murl); // and the lunar-map ground
     }
   } catch {}
   try { const lr = await layP; _lay = lr?.layout; _wearSaved = lr?.wear; } catch {}
@@ -352,6 +354,7 @@ async function renderWorld() {
   _resize();
   if (!_restoreCamera(canvas)) _worldZoomHome(canvas);   // resume framing, else zoom on HQ
   ctx.imageSmoothingEnabled = false;
+  if (window.WMOON) WMOON.init(canvas);                  // moon-map: click-the-moon travel + Return-to-Earth button
   const _wpt = ev => { const r = canvas.getBoundingClientRect(); return WM.screenToWorld(ev.clientX - r.left, ev.clientY - r.top); };
   WM.attachControls(canvas, {
     isEditing: () => _edit.on,
