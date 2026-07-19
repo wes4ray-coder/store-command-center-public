@@ -39,6 +39,15 @@ cd ~/store-node-setup
 | 3d        | TripoSR (image → mesh) | (on-demand) |
 | audio     | MusicGen + MMS-TTS (transformers, in the ComfyUI venv) + `store_audiogen.py`; ACE-Step songs install to their own `~/ace-venv` | (on-demand) |
 | llm       | LM Studio headless server on :1234 (bound `0.0.0.0`) | `lmstudio.service` |
+| guard     | `gpu-guard.sh` — heartbeats the Store; pauses the unified AI queue while a Steam game / heavy GPU app runs, unloads models to free VRAM, and starts/stops the miner around AI work | `gpu-guard.service` |
+| miner     | JellyMiner (JellyCoin OpenCL miner, `~/jellyminer-venv`) | `jellyminer.service` |
+
+The guard + miner read `~/.config/store-node.env` (`STORE_URL=`, `JELLY_TOKEN=`).
+Deploying from the Store UI fills it automatically (the Store passes its LAN URL and
+the JellyCoin miner token over SSH). Running `node-setup.sh` by hand without those env
+vars installs the guard but skips the miner unit until you add `JELLY_TOKEN=` (get it
+from the Store UI: Crypto → JellyCoin → Mining) and re-run deploy. An existing
+`jellyminer.service` is never overwritten.
 
 Log: `~/store-node-deploy.log` on the node.
 

@@ -30,7 +30,7 @@ import world_items
 
 SKILL_FULFILL_GAIN = 9.0        # skilling gives purpose (net-positive vs idle drain)
 DWELL_SEC = 80                  # min seconds an agent commits to an idle activity (kills the jitter)
-_DWELL_STATES = ("skilling", "studying", "leisure", "idle")
+_DWELL_STATES = ("skilling", "studying", "leisure", "idle", "sitting", "picnicking", "admiring")
 _SUBSTATES = ("busy", "glance", "pause", "potter")
 
 
@@ -66,6 +66,7 @@ WORK_METRICS = {
     "fin_send":    ("SELECT COUNT(*) FROM wallet_sends",                                         "finance"),
     "sec_fixed":   ("SELECT COUNT(*) FROM security_findings WHERE status='remediated'",          "netsec"),
     "swarm_step":  ("SELECT COUNT(*) FROM swarm_events WHERE kind IN ('plan','code','test','result')", "swarm"),
+    "research_done": ("SELECT COUNT(*) FROM research_projects WHERE status='done'",              "research"),
 }
 
 # In-progress signals — makes the right worker *look* busy at their desk (no pay).
@@ -76,6 +77,7 @@ BUSY_METRICS = {
     "models3d": "SELECT COUNT(*) FROM models3d    WHERE status IN ('queued','generating','pending')",
     # time-bound: a stuck 'running' row (crashed automation) must NOT signal forever
     "resell":   "SELECT COUNT(*) FROM automation_log WHERE status='running' AND created_at > datetime('now','-10 minutes')",
+    "research": "SELECT COUNT(*) FROM research_projects WHERE status='running'",
 }
 
 
@@ -442,11 +444,14 @@ def _choose(a, has_work, hour, sched="any"):
         if (a["fun"] or 0) < 16:
             return "leisure", LEISURE_FUN[a["id"] % len(LEISURE_FUN)], "a quick break, then back to it"
         return "productive", None, None
-    # 'rec' (Free) block → go enjoy the town
+    # 'rec' (Free) block → go enjoy the town (venues + the public spaces: benches,
+    # the picnic green, the plaza). Rotates by hour so the same agent drifts between
+    # spots across a free block instead of camping one venue all day.
     if sched == "rec":
         if (a["social"] or 0) < 45:
             return "leisure", "bar", "unwinding with the crew"
-        return "leisure", LEISURE_ALL[a["id"] % len(LEISURE_ALL)], "enjoying some free time"
+        loc = LEISURE_TOWN[(a["id"] + (hour // 4)) % len(LEISURE_TOWN)]
+        return LEISURE_SPOTS.get(loc, "leisure"), loc, LEISURE_GOALS.get(loc, "enjoying some free time")
     # 'any' block → the original need-driven wander
     if (a["fun"] or 0) < 28:
         return "leisure", LEISURE_FUN[(a["id"]) % len(LEISURE_FUN)], "blowing off steam"
@@ -460,6 +465,13 @@ def _choose(a, has_work, hour, sched="any"):
 
 LEISURE_FUN = ["arcade", "tv"]
 LEISURE_ALL = ["bar", "arcade", "tv", "park", "cafe"]
+# Public-space leisure (Mayor's park & plaza upgrade): these locations come with
+# their own visible state instead of generic 'leisure', so sitting/picnicking/
+# admiring read on the map. Frontend registers the matching WM.locations keys.
+LEISURE_SPOTS = {"bench": "sitting", "picnic": "picnicking", "plaza": "admiring"}
+LEISURE_TOWN = LEISURE_ALL + list(LEISURE_SPOTS)
+LEISURE_GOALS = {"bench": "resting on a park bench", "picnic": "having a picnic on the green",
+                 "plaza": "admiring the plaza fountain"}
 
 
 def _mood(a, has_work):

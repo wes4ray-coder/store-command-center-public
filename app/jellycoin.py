@@ -30,7 +30,7 @@ import struct
 import threading
 import time
 
-from deps import get_conn
+from deps import get_conn, get_setting
 
 # ── tokenomics / consensus constants ─────────────────────────────────────────
 SYMBOL = "JLY"
@@ -52,6 +52,16 @@ BOOST_TTL_SEC = 86_400                # unpaid tickets expire after a day
 BOOST_AGENT_SHARE = 0.5               # rest goes to the company wallet
 
 NFT_MINT_FEE = 5 * UNIT
+
+# ── buddy-share mining pool (M1) — proportional share-based reward splitting ──
+# OFF by default: when off, mining is byte-for-byte the winner-take-all path.
+# When ON, rigs grind to a SHARE target (SHARE_FACTOR× easier than the block
+# target) and submit frequent shares; the block reward is split pro-rata by the
+# shares each owner contributed this round. POOL_FEE_PCT is 0 for M1 (no fee).
+POOL_ENABLED_KEY = "jelly_pool_enabled"   # settings toggle, default "0" (OFF)
+SHARE_FACTOR = 65536                       # share target = block target × this
+POOL_FEE_PCT = 0                           # M1: no pool fee
+_MAX_HASH = (1 << 256) - 1                 # keep share_target within 64-hex
 
 # Well-known wallets (created on demand). 'assistant' is the AI friend's purse.
 TREASURY, COMPANY, ASSISTANT = "treasury", "company", "assistant"
@@ -138,7 +148,21 @@ def ensure_schema(conn=None):
             created_at TEXT DEFAULT (datetime('now')),
             decided_at TEXT
         );
+        CREATE TABLE IF NOT EXISTS jelly_shares (
+            id       INTEGER PRIMARY KEY AUTOINCREMENT,
+            rig      TEXT,
+            owner    TEXT,
+            round_id INTEGER,
+            weight   REAL DEFAULT 1,
+            created  INTEGER
+        );
         """)
+        # buddy-share pool: a rig can be mapped to a peer:<name> payout wallet
+        # (default owner is miner:<name>). Idempotent migration for old DBs.
+        try:
+            conn.execute("ALTER TABLE jelly_miners ADD COLUMN owner TEXT")
+        except Exception:
+            pass
         if not conn.execute("SELECT 1 FROM jelly_blocks WHERE height=0").fetchone():
             _write_genesis(conn)
         conn.commit()
@@ -306,6 +330,7 @@ def get_work(miner: str, gpu: str = "", hashrate: float = 0.0) -> dict:
         tip = _tip(conn)
         height = int(tip["height"]) + 1
         target = current_target(conn)
+        share_target = min(_MAX_HASH, target * SHARE_FACTOR)   # easier → frequent shares
         merkle = _sha256_hex(f"{height}:{tip['hash']}:{now}:{miner}".encode())
         header = _header76(tip["hash"], merkle, height, now)
         work_id = secrets.token_hex(8)
@@ -314,10 +339,15 @@ def get_work(miner: str, gpu: str = "", hashrate: float = 0.0) -> dict:
                 _works.pop(wid, None)
             _works[work_id] = {"header": header, "prev": tip["hash"], "merkle": merkle,
                                "height": height, "time": now, "target": target,
-                               "miner": miner, "issued": now}
-        return {"work_id": work_id, "header76": header.hex(), "target": f"{target:064x}",
+                               "share_target": share_target, "miner": miner, "issued": now}
+        resp = {"work_id": work_id, "header76": header.hex(), "target": f"{target:064x}",
                 "height": height, "difficulty": difficulty(target),
                 "symbol": SYMBOL, "reward": block_reward(height) / UNIT}
+        # Only advertise the share target when pooling is ON — with it absent the
+        # getwork response is byte-for-byte today's, and the miner stays solo.
+        if pool_enabled():
+            resp["share_target"] = f"{share_target:064x}"
+        return resp
     finally:
         conn.close()
 
@@ -330,6 +360,8 @@ def submit_work(work_id: str, nonce: int, miner: str) -> dict:
         return {"ok": False, "reason": "unknown or expired work"}
     nonce = int(nonce) & 0xFFFFFFFF
     h = _pow_hash(w["header"], nonce)
+    if pool_enabled():
+        return _submit_pool_work(work_id, w, nonce, h, miner)
     if not meets_target(h, w["target"]):
         return {"ok": False, "reason": "hash does not meet target"}
     conn = get_conn()
@@ -394,6 +426,152 @@ def _payout_boosts(conn, height: int, now: int, txs: list) -> int:
     return total
 
 
+# ── buddy-share mining pool (M1) ─────────────────────────────────────────────
+def pool_enabled() -> bool:
+    """Master toggle (default OFF). OFF ⇒ mining is exactly winner-take-all."""
+    return str(get_setting(POOL_ENABLED_KEY) or "0") in ("1", "true", "on")
+
+
+def _rig_owner(conn, name: str) -> str:
+    """Payout wallet for a rig: its mapped owner (e.g. peer:<name>) or miner:<name>."""
+    try:
+        row = conn.execute("SELECT owner FROM jelly_miners WHERE name=?", (name,)).fetchone()
+    except Exception:
+        row = None
+    if row is not None and row["owner"]:
+        return row["owner"]
+    return f"miner:{name}"
+
+
+def _submit_pool_work(work_id: str, w: dict, nonce: int, h: str, miner: str) -> dict:
+    """Pool path: every hash under the SHARE target records a share; a hash that
+    ALSO meets the block target mints the block and splits its reward pro-rata."""
+    share_tgt = w.get("share_target") or min(_MAX_HASH, w["target"] * SHARE_FACTOR)
+    if not meets_target(h, share_tgt):
+        return {"ok": False, "reason": "hash does not meet share target"}
+    conn = get_conn()
+    try:
+        _ensure(conn)
+        with _lock:
+            height, now = w["height"], int(time.time())
+            miner = (miner or w["miner"]).strip()[:40]
+            owner = _rig_owner(conn, miner)
+            conn.execute("INSERT INTO jelly_shares (rig,owner,round_id,weight,created) "
+                         "VALUES (?,?,?,1,?)", (miner, owner, height, now))
+            if not meets_target(h, w["target"]):          # share only, no block
+                conn.commit()
+                return {"ok": True, "share": True, "block": False,
+                        "height": height, "owner": owner}
+            tip = _tip(conn)
+            if tip["hash"] != w["prev"]:                  # block is stale; keep the share
+                conn.commit()
+                return {"ok": True, "share": True, "block": False,
+                        "reason": "stale: chain moved on", "height": height, "owner": owner}
+            reward = block_reward(height)
+            txs: list = []
+            boost_total = _payout_boosts(conn, height, now, txs)
+            splits = _split_pool_reward(conn, height, reward, owner, now, txs)
+            conn.execute(
+                "INSERT INTO jelly_blocks (height,hash,prev,merkle,target,nonce,time,miner,reward,boost,txs)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (height, h, w["prev"], w["merkle"], f"{w['target']:064x}", nonce, now,
+                 miner, reward, boost_total, json.dumps(txs)))
+            conn.execute("UPDATE jelly_miners SET blocks=blocks+1, last_seen=? WHERE name=?", (now, miner))
+            conn.execute("DELETE FROM jelly_shares WHERE round_id=?", (height,))
+            conn.commit()
+            _works.pop(work_id, None)
+        return {"ok": True, "share": True, "block": True, "height": height, "hash": h,
+                "reward": reward / UNIT, "boost_paid": boost_total / UNIT,
+                "splits": {o: a / UNIT for o, a in splits.items()}, "owner": owner}
+    finally:
+        conn.close()
+
+
+def _split_pool_reward(conn, height: int, reward: int, solver_owner: str,
+                       now: int, txs: list) -> dict:
+    """Mint `reward` ujly split pro-rata by this round's shares (grouped by owner).
+    Integer accounting: each cut is floor(reward × weight / total); any rounding
+    remainder goes to the block solver's owner, so sum(splits) == reward exactly.
+    No shares recorded (edge case) → the solver takes the whole reward."""
+    rows = conn.execute("SELECT owner, SUM(weight) w FROM jelly_shares WHERE round_id=? "
+                        "GROUP BY owner", (height,)).fetchall()
+    weighted = [(r["owner"], int(round(float(r["w"] or 0)))) for r in rows]
+    total = sum(w for _, w in weighted)
+    payouts: dict = {}
+    if total <= 0:                                        # fallback: solver takes all
+        payouts[solver_owner] = reward
+    else:
+        for own, wt in weighted:
+            payouts[own] = payouts.get(own, 0) + reward * wt // total
+        remainder = reward - sum(payouts.values())       # give rounding dust to solver
+        if remainder:
+            payouts[solver_owner] = payouts.get(solver_owner, 0) + remainder
+    for own, amt in payouts.items():
+        if amt <= 0:
+            continue
+        _wallet(conn, own, kind="peer" if own.startswith("peer:") else "miner")
+        conn.execute("UPDATE jelly_wallets SET balance=balance+? WHERE name=?", (amt, own))
+        conn.execute("INSERT INTO jelly_txs (height,time,frm,dst,amount,kind,memo) VALUES (?,?,NULL,?,?,?,?)",
+                     (height, now, own, amt, "coinbase", f"pool block {height} share reward"))
+        txs.append({"kind": "coinbase", "dst": own, "amount": amt})
+    return payouts
+
+
+def pool_state() -> dict:
+    """Snapshot for the /api/jelly/pool endpoint: toggle, current round's shares,
+    the reward split those shares project to, and recent pool payouts."""
+    conn = get_conn()
+    try:
+        _ensure(conn)
+        height = _tip_height(conn) + 1
+        reward = block_reward(height)
+        rows = conn.execute("SELECT rig, owner, COUNT(*) shares, SUM(weight) w FROM jelly_shares "
+                            "WHERE round_id=? GROUP BY rig, owner ORDER BY w DESC", (height,)).fetchall()
+        shares_by_rig = [dict(r) for r in rows]
+        by_owner: dict = {}
+        for r in rows:
+            by_owner[r["owner"]] = by_owner.get(r["owner"], 0) + int(round(float(r["w"] or 0)))
+        total = sum(by_owner.values())
+        projected = {o: (reward * w // total) / UNIT for o, w in by_owner.items()} if total > 0 else {}
+        recent = [dict(r) for r in conn.execute(
+            "SELECT height,time,dst,amount,memo FROM jelly_txs "
+            "WHERE kind='coinbase' AND memo LIKE 'pool block%' ORDER BY id DESC LIMIT 20")]
+        return {"enabled": pool_enabled(), "share_factor": SHARE_FACTOR,
+                "round_id": height, "block_reward_jly": reward / UNIT,
+                "shares_by_rig": shares_by_rig, "projected_split": projected,
+                "recent_payouts": recent}
+    finally:
+        conn.close()
+
+
+def set_pool_enabled(on: bool):
+    conn = get_conn()
+    try:
+        _ensure(conn)
+        conn.execute("INSERT OR REPLACE INTO settings (key,value) VALUES (?,?)",
+                     (POOL_ENABLED_KEY, "1" if on else "0"))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def set_rig_owner(rig: str, owner: str):
+    """Map a named rig to a payout wallet (e.g. a buddy's peer:<name> custodial wallet)."""
+    rig = (rig or "").strip()[:40]
+    owner = (owner or "").strip()[:60]
+    if not rig or not owner:
+        raise ValueError("rig and owner required")
+    conn = get_conn()
+    try:
+        _ensure(conn)
+        now = int(time.time())
+        conn.execute("INSERT INTO jelly_miners (name,owner,last_seen) VALUES (?,?,?) "
+                     "ON CONFLICT(name) DO UPDATE SET owner=excluded.owner", (rig, owner, now))
+        conn.commit()
+    finally:
+        conn.close()
+
+
 # ── Company skilling hook (called from world_sim; NEVER mines by itself) ─────
 def skill_pulse(conn, agent_key: str, agent_name: str, skill: str, units: int):
     """Record boost tickets for real skilling work. Cheap, same world-sim connection."""
@@ -407,121 +585,14 @@ def skill_pulse(conn, agent_key: str, agent_name: str, skill: str, units: int):
                      (agent_key, agent_name, skill, now))
 
 
-# ── NFTs ─────────────────────────────────────────────────────────────────────
-def mint_nft(owner: str, file_path: str, title: str, meta: dict | None = None) -> dict:
-    """Mint an NFT from a real art file. Fee goes to the treasury; content hash on-chain."""
-    import os
-    if not os.path.isfile(file_path):
-        raise ValueError(f"file not found: {file_path}")
-    with open(file_path, "rb") as f:
-        content_hash = hashlib.sha256(f.read()).hexdigest()
-    conn = get_conn()
-    try:
-        _ensure(conn)
-        if conn.execute("SELECT 1 FROM jelly_nfts WHERE sha256=?", (content_hash,)).fetchone():
-            raise ValueError("this exact artwork is already minted")
-    finally:
-        conn.close()
-    if owner != TREASURY:   # treasury mints its own store art fee-free
-        transfer(owner, TREASURY, NFT_MINT_FEE, memo=f"NFT mint fee: {title[:60]}", kind="nft_fee")
-    conn = get_conn()
-    try:
-        _ensure(conn)
-        token_id = "jnft_" + _sha256_hex(f"{content_hash}:{owner}:{time.time()}".encode())[:24]
-        conn.execute("INSERT INTO jelly_nfts (token_id,title,file_path,sha256,meta,owner,minted_height)"
-                     " VALUES (?,?,?,?,?,?,?)",
-                     (token_id, title[:120], file_path, content_hash,
-                      json.dumps(meta or {}), owner, _tip_height(conn)))
-        conn.commit()
-        return {"ok": True, "token_id": token_id, "sha256": content_hash, "fee": NFT_MINT_FEE / UNIT}
-    finally:
-        conn.close()
-
-
-def transfer_nft(token_id: str, frm: str, dst: str) -> dict:
-    conn = get_conn()
-    try:
-        _ensure(conn)
-        row = conn.execute("SELECT * FROM jelly_nfts WHERE token_id=?", (token_id,)).fetchone()
-        if not row:
-            raise ValueError("unknown NFT")
-        if row["owner"] != frm:
-            raise ValueError(f"{frm} does not own this NFT")
-        _wallet(conn, dst)
-        conn.execute("UPDATE jelly_nfts SET owner=? WHERE token_id=?", (dst, token_id))
-        conn.execute("INSERT INTO jelly_txs (height,time,frm,dst,amount,kind,memo) VALUES (?,?,?,?,0,?,?)",
-                     (_tip_height(conn), int(time.time()), frm, dst, "nft_transfer", token_id))
-        conn.commit()
-        return {"ok": True, "token_id": token_id, "owner": dst}
-    finally:
-        conn.close()
-
-
-# ── buddy-share compute economy (peers federation) ───────────────────────────
-# JLY is the working coin of the peer network: when a buddy's box does AI work
-# for us (client.delegate_llm), our treasury PAYS their peer:<name> wallet; when
-# a buddy runs a job on OUR AI helper (rpc_job), their wallet is CHARGED into the
-# company wallet. A broke buddy is never blocked — the job runs comped (amount-0
-# tx keeps the tab) because compute sharing must not break over play money.
-PEER_BILLING_KEY = "jelly_peer_billing"            # settings toggle, default on
-PEER_PRICE_KEY = "jelly_peer_job_price_jly"        # JLY per llm job, default 1
-PEER_PRICE_DEFAULT = 1.0
-
-
-def peer_billing_enabled() -> bool:
-    from deps import get_setting
-    return str(get_setting(PEER_BILLING_KEY) or "1") in ("1", "true", "on")
-
-
-def peer_job_price(kind: str = "llm") -> int:
-    """Price in ujly. Embeddings are 1/10th of an llm job (they borrow, never swap)."""
-    from deps import get_setting
-    try:
-        jly = float(get_setting(PEER_PRICE_KEY) or PEER_PRICE_DEFAULT)
-    except Exception:
-        jly = PEER_PRICE_DEFAULT
-    price = int(max(0.0, jly) * UNIT)
-    return price // 10 if kind == "embedding" else price
-
-
-def peer_job_charge(peer_name: str, kind: str = "llm") -> dict:
-    """Inbound: a buddy used OUR AI helper. Charge their wallet → company (or comp)."""
-    if not peer_billing_enabled():
-        return {"billed": False, "reason": "billing off"}
-    price = peer_job_price(kind)
-    wname = f"peer:{peer_name}"
-    if price <= 0:
-        return {"billed": False, "reason": "free"}
-    try:
-        transfer(wname, COMPANY, price, memo=f"{kind} job on our node", kind="compute")
-        return {"billed": True, "amount": price}
-    except ValueError:                      # broke buddy → job still runs, tab recorded
-        conn = get_conn()
-        try:
-            _ensure(conn)
-            _wallet(conn, wname, kind="peer")
-            conn.execute("INSERT INTO jelly_txs (height,time,frm,dst,amount,kind,memo) VALUES (?,?,?,?,0,?,?)",
-                         (_tip_height(conn), int(time.time()), wname, COMPANY,
-                          "compute_comped", f"{kind} job comped (insufficient JLY)"))
-            conn.commit()
-        finally:
-            conn.close()
-        return {"billed": False, "reason": "comped"}
-
-
-def peer_job_credit(peer_name: str, kind: str = "llm") -> dict:
-    """Outbound: a buddy's box did AI work FOR us. Treasury pays their peer wallet."""
-    if not peer_billing_enabled():
-        return {"billed": False, "reason": "billing off"}
-    price = peer_job_price(kind)
-    if price <= 0:
-        return {"billed": False, "reason": "free"}
-    try:
-        transfer(TREASURY, f"peer:{peer_name}", price,
-                 memo=f"{kind} job lent to us — thanks!", kind="compute")
-        return {"billed": True, "amount": price}
-    except ValueError:
-        return {"billed": False, "reason": "treasury empty"}
+# ── NFTs + buddy-share compute economy (extracted to jellycoin_extra.py) ─────
+# Re-export keeps this module's surface identical; each function lazy-imports
+# jellycoin, so there is no import cycle.
+from jellycoin_extra import (  # noqa: E402,F401
+    mint_nft, transfer_nft,
+    PEER_BILLING_KEY, PEER_PRICE_KEY, PEER_PRICE_DEFAULT,
+    peer_billing_enabled, peer_job_price, peer_job_charge, peer_job_credit,
+)
 
 
 # ── status ───────────────────────────────────────────────────────────────────

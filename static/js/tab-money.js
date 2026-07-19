@@ -27,10 +27,12 @@ async function renderMoney() {
     </div>
     <div class="stats-row" id="money-stats"></div>
     <div id="money-signals" style="margin-bottom:18px;"></div>
+    <div id="money-cashapp" style="margin-bottom:18px;"></div>
     <div id="money-add" style="margin-bottom:18px;"></div>
     <div id="money-missions"></div>`;
   await loadMoStats();
   await loadMoSignals();
+  await loadMoCashApp();
   renderMoAdd();
   await loadMoMissions();
 }
@@ -251,6 +253,181 @@ async function moDone(id) {
     toast('🏆 Marked done'); await loadMoStats(); await loadMoMissions(); }
   catch (e) { toast('Failed: ' + e.message, 'error'); }
 }
+
+/* ── Cash App (real-money rail #2 — receive only) ─────────────────────────── */
+let _moCa = null;   // last /api/cashapp/status payload
+
+async function loadMoCashApp() {
+  const el = document.getElementById('money-cashapp');
+  if (!el) return;
+  let st, reqs = [];
+  try { st = await api('/api/cashapp/status'); } catch (e) { el.innerHTML = ''; return; }
+  _moCa = st;
+  try { reqs = (await api('/api/cashapp/requests?limit=8')).requests || []; } catch {}
+  const sq = st.square || {};
+  const tagChip = st.cashtag
+    ? `<span style="color:var(--green,#22c55e);font-weight:600;">$${esc(st.cashtag)}</span>`
+    : `<span style="color:var(--warn);">no $cashtag set</span>`;
+  const sqChip = sq.configured
+    ? `<span style="color:var(--green,#22c55e);font-weight:600;">Square connected (${esc(sq.mode || '')})</span>`
+    : `<span style="color:var(--muted);">Square not configured</span>`;
+  el.innerHTML = `
+    <div class="card" style="padding:16px 18px;">
+      <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:10px;">
+        <div style="font-weight:700;font-size:1rem;">&#128181; Cash App
+          ${hlp('Receive real money via Cash App. Two rails: free $cashtag payment-request links (cash.app/$tag/amount, no credentials), and real Square-hosted checkout pages that accept Cash App Pay (needs a Square access token; ~3.3% + 30¢ online on the free plan, 2026 pricing). Both actions are approval-gated: they file a prayer you bless in the God Console — each gate has a toggle below. There is NO official API for personal-account balance/send; this is receive-only by design.')}
+          <span style="font-size:.74rem;font-weight:400;margin-left:8px;">${tagChip} &middot; ${sqChip}</span>
+        </div>
+        <div style="font-size:.72rem;color:var(--muted);">
+          ${st.pending_prayers ? `&#9203; ${st.pending_prayers} awaiting blessing in the God Console` : ''}
+        </div>
+      </div>
+
+      <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;margin-bottom:12px;">
+        <div class="field" style="margin:0;width:110px;">
+          <label style="font-size:.72rem;">Amount $ ${hlp('Dollar amount to request. Leave 0/empty on the $cashtag rail for an open-amount profile link.')}</label>
+          <input type="number" id="mo-ca-amount" min="0" step="0.01" placeholder="25.00">
+        </div>
+        <div class="field" style="margin:0;flex:1;min-width:180px;">
+          <label style="font-size:.72rem;">Note</label>
+          <input type="text" id="mo-ca-note" placeholder="e.g. Deck repair deposit">
+        </div>
+        <button class="btn-sm primary" onclick="moCaRequest()" ${st.cashtag ? '' : 'disabled'}
+          title="Files a gated cashapp_request prayer. Once blessed (God Console), the cash.app/$tag/amount link + QR appear below. Free; the payer confirms in their Cash App.">&#128181; Request via $cashtag</button>
+        <button class="btn-sm" onclick="moCaCheckout()" ${sq.configured ? '' : 'disabled'}
+          title="Files a gated cashapp_checkout prayer. Once blessed, a REAL Square-hosted checkout link (Cash App Pay + cards) is created${sq.configured ? ' (' + sq.mode + ')' : ''}. Needs a Square access token.">&#129001; Cash App Pay checkout</button>
+      </div>
+
+      ${reqs.length ? `
+      <div style="overflow-x:auto;margin-bottom:10px;"><table style="width:100%;font-size:.78rem;border-collapse:collapse;">
+        <thead><tr style="text-align:left;color:var(--muted);font-size:.68rem;text-transform:uppercase;letter-spacing:.04em;">
+          <th style="padding:6px 8px;">QR</th><th style="padding:6px 8px;">Rail</th><th style="padding:6px 8px;">Amount</th>
+          <th style="padding:6px 8px;">Note</th><th style="padding:6px 8px;">Link</th><th style="padding:6px 8px;">When</th></tr></thead>
+        <tbody>${reqs.map(r => `
+          <tr style="border-top:1px solid var(--border,#3333);">
+            <td style="padding:6px 8px;"><img src="${API}/api/cashapp/requests/${r.id}/qr" alt="QR" width="46" height="46"
+              style="border-radius:4px;background:#fff;" onerror="this.style.display='none'"></td>
+            <td style="padding:6px 8px;">${r.kind === 'checkout' ? '&#129001; Square' : '&#128181; $cashtag'}</td>
+            <td style="padding:6px 8px;">${r.amount_cents ? '$' + (r.amount_cents / 100).toFixed(2) : 'any'}</td>
+            <td style="padding:6px 8px;color:var(--muted);">${esc(r.note || '')}</td>
+            <td style="padding:6px 8px;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">
+              <a href="${esc(r.url)}" target="_blank" rel="noopener">${esc(r.url)}</a>
+              <button class="btn-sm" style="padding:1px 7px;margin-left:4px;" title="Copy link"
+                onclick="navigator.clipboard.writeText('${esc(r.url)}').then(()=>toast('Link copied'))">&#128203;</button></td>
+            <td style="padding:6px 8px;color:var(--muted);white-space:nowrap;">${esc((r.created_at || '').slice(0, 16))}</td>
+          </tr>`).join('')}
+        </tbody></table></div>` : ''}
+
+      <div style="display:flex;gap:18px;flex-wrap:wrap;align-items:center;font-size:.76rem;margin-bottom:8px;">
+        <label style="display:flex;gap:6px;align-items:center;cursor:pointer;" title="ON = every $cashtag payment-request link waits for your blessing in the God Console. OFF (in budget mode) = links generate immediately.">
+          <input type="checkbox" ${st.gates && st.gates.cashapp_request ? 'checked' : ''}
+            onchange="moCaGate('cashapp_request', this.checked)"> Gate $cashtag requests</label>
+        <label style="display:flex;gap:6px;align-items:center;cursor:pointer;" title="ON = every Square Cash App Pay checkout link waits for your blessing. OFF (in budget mode) = live checkout links are created immediately.">
+          <input type="checkbox" ${st.gates && st.gates.cashapp_checkout ? 'checked' : ''}
+            onchange="moCaGate('cashapp_checkout', this.checked)"> Gate Cash App Pay checkouts</label>
+      </div>
+
+      <details class="settings-group">
+        <summary style="cursor:pointer;font-weight:600;font-size:.85rem;">&#9881;&#65039; Cash App setup</summary>
+        <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;margin-top:12px;">
+          <div class="field" style="margin:0;width:160px;">
+            <label style="font-size:.72rem;">$Cashtag ${hlp('Your Cash App $cashtag (personal or business account). Used to build cash.app/$tag/amount payment-request links — free, no API keys needed. Business accounts pay ~2.75% per received payment; personal is free with receive limits until verified.')}</label>
+            <input type="text" id="mo-ca-tag" value="${esc(st.cashtag || '')}" placeholder="$YourTag">
+          </div>
+          <div class="field" style="margin:0;flex:1;min-width:220px;">
+            <label style="font-size:.72rem;">Square access token ${hlp('From developer.squareup.com → your application → Credentials. Use the SANDBOX token first (free, fake money), the production token after Square identity verification. Stored encrypted at rest; never shown after saving.')}</label>
+            <input type="password" id="mo-ca-token" placeholder="${sq.configured ? '(saved — enter to replace)' : 'EAAA…'}">
+          </div>
+          <div class="field" style="margin:0;width:150px;">
+            <label style="font-size:.72rem;">Location ID ${hlp('Optional. Square location for checkout links (Developer Console → Locations). Left blank = the first location on the account is used automatically.')}</label>
+            <input type="text" id="mo-ca-loc" value="${esc(sq.location_id || '')}" placeholder="auto">
+          </div>
+          <div class="field" style="margin:0;width:130px;">
+            <label style="font-size:.72rem;">Mode</label>
+            <select id="mo-ca-mode">
+              <option value="sandbox" ${sq.mode !== 'production' ? 'selected' : ''}>sandbox</option>
+              <option value="production" ${sq.mode === 'production' ? 'selected' : ''}>production</option>
+            </select>
+          </div>
+          <button class="btn-sm primary" onclick="moCaSave()">&#128190; Save</button>
+          <button class="btn-sm" onclick="moCaVerify()" ${sq.configured ? '' : 'disabled'}
+            title="Read-only check: lists your Square locations to prove the token works. Moves no money.">&#128270; Verify</button>
+        </div>
+        <div style="font-size:.74rem;color:var(--muted);line-height:1.5;margin-top:10px;">
+          <b>To go live, you need to:</b><br>
+          &bull; <b>$cashtag rail (free, 2 min):</b> open Cash App &rarr; profile &rarr; note your $cashtag and enter it above. Done — request links + QR work immediately. (No official API exists for personal balance/send; receive-only.)<br>
+          &bull; <b>Cash App Pay rail (Square):</b> 1) create a Square account at squareup.com; 2) create an application at developer.squareup.com and paste the <i>sandbox</i> access token above to test; 3) for real money, complete Square identity verification (name, DOB, SSN/ITIN — sole proprietor is fine) and switch to the <i>production</i> token + mode. Online fee ≈ 3.3% + 30¢ (free plan, 2026).<br>
+          &bull; Blessed links appear in the table above with a scannable QR.
+        </div>
+      </details>
+    </div>`;
+}
+
+async function moCaSave() {
+  const body = {
+    cashtag: document.getElementById('mo-ca-tag').value.trim(),
+    location_id: document.getElementById('mo-ca-loc').value.trim(),
+    mode: document.getElementById('mo-ca-mode').value,
+  };
+  const tok = document.getElementById('mo-ca-token').value.trim();
+  if (tok) body.access_token = tok;          // never blank out a saved token
+  if (!body.cashtag) delete body.cashtag;
+  try {
+    await api('/api/cashapp/config', { method: 'POST', body: JSON.stringify(body) });
+    toast('💾 Cash App settings saved');
+    await loadMoCashApp();
+  } catch (e) { toast('Save failed: ' + e.message, 'error'); }
+}
+
+async function moCaVerify() {
+  try {
+    const r = await api('/api/cashapp/verify', { method: 'POST', body: JSON.stringify({}) });
+    if (r.connected) {
+      const locs = (r.locations || []).map(l => l.name || l.id).join(', ');
+      toast(`✅ Square connected (${r.mode})${locs ? ' — ' + locs : ''}`);
+    } else toast('Square: ' + (r.error || 'not connected'), 'error');
+  } catch (e) { toast('Verify failed: ' + e.message, 'error'); }
+}
+
+function _moCaAmount() {
+  return Math.round((parseFloat(document.getElementById('mo-ca-amount').value) || 0) * 100);
+}
+
+async function moCaRequest() {
+  const body = { amount_cents: _moCaAmount(), note: document.getElementById('mo-ca-note').value.trim() };
+  try {
+    const { prayer } = await api('/api/cashapp/request', { method: 'POST', body: JSON.stringify(body) });
+    toast(prayer.status === 'done' ? '💵 Link ready below' :
+      '⏳ Request filed — bless it in the God Console to generate the link');
+    await loadMoCashApp();
+  } catch (e) { toast('Request failed: ' + e.message, 'error'); }
+}
+
+async function moCaCheckout() {
+  const amt = _moCaAmount();
+  if (!amt) { toast('Enter an amount for a checkout link', 'error'); return; }
+  const body = { amount_cents: amt, note: document.getElementById('mo-ca-note').value.trim(), name: 'Payment' };
+  try {
+    const { prayer } = await api('/api/cashapp/checkout', { method: 'POST', body: JSON.stringify(body) });
+    toast(prayer.status === 'done' ? '🟩 Checkout link created below' :
+      '⏳ Checkout filed — bless it in the God Console to create the live link');
+    await loadMoCashApp();
+  } catch (e) { toast('Checkout failed: ' + e.message, 'error'); }
+}
+
+async function moCaGate(key, on) {
+  try {
+    await api('/api/world/ops/gates', { method: 'POST', body: JSON.stringify({ key, on }) });
+    toast(`Gate ${on ? 'ON — needs your blessing' : 'OFF — can auto-run in budget mode'}`);
+  } catch (e) { toast('Gate change failed: ' + e.message, 'error'); await loadMoCashApp(); }
+}
+
+window.loadMoCashApp = loadMoCashApp;
+window.moCaSave = moCaSave;
+window.moCaVerify = moCaVerify;
+window.moCaRequest = moCaRequest;
+window.moCaCheckout = moCaCheckout;
+window.moCaGate = moCaGate;
 
 window.moRunReview = moRunReview;
 window.moAddMission = moAddMission;

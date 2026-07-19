@@ -37,104 +37,12 @@ try:
 except Exception:
     _QUEUE_WAIT = 1800
 
-
-def _loaded_llms() -> list:
-    """Identifiers of LLMs currently loaded in LM Studio (via `lms ps --json`)."""
-    import json as _json
-    rc, out = _ssh(LMS, "ps", "--json", timeout=10)
-    if rc != 0 or not out:
-        return []
-    try:
-        data = _json.loads(out)
-        # identifier FIRST — aliases like `model@cpu` are addressed by identifier,
-        # and chat routing must match what the API actually serves under.
-        return [m.get("identifier") or m.get("modelKey")
-                for m in data if m.get("type") == "llm" and (m.get("identifier") or m.get("modelKey"))]
-    except Exception:
-        return []
-
-
-def _active_model(default: str) -> str:
-    """The model LM Studio requests are actually sent with (Settings → enhance_model
-    overrides the config default). Read straight from the DB so unloads match loads."""
-    try:
-        from db import get_conn
-        conn = get_conn()
-        row = conn.execute("SELECT value FROM settings WHERE key='enhance_model'").fetchone()
-        conn.close()
-        if row and row["value"]:
-            return row["value"]
-    except Exception:
-        pass
-    return default
-
-
-def _idle_ttl() -> int:
-    """Seconds a loaded LLM may sit idle before LM Studio auto-unloads it (frees the
-    node's VRAM when nothing is using the model). Settings key `model_idle_ttl`,
-    default 1800 (30 min). 0 = no TTL (model stays resident until evicted)."""
-    try:
-        from db import get_conn
-        conn = get_conn()
-        row = conn.execute("SELECT value FROM settings WHERE key='model_idle_ttl'").fetchone()
-        conn.close()
-        if row and row["value"] not in (None, ""):
-            return max(0, int(row["value"]))
-    except Exception:
-        pass
-    return 1800
-
-
-def _model_cfg_of(model: str) -> dict:
-    try:
-        import json as _json
-        from deps import get_setting
-        return (_json.loads(get_setting("llm_model_cfg", "{}") or "{}")).get(model) or {}
-    except Exception:
-        return {}
-
-
-def _load_args(model: str) -> list:
-    """`lms load` argv: idle TTL + per-model LOAD-TIME settings from the
-    llm_model_cfg registry — context_length, gpu ratio, parallel prompt slots,
-    and a per-model ttl. MULTI-MODEL: an id ending in `@cpu` loads the SAME
-    underlying model as a second CPU-placed instance under that alias
-    (`--identifier` — the supported version of the copy-and-rename trick), so a
-    full-speed GPU model and CPU side-models can serve at the same time."""
-    ttl = _idle_ttl()
-    alias = None
-    real = model
-    if model.endswith("@cpu"):
-        alias, real = model, model[:-4]
-    args = ["load", real]
-    cfg = _model_cfg_of(model)
-    if alias:
-        args += ["--identifier", alias, "--gpu", "off"]
-    elif cfg.get("gpu") not in (None, ""):
-        args += ["--gpu", str(cfg["gpu"])]
-    if cfg.get("context_length"):
-        args += ["--context-length", str(int(cfg["context_length"]))]
-    if cfg.get("parallel"):
-        args += ["--parallel", str(int(cfg["parallel"]))]
-    if cfg.get("ttl"):
-        ttl = int(cfg["ttl"])
-    return args + (["--ttl", str(ttl)] if ttl > 0 else [])
-
-
-def _ssh(*args, timeout: int = 15) -> tuple[int, str]:
-    cmd = [
-        "ssh", "-o", "StrictHostKeyChecking=no",
-        "-o", "BatchMode=yes",
-        "-o", f"ConnectTimeout={timeout}",
-        BOX,
-    ] + list(args)
-    try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout + 3)
-        return r.returncode, (r.stdout + r.stderr).strip()
-    except subprocess.TimeoutExpired:
-        return 1, "ssh timeout"
-    except Exception as e:
-        return 1, str(e)
+# SSH transport + LM Studio model-load/VRAM helpers live in orchestrator_node
+# (split out verbatim). Re-imported here so orchestrator's surface is unchanged;
+# the Orchestrator class below uses them exactly as before.
+from orchestrator_node import (
+    _ssh, _loaded_llms, _active_model, _idle_ttl, _model_cfg_of, _load_args,
+)
 
 
 class Orchestrator:
@@ -146,6 +54,7 @@ class Orchestrator:
         self._restore_model = None            # model we unloaded for image/video, to reload after
         self._lock = threading.RLock()
         self._img_prepare_lock = threading.Lock()  # serialise image_acquire calls
+        self._last_llm_activity = time.time()  # for idle-TTL sweep (updated on any LLM use)
 
         # ── GPU states ────────────────────────────────────────────────────────
         self._llm_state = "idle"   # idle | loading | busy | unloading
@@ -279,6 +188,11 @@ class Orchestrator:
             self._prune()
         self._work_event.set()
         return tid
+
+    def mark_activity(self):
+        """Record that the LLM was just used (queued task OR proxy fast-path), so the
+        idle-TTL sweep never unloads a model that is actively serving requests."""
+        self._last_llm_activity = time.time()
 
     def poll(self, task_id: int) -> dict:
         with self._lock:
@@ -546,6 +460,7 @@ class Orchestrator:
                     self._set(llm="idle")
                     return
                 task["status"] = "running"
+            self.mark_activity()
 
             # ── Step 3: get the model ready. If the task REQUIRES a specific model,
             # load+verify it (single authority, no race); else borrow the loaded one. ──
@@ -571,9 +486,54 @@ class Orchestrator:
                 task["status"] = "error"
         finally:
             task["event"].set()
+            self.mark_activity()
             # ── Step 4: keep the LLM loaded for reuse (no thrash). It is only
             # unloaded when image/video gen actually needs the VRAM. ──
             self._set(llm="idle")
+
+    def sweep_idle_llms(self) -> dict:
+        """Belt-and-suspenders idle-TTL enforcement (called from the scheduler tick).
+
+        LM Studio already auto-unloads models the STORE loaded, because `_load_args`
+        appends `lms load --ttl <model_idle_ttl>`. But a model loaded OUTSIDE the store's
+        control — by the dev-swarm/OpenClaw, or a bare JIT load with no TTL — can sit
+        resident forever holding VRAM (this is exactly the untracked coder model we
+        observed). When the orchestrator has been fully idle longer than a model's
+        effective idle TTL, unload GPU-resident, non-pinned models. Pinned models
+        (OpenClaw's primary) and CPU-placed side models are never touched.
+        `model_idle_ttl`=0 disables the sweep entirely (owner toggle)."""
+        ttl = _idle_ttl()
+        if ttl <= 0:
+            return {"swept": [], "reason": "ttl-disabled"}
+        with self._lock:
+            busy = (self._active_images > 0
+                    or self._img_state != "idle"
+                    or self._llm_state != "idle"
+                    or any(self._tasks.get(t, {}).get("status") in ("pending", "running")
+                           for t in self._order))
+            idle_for = time.time() - self._last_llm_activity
+        if busy or idle_for < ttl:
+            return {"swept": [], "reason": "busy-or-fresh"}
+        try:
+            loaded = _loaded_llms()
+        except Exception:
+            loaded = []
+        swept = []
+        for m in loaded:
+            if not m or self._is_cpu_placed(m):
+                continue
+            cfg = _model_cfg_of(m)
+            if cfg.get("pin"):
+                continue                       # pinned model stays resident by design
+            m_ttl = int(cfg.get("ttl") or ttl)  # honour a longer per-model TTL
+            if idle_for < m_ttl:
+                continue
+            rc, _out = _ssh(LMS, "unload", m, timeout=20)
+            if rc == 0:
+                swept.append(m)
+                log.info("[orch] idle-sweep unloaded %s (idle %ds ≥ ttl %ds)",
+                         m, int(idle_for), m_ttl)
+        return {"swept": swept}
 
     def _ensure_loaded(self, model: str) -> bool:
         """Make `model` the sole resident LLM and VERIFY it via `lms ps` before we
@@ -654,15 +614,58 @@ class Orchestrator:
         except Exception as e:
             log.info("[orch] ComfyUI /free skipped: %s", e)
 
+    @staticmethod
+    def _is_cpu_placed(model: str) -> bool:
+        """A model instance that holds NO GPU VRAM: an `@cpu` alias or one configured
+        gpu:"off". These coexist with image/video gen and must NOT be unloaded to free
+        the GPU (they aren't on it)."""
+        try:
+            return bool(model) and (model.endswith("@cpu")
+                                    or str(_model_cfg_of(model).get("gpu")) == "off")
+        except Exception:
+            return False
+
     def _unload_llm(self):
-        """SSH to box and run: lms unload <model> (the model actually in use)."""
-        model = _active_model(self.llm_model)
-        rc, out = _ssh(LMS, "unload", model, timeout=15)
-        if rc == 0:
-            log.info("[orch] lms unload OK: %s", out[:80])
-        else:
-            # Might fail if already unloaded — not an error
-            log.info("[orch] lms unload rc=%d: %s", rc, out[:80])
+        """Free GPU VRAM by unloading EVERY GPU-resident LLM `lms ps` reports — not just
+        the store's tracked enhance_model.
+
+        The old code unloaded only `_active_model()` (the DB `enhance_model`). When the
+        actually-resident model differed — a coder model loaded by the dev-swarm/OpenClaw,
+        or a model JIT-loaded by LM Studio itself — that `unload <enhance_model>` was a
+        no-op and the real model kept holding ~8-9 GB through the whole image/video job,
+        starving ComfyUI. We now enumerate the real residents and unload each, then verify
+        VRAM was actually freed (one retry for stragglers). CPU-placed side models
+        (`@cpu` / gpu:off) hold no GPU VRAM and are left resident."""
+        try:
+            loaded = _loaded_llms()
+        except Exception:
+            loaded = []
+        # If `lms ps` returned nothing (e.g. transient SSH failure), fall back to the
+        # tracked model so we at least attempt the historical unload.
+        targets = [m for m in loaded if m and not self._is_cpu_placed(m)]
+        if not targets and not loaded:
+            fallback = _active_model(self.llm_model)
+            if fallback and not self._is_cpu_placed(fallback):
+                targets = [fallback]
+        if not targets:
+            log.info("[orch] _unload_llm: no GPU-resident LLM to free (loaded=%s)", loaded)
+            return
+        for model in targets:
+            rc, out = _ssh(LMS, "unload", model, timeout=20)
+            if rc == 0:
+                log.info("[orch] lms unload OK: %s", model)
+            else:
+                # Might fail if already unloaded — not an error
+                log.info("[orch] lms unload rc=%d for %s: %s", rc, model, out[:80])
+        # Verify VRAM actually freed; retry once for anything still resident.
+        try:
+            still = [m for m in _loaded_llms() if m and not self._is_cpu_placed(m)]
+        except Exception:
+            still = []
+        if still:
+            log.warning("[orch] LLM(s) still resident after unload: %s — retrying", still)
+            for model in still:
+                _ssh(LMS, "unload", model, timeout=20)
 
 
 # ── Singleton ─────────────────────────────────────────────────────────────────

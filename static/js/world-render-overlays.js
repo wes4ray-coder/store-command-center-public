@@ -371,10 +371,20 @@ function _prop(ctx, x, y, pr, size) {
     ctx.globalAlpha = 1; ctx.fillStyle = '#c4b5fd'; ctx.font = '10px serif';
     ctx.textAlign = 'center'; ctx.fillText('✨', x, y - 6);
   } else {
-    ctx.fillStyle = '#3a2f52'; ctx.fillRect(x - 6, y - 16, 12, 12);
-    ctx.strokeStyle = '#7c5cff'; ctx.strokeRect(x - 6, y - 16, 12, 12);
+    // unfinished prop (generation failed / not yet produced): a subtle dim marker,
+    // NOT a harsh outlined box that reads as a broken/missing slot.
+    ctx.globalAlpha = 0.3; ctx.fillStyle = '#2a2440';
+    ctx.beginPath(); ctx.arc(x, y - 7, 4, 0, Math.PI * 2); ctx.fill();
+    ctx.globalAlpha = 1;
   }
-  // tiny, dim caption so the generated items don't shout over the room theming
-  ctx.globalAlpha = 0.5; ctx.fillStyle = '#b9a7ff'; ctx.font = '4px monospace'; ctx.textAlign = 'center';
-  ctx.fillText((pr.label || '').slice(0, 14), x, y + 2); ctx.globalAlpha = 1;
+  // caption: readable, width-ellipsized, and hidden when zoomed out so adjacent
+  // labels stop overlapping into garble. (Was 4px monospace + mid-word char cut.)
+  if (WM.camera.scale >= 2.3) {
+    ctx.globalAlpha = 0.55; ctx.fillStyle = '#b9a7ff'; ctx.font = '7px monospace'; ctx.textAlign = 'center';
+    const full = pr.label || ''; const maxW = Math.max(S * 1.6, 28);
+    let lbl = full;
+    while (lbl && ctx.measureText(lbl).width > maxW) lbl = lbl.slice(0, -1);
+    if (lbl !== full && lbl) lbl = lbl.slice(0, -1) + '…';
+    ctx.fillText(lbl, x, y + 4); ctx.globalAlpha = 1;
+  }
 }

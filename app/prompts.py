@@ -88,6 +88,44 @@ Return ONLY valid JSON with keys:
     PromptDef("threed_listing", "3D listing (Cults3D) copy", "Studio",
               ref=("routers.models3d", "_PROPOSE_SYSTEM"),
               help="Generates Cults3D title/description/tags/price from model facts (JSON)."),
+    # ── Private Studio (NSFW) — own category; runs on the `nsfw_model` registry
+    # slot (Settings → Models). The backend safety floor in app/nsfw.py screens
+    # every input AND every model-authored output regardless of these texts. ──
+    PromptDef("nsfw_enhance", "Private Studio: prompt enhancement", "NSFW",
+              inline="You are a prompt engineer for the owner's PRIVATE, adults-only AI art "
+                     "studio. Rewrite the user's idea into ONE vivid, detailed generation "
+                     "prompt (40-90 words): subject, style, lighting, composition, mood. "
+                     "All depicted people are adults. If the idea involves minors, a real "
+                     "identifiable person, or non-consensual scenarios, reply with exactly "
+                     "REFUSED and nothing else. Otherwise output ONLY the prompt line.",
+              help="Enhance button in the Private Studio tab: rough idea in, full "
+                   "generation prompt out (editable before submitting). Only reachable "
+                   "when the NSFW master toggle is on."),
+    PromptDef("nsfw_bootstrap_author", "Private Studio: bootstrap — author a category generator", "NSFW",
+              inline="You write reusable GENERATOR PROMPTS for an adults-only private AI "
+                     "art studio. Given a category name, write ONE style brief (60-120 "
+                     "words) a text model can follow to produce endless varied image "
+                     "prompts in that category: cover typical subjects, art styles, "
+                     "lighting, composition and mood ranges. All depicted people are "
+                     "adults; never reference minors, real identifiable people, or "
+                     "non-consensual scenarios — if the category itself implies any of "
+                     "those, reply exactly REFUSED. Output ONLY the brief text, no "
+                     "titles or commentary.",
+              help="Used by the tab's Bootstrap action: the nsfw model authors each "
+                   "category's generator prompt, which is then saved as an editable "
+                   "category row (not hard-coded). Re-runnable; the safety floor screens "
+                   "every authored brief before it is saved."),
+    PromptDef("nsfw_category_run", "Private Studio: category → one generation prompt", "NSFW",
+              inline="You write ONE concrete adults-only image-generation prompt "
+                     "(40-90 words) following this category style brief:\n{brief}\n\n"
+                     "Recently rejected approaches — write something clearly DIFFERENT "
+                     "from these:\n{avoid}\n\nAll depicted people are adults. If you "
+                     "cannot comply safely, reply exactly REFUSED. Output ONLY the "
+                     "prompt line, nothing else.",
+              templated=True,
+              help="Wrapper used when a category (or a Company agent) generates: the "
+                   "category's saved brief fills {brief}, recent rejections fill {avoid} "
+                   "so the next attempt varies. Keep both placeholders."),
 
     # ── Storefront (listing copy + pricing) ──
     PromptDef("listing_copy", "Etsy / POD listing copy", "Storefront",
@@ -157,6 +195,11 @@ Return ONLY valid JSON with keys:
     PromptDef("swarm_reviewer",  "Dev Swarm: Reviewer",  "Dev Swarm", ref=("swarm", "REVIEWER_SYS")),
     PromptDef("swarm_auditor",   "Dev Swarm: Auditor",   "Dev Swarm", ref=("swarm", "AUDITOR_SYS")),
     PromptDef("swarm_system",    "Dev Swarm: System",    "Dev Swarm", ref=("swarm", "SYSTEM_SYS")),
+    PromptDef("watcher_doctor",  "Dev Swarm: Watcher doctor", "Dev Swarm",
+              ref=("watcher", "WATCHER_DOCTOR_SYS"),
+              help="The Agent Watcher's diagnosis turn: reads a stuck/failed job's timeline "
+                   "and returns JSON {summary, cause, fix, resumable} that is fed back to "
+                   "the agents on re-run."),
     # ── Crypto (JellyCoin) ──
     PromptDef("jelly_mission", "JellyCoin push/sell mission", "Crypto",
               inline="You are a Company marketing agent for Acme. Draft ONE short pitch to "
@@ -194,12 +237,61 @@ Return ONLY valid JSON with keys:
               help="When 'agents write their own lyrics' is on (Company Settings), this writes "
                    "the lyrics an agent sings on an ACE-Step vocal track. {agent} = the composer's "
                    "name, {theme} = the music idea."),
+    PromptDef("world_tileset_tile", "Company map: one terrain tile texture", "Studio",
+              inline="pixel art video game ground texture of {desc}, {theme} style, top-down "
+                     "orthographic view, one single uniform repeating pattern densely covering "
+                     "the entire image edge to edge, zoomed-in close-up of the surface only, "
+                     "flat even lighting, no sprite sheet, no separate objects, no white "
+                     "background, no borders, no text{avoid}",
+              templated=True,
+              help="The image prompt for ONE progressive terrain tile (🧱 panel / the agent "
+                   "painting loop). {desc} = what the tile shows (grass/path/…), {theme} = the "
+                   "world theme, {avoid} = positive corrective steering derived from recent 👎 "
+                   "rejections (describing the bad look verbatim makes diffusion models paint it). "
+                   "Every render still passes the QA + style-consistency gates before going live."),
+    # ── Research Lab ──
+    PromptDef("research_plan", "Research: project plan", "Research",
+              ref=("research_lab", "PLAN_SYS"),
+              help="Turns a proposed research project into a JSON research plan (sections, "
+                   "search queries, image queries, safety topics). Contains literal { } JSON — keep it."),
+    PromptDef("research_digest", "Research: page digest", "Research",
+              ref=("research_lab", "DIGEST_SYS"),
+              help="Boils one fetched web page down to the facts useful for the project "
+                   "(steps, costs, specs, warnings)."),
+    PromptDef("research_report", "Research: final report", "Research",
+              ref=("research_lab", "REPORT_SYS"),
+              help="Writes the compiled illustrated report (guide, materials & costs, stats, "
+                   "safety). Never writes code — coding projects get specs only."),
+    PromptDef("research_review", "Research: peer review", "Research",
+              ref=("research_lab_deep", "REVIEW_SYS"),
+              help="A second Genius peer-reviews the draft report (verdict + issues). "
+                   "Contains literal { } JSON — keep it."),
+    PromptDef("research_revise", "Research: revise after review", "Research",
+              ref=("research_lab_deep", "REVISE_SYS"),
+              help="The author rewrites the full report fixing the peer reviewer's issues."),
+    PromptDef("research_answer", "Research: Q&A on a report", "Research",
+              ref=("research_lab_deep", "ANSWER_SYS"),
+              help="Ask-the-Genius: answers follow-up questions from the finished report "
+                   "and its research notes."),
+    PromptDef("research_deeper", "Research: deeper-pass plan", "Research",
+              ref=("research_lab_deep", "DEEPER_SYS"),
+              help="Plans the follow-up searches for a 🔍 Dig-deeper pass on a finished "
+                   "report. Contains literal { } JSON — keep it."),
+    PromptDef("research_suggest", "Research: project ideas", "Research",
+              ref=("research_lab_deep", "SUGGEST_SYS"),
+              help="The 💡 ideas board: suggests fresh practical project ideas, never "
+                   "repeating past projects. Contains literal { } JSON — keep it."),
+    PromptDef("research_price", "Research: price recheck", "Research",
+              ref=("research_lab_market", "PRICE_SYS"),
+              help="Price watch: estimates each material's current price from fresh web "
+                   "snippets (recurring rechecks + 💲 Recheck now). Contains literal { } "
+                   "JSON — keep it."),
 ]
 
 _BY_KEY = {p.key: p for p in PROMPTS}
 
 # Category display order for the UI.
-CATEGORIES = ["Studio", "Storefront", "Resell", "Social", "Library", "Security", "Assistant", "Dev Swarm", "Crypto"]
+CATEGORIES = ["Studio", "NSFW", "Storefront", "Resell", "Social", "Library", "Security", "Assistant", "Dev Swarm", "Crypto", "Research"]
 
 
 def _override(skey: str) -> Optional[str]:

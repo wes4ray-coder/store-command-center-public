@@ -196,7 +196,9 @@ def audio_engines():
 @router.get("/api/audio")
 def list_audio():
     conn = get_conn()
-    rows = conn.execute("SELECT * FROM audio_clips ORDER BY created_at DESC LIMIT 200").fetchall()
+    # nsfw-flagged clips never appear here — /api/nsfw/library only.
+    rows = conn.execute("SELECT * FROM audio_clips WHERE COALESCE(nsfw,0)=0 "
+                        "ORDER BY created_at DESC LIMIT 200").fetchall()
     conn.close()
     return [dict(r) for r in rows]
 

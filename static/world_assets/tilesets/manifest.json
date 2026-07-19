@@ -3,7 +3,7 @@
   "atlases": [
     {
       "id": "gen",
-      "src": "gen_futuristic.png"
+      "src": "gen_atlas.png"
     }
   ],
   "sprites": {
@@ -52,27 +52,9 @@
       "w": 64,
       "h": 64
     },
-    "path": {
-      "atlas": "gen",
-      "x": 64,
-      "y": 0,
-      "w": 64,
-      "h": 64
-    },
-    "floor": {
-      "atlas": "gen",
-      "x": 128,
-      "y": 0,
-      "w": 64,
-      "h": 64
-    },
-    "wall": {
-      "atlas": "gen",
-      "x": 192,
-      "y": 0,
-      "w": 64,
-      "h": 64
-    },
+    "path": null,
+    "floor": null,
+    "wall": null,
     "water": {
       "atlas": "gen",
       "x": 320,
@@ -88,5 +70,6 @@
       "w": 64,
       "h": 64
     }
-  }
+  },
+  "v": 1784432764
 }

@@ -243,6 +243,16 @@ def _answered_context(jid) -> str:
     return "\n".join(f"Q: {q['question']}\nA: {q['answer']}" for q in qs)
 
 
+def _watcher_context(jid) -> str:
+    """The Agent Watcher's latest diagnosis for this job (why the previous run
+    failed/stalled + how to fix it), so a re-run starts informed, not blind."""
+    conn = get_conn()
+    row = conn.execute("SELECT content FROM swarm_events WHERE job_id=? AND agent='watcher' "
+                       "ORDER BY id DESC LIMIT 1", (jid,)).fetchone()
+    conn.close()
+    return row["content"] if row else ""
+
+
 def _stage_coding(job, roster, cfg, feedback=""):
     jid = job["id"]
     _set(jid, status="coding", current_agent="coder", progress_msg="Writing code…")
@@ -255,6 +265,9 @@ def _stage_coding(job, roster, cfg, feedback=""):
         user += f"\nCLARIFICATIONS:\n{answers}\n"
     if feedback:
         user += f"\nREVIEW/TEST FEEDBACK to address:\n{feedback}\n"
+    wnotes = _watcher_context(jid)
+    if wnotes:
+        user += f"\nWATCHER NOTES (why the previous run stopped — address this):\n{wnotes}\n"
     user += f"\nCURRENT FILE CONTENTS:\n{ctx}\n\nReturn the full updated file(s)."
     files = []
     out = ""

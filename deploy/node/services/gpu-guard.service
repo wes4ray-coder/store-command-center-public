@@ -1,0 +1,12 @@
+[Unit]
+Description=GPU guard — pause Store AI queue while gaming/heavy GPU apps run
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=%h/gpu-guard.sh
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target

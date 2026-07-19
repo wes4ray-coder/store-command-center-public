@@ -15,3 +15,16 @@ fastapi-mcp==0.4.0
 requests==2.34.2
 numpy==2.5.1
 Pillow==12.3.0
+qrcode==8.2
+# Wallets / Crypto / Oracle tabs (bip_utils is a HARD import at app startup via
+# app/wallet_lib.py — the server won't boot without it)
+bip_utils==2.12.1
+bitcoinlib==0.7.9
+web3==7.16.0
+eth-account==0.13.7
+pyotp==2.10.0
+robin_stocks==3.4.0
+yfinance==1.5.1
+# 3D Studio local turntable renders (app/render3d.py)
+trimesh==4.12.2
+matplotlib==3.11.0

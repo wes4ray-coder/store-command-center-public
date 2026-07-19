@@ -171,8 +171,10 @@ def jelly_submit(request: Request, payload: dict = Body(...)):
     res = jellycoin.submit_work(str(payload.get("work_id", "")),
                                 int(payload.get("nonce", 0)),
                                 str(payload.get("miner", "")))
-    if res.get("ok"):
+    if res.get("ok") and res.get("wallet"):                 # winner-take-all block
         logger.info(f"[jelly] block {res['height']} mined by {res['wallet']} (+{res['reward']} JLY)")
+    elif res.get("block"):                                  # pool block (reward split)
+        logger.info(f"[jelly] pool block {res['height']} split (+{res.get('reward', 0)} JLY)")
     return res
 
 
@@ -224,6 +226,28 @@ def jelly_peer_billing_set(payload: dict = Body(...)):
     finally:
         conn.close()
     return jelly_peer_billing()
+
+
+# ── buddy-share mining pool (proportional reward splitting; toggle default OFF) ─
+@router.get("/api/jelly/pool")
+def jelly_pool():
+    return jellycoin.pool_state()
+
+
+@router.post("/api/jelly/pool")
+def jelly_pool_set(payload: dict = Body(...)):
+    """God-side controls (session-guarded — NOT in the mining exemption): flip the
+    pool toggle and/or map named rigs to payout wallets (e.g. rig → peer:<name>)."""
+    if "enabled" in payload:
+        jellycoin.set_pool_enabled(bool(payload["enabled"]))
+    owners = payload.get("owners") or {}
+    if isinstance(owners, dict):
+        for rig, owner in owners.items():
+            try:
+                jellycoin.set_rig_owner(str(rig), str(owner))
+            except ValueError:
+                pass
+    return jellycoin.pool_state()
 
 
 # ── NFTs ─────────────────────────────────────────────────────────────────────

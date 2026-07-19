@@ -1,0 +1,19 @@
+# JellyMiner unit TEMPLATE — installed by node-setup.sh ONLY when no
+# jellyminer.service exists yet (an existing unit, possibly carrying a literal
+# --token, is never overwritten). STORE_URL + JELLY_TOKEN come from
+# ~/.config/store-node.env, which node-setup.sh writes from the values the Store
+# passes over SSH (or you can fill it in by hand — token is in the Store UI under
+# Crypto → JellyCoin → Mining).
+[Unit]
+Description=JellyMiner — JellyCoin GPU miner (throttled 50%% to coexist with AI)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+EnvironmentFile=%h/.config/store-node.env
+ExecStart=%h/jellyminer-venv/bin/python %h/jellyminer.py --url ${STORE_URL} --token ${JELLY_TOKEN} --name %l --throttle 50
+Restart=on-failure
+RestartSec=15
+
+[Install]
+WantedBy=default.target

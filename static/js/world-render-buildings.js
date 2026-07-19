@@ -8,7 +8,8 @@
    read as actual buildings. Live-drawn (async sprites); box stays as the fallback. */
 const _BLD_SPRITE = { bar: 'bld_tavern', arcade: 'bld_arcade', cafe: 'bld_cafe', tv: 'bld_shop_1',
                       lounge: 'bld_shop_1', church: 'bld_church', library: 'bld_library',
-                      townhall: 'bld_townhall', exec: 'bld_shop_2', gas: 'bld_shop_2' };
+                      townhall: 'bld_townhall', exec: 'bld_shop_2', gas: 'bld_shop_2',
+                      research: 'bld_library' };
 function _bldSprite(b) {
   if (b.loc && _BLD_SPRITE[b.loc]) return _BLD_SPRITE[b.loc];
   if (b.kind === 'house') return (b.id % 2) ? 'bld_house_2' : 'bld_house_1';
@@ -123,7 +124,7 @@ function _drawBuildingDepth(ctx) {
    Zoomed OUT the town reads as a real pixel village; zooming IN fades the roofs
    away so the interiors (desks, furniture, agents) the sim depends on stay
    visible. Drawn after agents — anyone indoors is naturally "under the roof". */
-const WALL_H = 14, ROOF_OV = 3;
+const WALL_H = 8, ROOF_OV = 3;   // thinner pseudo-3D front-wall face, consistent with the new thin per-building shell (was 14)
 const _ROOF_PAL = {
   house:    [['#a84f35', '#7f3c28', '#c06a4a'], ['#5d6a7c', '#485460', '#75859a'],
              ['#5f7d49', '#4a6338', '#77985c'], ['#8a6a42', '#6d5334', '#a5854f']],
@@ -136,19 +137,28 @@ const _ROOF_PAL = {
 };
 const _FACE_PAL = ['#d9c9a8', '#cbb491', '#c2c8ce', '#d1bfae'];
 function _roofAlpha() {
+  // Cutaway only once interiors are actually legible: below ~2.0x a room is a
+  // handful of pixels, so the roof stays solid; the fade finishes by 2.8x where
+  // desks/agents read clearly. (Was 1.6-2.4 — mid-zoom showed half-faded
+  // interiors that looked like a broken dark slab, worst at night.)
   const s = WM.camera.scale;
-  return s <= 1.6 ? 1 : s >= 2.4 ? 0 : 1 - (s - 1.6) / 0.8;
+  // Hard-ish cut: roofs stay FULLY solid until 2.4x (so houses read as crisp
+  // roofed buildings at normal inspect zoom, not a 50%-faded translucent slab),
+  // then reveal the interior over a narrow 0.2 band. (Was a 0.8-wide linear fade
+  // from 2.0-2.8 that left every house a washed-out tinted quad at mid-zoom.)
+  return s <= 2.4 ? 1 : s >= 2.6 ? 0 : (2.6 - s) / 0.2;
 }
 function _drawRoofs(ctx) {
   const alpha = _roofAlpha();
   if (alpha <= 0.02) return;
   const winter = _worldState?.orchestra?.season === 'winter';
+  const nglow = Math.min(1, _daylight(_worldState?.clock_hour ?? 12).dark * 1.6);
   const now = performance.now();
   ctx.save();
   ctx.globalAlpha = alpha;
   for (const b of (WM.buildings || [])) {
     const T = WM.TILE, bx = b.c * T, by = b.r * T, bw = b.w * T, bh = b.h * T;
-    if (b.kind === 'hq') { _flatRoof(ctx, bx, by, bw, bh, winter); continue; }
+    if (b.kind === 'hq') { _flatRoof(ctx, bx, by, bw, bh, winter, nglow); continue; }
     const pal = _ROOF_PAL[b.kind] || _ROOF_PAL.house;
     const [main, dark, light] = pal[(b.id || 0) % pal.length];
     const faceTop = by + bh - WALL_H;
@@ -205,29 +215,49 @@ function _drawRoofs(ctx) {
 }
 
 /* THE COMPANY HQ gets a modern flat roof: parapet, skylight grid, AC units and a
-   logo stripe — the corporate island in a gabled village. */
-function _flatRoof(ctx, bx, by, bw, bh, winter) {
-  const faceTop = by + bh - WALL_H;
-  ctx.fillStyle = '#3c4250'; ctx.fillRect(bx - 2, by - WALL_H - 2, bw + 4, bh + 4); // slab (footprint shifted up by wall height)
-  ctx.fillStyle = '#4a5162'; ctx.fillRect(bx + 2, by - WALL_H + 2, bw - 4, bh - 4);
-  ctx.strokeStyle = '#5a6274'; ctx.lineWidth = 2; ctx.strokeRect(bx - 1, by - WALL_H - 1, bw + 2, bh + 2);  // parapet
-  // face: glass-and-steel front
-  ctx.fillStyle = '#2e3646'; ctx.fillRect(bx, faceTop, bw, WALL_H);
-  for (let i = 0; i < Math.floor(bw / 14); i++) {
-    ctx.fillStyle = 'rgba(140,190,240,.35)'; ctx.fillRect(bx + 3 + i * 14, faceTop + 3, 9, 8);
-  }
-  // skylights over the atrium
-  for (let gy = 0; gy < 2; gy++) for (let gx = 0; gx < 4; gx++) {
-    ctx.fillStyle = 'rgba(150,200,250,.28)';
-    ctx.fillRect(bx + bw * 0.14 + gx * bw * 0.19, by - WALL_H + bh * 0.18 + gy * bh * 0.34, bw * 0.13, bh * 0.2);
-    ctx.strokeStyle = 'rgba(20,26,38,.5)'; ctx.lineWidth = 1;
-    ctx.strokeRect(bx + bw * 0.14 + gx * bw * 0.19, by - WALL_H + bh * 0.18 + gy * bh * 0.34, bw * 0.13, bh * 0.2);
+   logo stripe — the corporate island in a gabled village. Redesigned from the old
+   near-black navy slab (it read as a broken empty building at mid zoom): warm
+   concrete panels, a service ridge, and skylights that GLOW at night from the
+   lit offices below. `nglow` = 0 (day) → 1 (full night). */
+function _hqSkylights(bx, by, bw, bh) {
+  const out = [];
+  for (let gy = 0; gy < 2; gy++) for (let gx = 0; gx < 4; gx++)
+    out.push({ x: bx + bw * 0.14 + gx * bw * 0.19, y: by - WALL_H + bh * 0.18 + gy * bh * 0.34,
+               w: bw * 0.13, h: bh * 0.2 });
+  return out;
+}
+function _flatRoof(ctx, bx, by, bw, bh, winter, nglow) {
+  nglow = nglow || 0;
+  const faceTop = by + bh - WALL_H, ry0 = by - WALL_H;
+  // slab: readable mid-gray concrete, not a dark void
+  ctx.fillStyle = '#555d6c'; ctx.fillRect(bx - 2, ry0 - 2, bw + 4, bh + 4);   // footprint shifted up by wall height
+  ctx.fillStyle = '#68717f'; ctx.fillRect(bx + 2, ry0 + 2, bw - 4, bh - 4);
+  // concrete panel seams + a central service walkway so the roof reads as a textured surface
+  ctx.strokeStyle = 'rgba(20,26,38,.26)'; ctx.lineWidth = 1;
+  for (let px = bx + bw / 6; px < bx + bw - 4; px += bw / 6) { ctx.beginPath(); ctx.moveTo(px, ry0 + 3); ctx.lineTo(px, ry0 + bh - 3); ctx.stroke(); }
+  for (let py = ry0 + bh / 4; py < ry0 + bh - 4; py += bh / 4) { ctx.beginPath(); ctx.moveTo(bx + 3, py); ctx.lineTo(bx + bw - 3, py); ctx.stroke(); }
+  ctx.fillStyle = '#7b8595'; ctx.fillRect(bx + 4, ry0 + bh / 2 - 2, bw - 8, 4);            // ridge walkway
+  ctx.fillStyle = 'rgba(255,255,255,.12)'; ctx.fillRect(bx + 4, ry0 + bh / 2 - 2, bw - 8, 1);
+  // parapet: lit top edge + inner shadow
+  ctx.strokeStyle = '#828c9d'; ctx.lineWidth = 2; ctx.strokeRect(bx - 1, ry0 - 1, bw + 2, bh + 2);
+  ctx.strokeStyle = 'rgba(0,0,0,.28)'; ctx.lineWidth = 1; ctx.strokeRect(bx + 1.5, ry0 + 1.5, bw - 3, bh - 3);
+  // face: glass-and-steel front — windows go warm-lit after dark
+  ctx.fillStyle = '#39424f'; ctx.fillRect(bx, faceTop, bw, WALL_H);
+  ctx.fillStyle = nglow > 0.15 ? `rgba(255,205,130,${0.28 + 0.34 * nglow})` : 'rgba(140,190,240,.4)';
+  for (let i = 0; i < Math.floor(bw / 14); i++) ctx.fillRect(bx + 3 + i * 14, faceTop + 3, 9, 8);
+  // skylights over the atrium — sky-mirrors by day, warm office light by night
+  for (const s of _hqSkylights(bx, by, bw, bh)) {
+    ctx.fillStyle = nglow > 0.15 ? `rgba(255,200,120,${0.30 + 0.40 * nglow})` : 'rgba(165,210,250,.45)';
+    ctx.fillRect(s.x, s.y, s.w, s.h);
+    ctx.strokeStyle = 'rgba(20,26,38,.5)'; ctx.lineWidth = 1; ctx.strokeRect(s.x, s.y, s.w, s.h);
+    ctx.strokeStyle = 'rgba(255,255,255,.20)';                                              // mullions
+    ctx.beginPath(); ctx.moveTo(s.x + s.w / 2, s.y); ctx.lineTo(s.x + s.w / 2, s.y + s.h); ctx.stroke();
   }
   // AC units + logo stripe
-  ctx.fillStyle = '#8a919f'; ctx.fillRect(bx + bw - 26, by - WALL_H + 6, 9, 7); ctx.fillRect(bx + bw - 14, by - WALL_H + 6, 9, 7);
-  ctx.fillStyle = 'rgba(0,0,0,.3)'; ctx.fillRect(bx + bw - 26, by - WALL_H + 9, 9, 1); ctx.fillRect(bx + bw - 14, by - WALL_H + 9, 9, 1);
-  ctx.fillStyle = '#3f7fb0'; ctx.fillRect(bx + 6, by - WALL_H + 5, bw * 0.22, 4);
-  if (winter) { ctx.fillStyle = 'rgba(235,240,248,.45)'; ctx.fillRect(bx - 2, by - WALL_H - 2, bw + 4, bh + 4); }
+  ctx.fillStyle = '#8a919f'; ctx.fillRect(bx + bw - 26, ry0 + 6, 9, 7); ctx.fillRect(bx + bw - 14, ry0 + 6, 9, 7);
+  ctx.fillStyle = 'rgba(0,0,0,.3)'; ctx.fillRect(bx + bw - 26, ry0 + 9, 9, 1); ctx.fillRect(bx + bw - 14, ry0 + 9, 9, 1);
+  ctx.fillStyle = '#4f93c8'; ctx.fillRect(bx + 6, ry0 + 5, bw * 0.22, 4);
+  if (winter) { ctx.fillStyle = 'rgba(235,240,248,.45)'; ctx.fillRect(bx - 2, ry0 - 2, bw + 4, bh + 4); }
 }
 function _drawLights(ctx, canvas) {
   const L = _daylight(_worldState?.clock_hour ?? 12);
@@ -242,7 +272,12 @@ function _drawLights(ctx, canvas) {
   ctx.setTransform(dpr * cam.scale, 0, 0, dpr * cam.scale, dpr * cam.x, dpr * cam.y);
   ctx.globalCompositeOperation = 'lighter';
   const glow = Math.min(1, L.dark * 1.6);
-  ctx.fillStyle = `rgba(255,205,130,${0.07 * glow})`;               // faint warm interior wash
+  // Warm interior light. When the camera is zoomed in the roofs fade away and the
+  // interiors are on show — they are LIT rooms, so counter the night tint hard
+  // (they used to sit under the full darkening and read as black boxes). Zoomed
+  // out the roofs cover them again, so the wash eases back to a faint glow.
+  const inWash = 0.07 + 0.34 * (1 - _roofAlpha());
+  ctx.fillStyle = `rgba(255,205,130,${inWash * glow})`;
   for (const b of WM.buildings) ctx.fillRect((b.c + 1) * WM.TILE, (b.r + 1) * WM.TILE, (b.w - 2) * WM.TILE, (b.h - 2) * WM.TILE);
   // lit WINDOWS along each building's bottom wall — the cozy village-at-night look
   const TL = WM.TILE, flick = performance.now() / 900;
@@ -258,6 +293,34 @@ function _drawLights(ctx, canvas) {
       const g = ctx.createRadialGradient(wx, wy, 1, wx, wy, 13);
       g.addColorStop(0, `rgba(255,214,140,${0.28 * glow})`); g.addColorStop(1, 'rgba(255,214,140,0)');
       ctx.fillStyle = g; ctx.beginPath(); ctx.arc(wx, wy, 13, 0, 6.283); ctx.fill();
+    }
+  }
+  // HQ at night: the flat roof's skylights + face windows glow through the dark
+  // wash while the roof is on, and once the cutaway kicks in the department
+  // rooms read as warm LIT offices (occupied ones brightest) instead of the old
+  // uniformly-dim gray squares.
+  const ra = _roofAlpha();
+  const hq = (WM.buildings || []).find(b => b.kind === 'hq');
+  if (hq && ra > 0.05) {
+    const bx = hq.c * TL, by = hq.r * TL, bw = hq.w * TL, bh = hq.h * TL;
+    for (const s of _hqSkylights(bx, by, bw, bh)) {
+      const cx = s.x + s.w / 2, cy = s.y + s.h / 2;
+      const g = ctx.createRadialGradient(cx, cy, 1, cx, cy, s.w);
+      g.addColorStop(0, `rgba(255,205,130,${0.40 * glow * ra})`); g.addColorStop(1, 'rgba(255,205,130,0)');
+      ctx.fillStyle = g; ctx.beginPath(); ctx.arc(cx, cy, s.w, 0, 6.283); ctx.fill();
+    }
+  }
+  if (ra < 0.95) {
+    for (const rm of (WM.hqRooms || [])) {
+      let occupied = false;
+      for (const id in _sprites) {
+        const s = _sprites[id];
+        if (s.px >= rm.x0 && s.px <= rm.x0 + rm.w && s.py >= rm.y0 && s.py <= rm.y0 + rm.h) { occupied = true; break; }
+      }
+      const amt = (occupied ? 0.52 : 0.28) * glow * (1 - ra);
+      const g = ctx.createRadialGradient(rm.x, rm.y, 2, rm.x, rm.y, Math.max(rm.w, rm.h) * 0.62);
+      g.addColorStop(0, `rgba(255,205,135,${amt})`); g.addColorStop(1, 'rgba(255,205,135,0)');
+      ctx.fillStyle = g; ctx.fillRect(rm.x0, rm.y0, rm.w, rm.h);
     }
   }
   for (const d of WM.decor) {                                       // lamps + fountain glow
@@ -289,15 +352,16 @@ function _drawWallArt(ctx) {
   };
   for (const b of (WM.buildings || [])) {
     if (b.kind !== 'house') continue;
-    const n = 1 + (b.id % 2);                                   // 1–2 pictures per home
+    // small wall pictures — they were TILE-plus posters that dwarfed the bed
+    const n = b.w >= 6 ? 1 + (b.id % 2) : 1;                    // 1–2 per home, 1 in small homes
     for (let k = 0; k < n; k++) {
       const im = _artImg(art[(b.id + k) % art.length]); if (!im) continue;
-      frame(im, (b.c + 1.4 + k * 2.1) * TL, (b.r + 1.05) * TL, TL * 1.25, TL * 0.95);
+      frame(im, (b.c + 1.4 + k * 1.6) * TL, (b.r + 1.05) * TL, TL * 0.85, TL * 0.65);
     }
   }
   for (let i = 0; i < (WM.hqRooms || []).length; i++) {          // one per HQ department room
     const rm = WM.hqRooms[i], im = _artImg(art[i % art.length]); if (!im) continue;
-    const fw = TL * 1.05, fh = TL * 0.8;
+    const fw = TL * 0.85, fh = TL * 0.65;
     frame(im, rm.x - fw / 2, rm.y - TL * 1.5, fw, fh);
   }
 }

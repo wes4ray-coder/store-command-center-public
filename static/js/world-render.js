@@ -12,7 +12,8 @@ function _spriteOffset(a) {
 function _agentSpeed(s) {
   const st = s.agent && s.agent.state;
   if (st === 'defending' || (s.agent && s.agent.role && s.agent.role !== 'downed')) return 1.9;  // raid urgency
-  if (st === 'leisure' || st === 'idle' || st === 'breakdown') return 0.85;                        // slow amble/mosey
+  if (st === 'leisure' || st === 'idle' || st === 'breakdown'
+      || st === 'sitting' || st === 'picnicking' || st === 'admiring') return 0.85;                // slow amble/mosey
   return 1.25;                                                                                     // normal walk to work
 }
 

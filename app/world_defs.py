@@ -40,6 +40,7 @@ DEPARTMENTS = {
     "social":     ("Social Desk",  "#38bdf8"),
     "finance":    ("Finance Desk", "#eab308"),
     "netsec":     ("Network Sec",  "#94a3b8"),
+    "research":   ("Research Lab", "#818cf8"),
 }
 
 # The 8 real OpenClaw agents → named, persistent characters.
@@ -77,6 +78,10 @@ WORKER_POOL = [
     ("w_social_1", "Sunny", "social",   "social",    "#38bdf8"),
     ("w_fin_1",    "Penny", "finance",  "finance",   "#eab308"),
     ("w_sec_1",    "Gale",  "netsec",   "netsec",    "#94a3b8"),
+    # Research Geniuses — the Research Lab's resident researchers (Research tab)
+    ("w_res_1",    "Newton", "research", "research",  "#818cf8"),
+    ("w_res_2",    "Curie",  "research", "research",  "#a5b4fc"),
+    ("w_res_3",    "Vinci",  "research", "research",  "#6366f1"),
 ]
 
 # ── Economy ───────────────────────────────────────────────────────────────────
@@ -96,7 +101,7 @@ DEPT_TOOL = {
     "video":      "film camera",     "audio":   "synthesizer keyboard",
     "models3d":   "3d printer",      "publishing": "printing press",
     "devlab":     "server rack",     "resell":  "cardboard shipping box",
-    "trends":     "crystal ball",
+    "trends":     "crystal ball",    "research": "microscope",
 }
 
 

@@ -52,12 +52,17 @@ window.WA = (function () {
       if (r.ok) {
         manifest = await r.json();
         // key by the RESOLVED url — _load stores img[url], so the old img[a.src]
-        // (bare filename) lookup never matched and atlases could never go ready
+        // (bare filename) lookup never matched and atlases could never go ready.
+        // ?v= busts the browser/proxy cache: regenerating a tileset reuses the
+        // SAME filename, and a stale cached atlas rendered the whole map wrong.
+        const ver = manifest.v || 0;
         await Promise.all((manifest.atlases || []).map(a => {
-          const url = a.src && a.src.startsWith('/') ? a.src : (base || '/store/static/world_assets/tilesets') + '/' + a.src;
+          let url = a.src && a.src.startsWith('/') ? a.src : (base || '/store/static/world_assets/tilesets') + '/' + a.src;
+          if (ver) url += (url.includes('?') ? '&' : '?') + 'v=' + ver;
           return _load(url).then(ok => { if (ok) manifest.__atlas = Object.assign(manifest.__atlas || {}, { [a.id]: img[url] }); });
         }));
         ready = !!(manifest && (manifest.atlases || []).length && manifest.__atlas && Object.keys(manifest.__atlas).length);
+        if (ready) _vetTiles();     // drop broken/black cells → procedural fallback
       }
     } catch (e) { /* no manifest → procedural terrain/structures */ }
 
@@ -90,9 +95,63 @@ window.WA = (function () {
     const s = _spr(name), a = s && _atlas(s.atlas); if (!a) return false;
     const sc = (targetH || s.h) / s.h; ctx.drawImage(a, s.x, s.y, s.w, s.h, dx - s.w * sc / 2, dy - s.h * sc, s.w * sc, s.h * sc); return true;
   }
+
+  // Validate the mapped terrain cells once per init: a stale/failed generation can
+  // leave a cell that is near-black or a single flat colour, which painted the
+  // WHOLE terrain black/red. Any bad cell is unmapped → procedural art returns.
+  // The generated atlas ('gen') also never overrides FLOOR/WALL — those are
+  // structural tiles with crafted interior art (insets, bevels, wood floors);
+  // user-supplied packs (other atlas ids) keep full control.
+  function _vetTiles() {
+    const tiles = (manifest && manifest.tiles) || {};
+    for (const key in tiles) {
+      const t = tiles[key];
+      if (!t || typeof t !== 'object') continue;
+      const a = _atlas(t.atlas); if (!a) continue;
+      if (t.atlas === 'gen' && (key === 'floor' || key === 'wall')) { tiles[key] = null; continue; }
+      try {
+        const w = t.w || 16, h = t.h || 16, cv = document.createElement('canvas');
+        cv.width = w; cv.height = h;
+        const cx = cv.getContext('2d');
+        cx.drawImage(a, t.x, t.y, w, h, 0, 0, w, h);
+        const d = cx.getImageData(0, 0, w, h).data;
+        let sum = 0, sum2 = 0, n = 0;
+        for (let i = 0; i < d.length; i += 16) {          // sample every 4th px
+          const l = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+          sum += l; sum2 += l * l; n++;
+        }
+        const mean = sum / n, sd = Math.sqrt(Math.max(0, sum2 / n - mean * mean));
+        if (mean < 26 || sd < 6) { tiles[key] = null; console.warn('[WA] tile "' + key + '" failed QA (mean ' + mean.toFixed(0) + ', sd ' + sd.toFixed(0) + ') — using procedural art'); }
+      } catch (e) { tiles[key] = null; }
+    }
+    _scaled = {};                                          // any prior prescales are stale
+  }
+
+  // Prescale an atlas cell to the on-map tile size ONCE with smoothing — blitting
+  // 64px art into a 20px tile with nearest-neighbour every bake produced
+  // salt-and-pepper noise ("broken" terrain). Area-averaged it reads as texture.
+  let _scaled = {};
+  function _scaledTile(t, size) {
+    const k = t.atlas + ':' + t.x + ':' + t.y + '@' + size;
+    let cv = _scaled[k];
+    if (cv === undefined) {
+      const a = _atlas(t.atlas); if (!a) return null;
+      cv = document.createElement('canvas'); cv.width = size; cv.height = size;
+      const cx = cv.getContext('2d');
+      cx.imageSmoothingEnabled = true; cx.imageSmoothingQuality = 'high';
+      cx.drawImage(a, t.x, t.y, t.w || 16, t.h || 16, 0, 0, size, size);
+      _scaled[k] = cv;
+    }
+    return cv;
+  }
   function tile(ctx, key, dx, dy, size) {
-    const t = ready && manifest && manifest.tiles && manifest.tiles[key], a = t && _atlas(t.atlas); if (!a) return false;
-    ctx.drawImage(a, t.x, t.y, t.w || 16, t.h || 16, dx, dy, size, size); return true;
+    const t = ready && manifest && manifest.tiles && manifest.tiles[key], a = t && typeof t === 'object' && _atlas(t.atlas); if (!a) return false;
+    const sw = t.w || 16;
+    if (size < sw) {                                       // downscale → use the smooth prescale
+      const cv = _scaledTile(t, Math.round(size)); if (!cv) return false;
+      ctx.drawImage(cv, dx, dy, size, size); return true;
+    }
+    ctx.drawImage(a, t.x, t.y, sw, t.h || 16, dx, dy, size, size); return true;
   }
 
   // ── animated character: draw a villager facing `dir` in mode walk|idle|work ──

@@ -115,15 +115,17 @@ async function _loadTrendIntoSettings() {
     } catch(e) { toast('Error: ' + e.message, 'error'); }
   });
 
-  body.addEventListener('click', async e => {
-    const btn = e.target.closest('[data-action="remove-rss"]');
-    if (!btn) return;
-    try {
-      const cfg2 = await api('/api/trends/config');
-      const feeds = (cfg2.rss_urls ? cfg2.rss_urls.split('\n').filter(Boolean) : []).filter(f => f !== btn.dataset.url);
-      await api('/api/trends/config', { method: 'PATCH', body: JSON.stringify({ rss_urls: feeds.join('\n') }) });
-      toast('Feed removed'); _loadTrendIntoSettings();
-    } catch(e) { toast('Error: ' + e.message, 'error'); }
+  // Bind to the freshly rendered buttons — NOT a delegated listener on #trend-body,
+  // which persists across re-renders and would stack a duplicate handler per reload.
+  body.querySelectorAll('[data-action="remove-rss"]').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      try {
+        const cfg2 = await api('/api/trends/config');
+        const feeds = (cfg2.rss_urls ? cfg2.rss_urls.split('\n').filter(Boolean) : []).filter(f => f !== btn.dataset.url);
+        await api('/api/trends/config', { method: 'PATCH', body: JSON.stringify({ rss_urls: feeds.join('\n') }) });
+        toast('Feed removed'); _loadTrendIntoSettings();
+      } catch(e) { toast('Error: ' + e.message, 'error'); }
+    });
   });
 }
 
@@ -143,8 +145,8 @@ function settingsSub(k) {
 }
 
 async function renderSettings() {
-  let settings = {};
-  try { settings = await api('/api/settings'); } catch {}
+  let settings = {}, settingsLoaded = true;
+  try { settings = await api('/api/settings'); } catch { settingsLoaded = false; }
   // Etsy connection status hits Etsy's external API and is slow — load it AFTER paint
   // (see _loadEtsyStatus) so the Settings tab appears instantly.
 
@@ -290,6 +292,12 @@ async function renderSettings() {
   loadPeers();
 
   async function saveAll() {
+    if (!settingsLoaded) {
+      // The initial GET failed, so the inputs rendered EMPTY — saving now would
+      // overwrite real keys (Printify/Etsy credentials, store name) with ''.
+      toast('Settings failed to load — refresh the page before saving.', 'error');
+      return;
+    }
     try {
       const patch = {
         printify_key:         document.getElementById('s-printify-key').value,

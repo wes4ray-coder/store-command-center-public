@@ -250,6 +250,7 @@ async def proxy_chat(request: Request):
     # for loads/swaps.
     if _resident(model) and getattr(orch, "_img_state", "idle") in ("idle", None, ""):
         try:
+            orch.mark_activity()   # keep the idle-TTL sweep from evicting an in-use model
             if stream:
                 def _gen():
                     with httpx.stream("POST", f"{LMSTUDIO_URL}/chat/completions", json=body,

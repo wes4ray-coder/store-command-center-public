@@ -12,6 +12,7 @@ window.WM = (function () {
   const W = COLS * TILE, H = ROWS * TILE;
   const T = { GRASS: 0, PATH: 1, FLOOR: 2, WALL: 3, TREE: 4, WATER: 5, PLAZA: 6, MOUNTAIN: 7 };
   const WALK_COST = { 0: 3, 1: 1, 2: 1, 6: 1.2 };   // MOUNTAIN/WATER/TREE/WALL absent → impassable
+  const WALL_PX = Math.round(TILE * 0.5);            // 10 — themed per-building wall shell band (HALF the old 20px stone ring; collision T.WALL is unchanged)
 
   // ── DESIRE LINES: foot traffic wears grass → dirt → packed → cobbled road ──
   // Every walker bumps the tile it steps on; worn tiles get CHEAPER for A*, so
@@ -44,6 +45,7 @@ window.WM = (function () {
   let nodes = [];            // resource nodes {col,row,kind} for idle-skilling (woodcut/mine/farm/fish/build)
   let waterTiles = [];       // {col,row} of pond/water cells — animated live by the renderer
   let terrainCanvas = null;
+  let _terrainImg = null;    // Layer-2: one generated whole-world ground image (null = procedural per-tile)
   const camera = { x: 0, y: 0, scale: 1 };
   let _nextId = 1;
 
@@ -58,11 +60,12 @@ window.WM = (function () {
   }
 
   const KIND_COLOR = { hq: '#8fb3ff', house: '#6b7ba0', shop: '#6aa6d6', leisure: '#f0b45a',
-                       townhall: '#fde047', exec: '#fb7185', church: '#cdbff0', library: '#8fc7a9' };
+                       townhall: '#fde047', exec: '#fb7185', church: '#cdbff0', library: '#8fc7a9',
+                       research: '#818cf8' };
   // distinct roof colour per named venue/loc so no two building types look alike
   const LOC_COLOR = { bar: '#e0714a', arcade: '#a26cf0', tv: '#4aa0e0', cafe: '#d1a05a',
                       church: '#cdbff0', library: '#8fc7a9', townhall: '#fde047', exec: '#fb7185',
-                      park: '#5bb46a', gas: '#e05a6a', lounge: '#c07ad0' };
+                      park: '#5bb46a', gas: '#e05a6a', lounge: '#c07ad0', research: '#818cf8' };
 
   // ── organic-map helpers ──
   const TAU = Math.PI * 2;
@@ -159,7 +162,7 @@ window.WM = (function () {
 
     // ── scatter buildings organically along the roads (inner: civic/leisure; outer: shops/homes) ──
     const leisure = [['bar', 'Bar 🍺'], ['arcade', 'Arcade 🕹️'], ['tv', 'Lounge 📺'], ['cafe', 'Café ☕']];
-    const civic = [['church', 'Church ⛪'], ['library', 'Library 📚'], ['townhall', 'Town Hall 🏛️'], ['exec', 'Exec Office 💼']];
+    const civic = [['church', 'Church ⛪'], ['library', 'Library 📚'], ['townhall', 'Town Hall 🏛️'], ['exec', 'Exec Office 💼'], ['research', 'Research Lab 🔬']];
     const shopNames = ['Diner', 'Market', 'Bank', 'Gym', 'Salon', 'Bakery', 'Books', 'Garage', 'Clinic', 'Deli', 'Toys', 'Pharmacy'];
     for (const [k, lbl] of leisure) _tryPlace(ri(6, 7), ri(5, 6), 12, 26, { kind: 'leisure', loc: k, label: lbl, color: LOC_COLOR[k] || KIND_COLOR.leisure }, rnd, pick, CX, CY);
     for (const [k, lbl] of civic) _tryPlace(ri(6, 8), ri(5, 7), 13, 28, { kind: k, loc: k, label: lbl, color: KIND_COLOR[k] }, rnd, pick, CX, CY);
@@ -291,7 +294,11 @@ window.WM = (function () {
         const dcx = [b.c + 4, b.c + (b.w / 2 | 0), b.c + b.w - 4], dcy = [b.r + 3, b.r + (b.h / 2 | 0), b.r + b.h - 3];
         deptKeys.forEach((k, i) => { locations['desk:' + k] = { col: dcx[i % 3], row: dcy[i / 3 | 0] }; });
         locations['defense'] = { col: b.c + (b.w / 2 | 0), row: b.r + b.h + 2 };   // rally point south of HQ (raid)
-      } else if (b.loc) locations[b.loc] = interior;
+      } else if (b.loc) {
+        locations[b.loc] = interior;
+        // the Research Geniuses' dept has no HQ desk — their "desk" IS the lab
+        if (b.loc === 'research') locations['desk:research'] = interior;
+      }
       else if (b.kind === 'house') houseSlots.push(interior);
     }
     if (!houseSlots.length) houseSlots.push({ col: COLS / 2 | 0, row: ROWS / 2 | 0 });
@@ -307,7 +314,31 @@ window.WM = (function () {
       if (Array.isArray(saved.landmarks)) landmarks = saved.landmarks.map(l => ({ ...l }));
       _nextId = Math.max(0, ...buildings.map(b => b.id || 0)) + 1;
     }
+    _leisureSpots();
     rasterize();
+  }
+
+  // ── public-space leisure destinations (Mayor's park & plaza upgrade) ──
+  // Anchored to the decor that's ACTUALLY on the map (works with saved/edited
+  // layouts) so agents walk to what you see: a bench to sit on, the plaza
+  // fountain to admire, and a picnic spot on the green (created on first run
+  // if the layout predates it, then saved with the layout like any decor).
+  function _leisureSpots() {
+    const toTile = d => ({ col: Math.max(1, Math.min(COLS - 2, d.x / TILE | 0)),
+                           row: Math.max(1, Math.min(ROWS - 2, d.y / TILE | 0)) });
+    const fount = decor.find(d => d.kind === 'fountain');
+    if (fount) locations['plaza'] = toTile(fount);
+    const bench = decor.find(d => d.kind === 'bench');
+    if (bench) locations['bench'] = toTile(bench);
+    let pic = decor.find(d => d.kind === 'picnic_table');
+    if (!pic) {
+      const p = locations['park'] || { col: COLS / 2 | 0, row: ROWS / 2 | 0 };
+      pic = { x: (p.col + 2.5) * TILE, y: (p.row + 1.5) * TILE, kind: 'picnic_table' };
+      decor.push(pic);
+    }
+    locations['picnic'] = toTile(pic);
+    for (const k of ['plaza', 'bench', 'picnic'])   // never strand an agent
+      if (!locations[k]) locations[k] = locations['park'];
   }
 
   // ── EDIT API (play-god) ──
@@ -390,14 +421,37 @@ window.WM = (function () {
   const hsh = (c, r, s) => { let x = ((c + 1) * 374761393 + (r + 1) * 668265263 + (s || 0) * 2246822519) >>> 0; x = ((x ^ (x >>> 13)) * 1274126177) >>> 0; return (x >>> 0) / 4294967296; };
   const FLOWERS = ['#e05a6a', '#e8c14a', '#e8e0e0', '#d97ac0'];
 
+  // Layer 2: swap in ONE generated whole-world ground image (loads async, then
+  // re-bakes). Terrain LOGIC (pathfinding/water/wear) stays on the grid — this is
+  // a pure visual skin. Passing a falsy url reverts to procedural per-tile art.
+  function setTerrainImage(url) {
+    if (!url) { _terrainImg = null; _bake(); return; }
+    const img = new Image();
+    img.onload = () => { _terrainImg = img; _bake(); };
+    img.onerror = () => { _terrainImg = null; };
+    img.src = url;
+  }
+
   // ── bake terrain (+ decor) as detailed pixel art ──
   function _bake() {
     if (!terrainCanvas) { terrainCanvas = document.createElement('canvas'); terrainCanvas.width = W; terrainCanvas.height = H; }
     const x = terrainCanvas.getContext('2d'); x.imageSmoothingEnabled = false; x.clearRect(0, 0, W, H);
     waterTiles = [];
-    for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) { _tile(x, c, r); if (grid[r][c] === T.WATER) waterTiles.push({ col: c, row: r }); }
-    // (building walls are solid stone — drawn per-tile in _tile; no see-through fence frame)
+    // Layer 2: if a generated terrain image is loaded, blit it as the whole ground
+    // and skip the per-tile NATURAL terrain (grass/path/plaza/water/tree/mountain).
+    // We STILL walk the grid to collect waterTiles (live water animation) and to
+    // paint building FLOOR/WALL cells, so buildings render on top of the image.
+    const useImg = _terrainImg && _terrainImg.complete && _terrainImg.naturalWidth;
+    if (useImg) x.drawImage(_terrainImg, 0, 0, W, H);
+    for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) {
+      const t = grid[r][c];
+      if (!useImg || t === T.FLOOR || t === T.WALL) _tile(x, c, r);
+      if (t === T.WATER) waterTiles.push({ col: c, row: r });
+    }
+    // Building floors/detail first, then the thin themed wall shell on top of the
+    // footprint edge (so the shell sits on the building edge over the floor).
     for (const b of buildings) _building(x, b);
+    for (const b of buildings) _drawBuildingShell(x, b);
     for (const d of decor) _decorSprite(x, d);
   }
 
@@ -562,6 +616,55 @@ window.WM = (function () {
     return { c: dc, r: dr, x: (dc + 0.5) * TILE, y: (dr + 1) * TILE, side: b.door || 'S' };
   }
 
+  // ── themed thin per-building wall shell ──────────────────────────────────────
+  // Muted stone/plaster wall tones per kind (fallback = house). A building may carry
+  // its own b.theme (a hex colour) which round-trips through exportLayout; when absent
+  // the tone derives from b.kind. The picker UI is a later task — support b.theme now.
+  const _WALL_PAL = { hq: '#8b909c', house: '#9a8b76', shop: '#7f93ab', leisure: '#c19a5e',
+                      townhall: '#bda257', exec: '#ab6a6a', church: '#897fb0', library: '#5f9a86',
+                      research: '#7d86cf' };
+  function _themeForKind(kind) { return _WALL_PAL[kind] || _WALL_PAL.house; }
+  // lighten (f>0) / darken (f<0) a #rrggbb toward white / black
+  function _shade(hex, f) {
+    const n = parseInt((hex || '#888').slice(1), 16); let R = (n >> 16) & 255, G = (n >> 8) & 255, B = n & 255;
+    if (f < 0) { const k = 1 + f; R *= k; G *= k; B *= k; } else { R += (255 - R) * f; G += (255 - G) * f; B += (255 - B) * f; }
+    return `rgb(${R | 0},${G | 0},${B | 0})`;
+  }
+  // Stroke a themed wall band on the outer WALL_PX of the building's footprint edge,
+  // leaving a gap at the door tile (aligned with the T.FLOOR opening _stamp punches).
+  function _drawBuildingShell(x, b) {
+    const bx = b.c * TILE, by = b.r * TILE, bw = b.w * TILE, bh = b.h * TILE, wp = WALL_PX;
+    const theme = b.theme || _themeForKind(b.kind);
+    const lite = _shade(theme, 0.24), dark = _shade(theme, -0.30);
+    const d = _doorPx(b);                                   // door tile (same math as _stamp)
+    const dx0 = d.c * TILE, dx1 = (d.c + 1) * TILE;         // door opening pixel span (horizontal edges)
+    const dy0 = d.r * TILE, dy1 = (d.r + 1) * TILE;         // door opening pixel span (vertical edges)
+    const rects = [];
+    // TOP edge band (skip door span when door is on the N side)
+    if (d.side === 'N') { rects.push({ x: bx, y: by, w: dx0 - bx, h: wp, o: 'h' }, { x: dx1, y: by, w: (bx + bw) - dx1, h: wp, o: 'h' }); }
+    else rects.push({ x: bx, y: by, w: bw, h: wp, o: 'h' });
+    // BOTTOM edge band (skip door span when door is on the S side)
+    if (d.side === 'S') { rects.push({ x: bx, y: by + bh - wp, w: dx0 - bx, h: wp, o: 'h' }, { x: dx1, y: by + bh - wp, w: (bx + bw) - dx1, h: wp, o: 'h' }); }
+    else rects.push({ x: bx, y: by + bh - wp, w: bw, h: wp, o: 'h' });
+    // LEFT edge band (skip door span when door is on the W side)
+    if (d.side === 'W') { rects.push({ x: bx, y: by, w: wp, h: dy0 - by, o: 'v' }, { x: bx, y: dy1, w: wp, h: (by + bh) - dy1, o: 'v' }); }
+    else rects.push({ x: bx, y: by, w: wp, h: bh, o: 'v' });
+    // RIGHT edge band (skip door span when door is on the E side)
+    if (d.side === 'E') { rects.push({ x: bx + bw - wp, y: by, w: wp, h: dy0 - by, o: 'v' }, { x: bx + bw - wp, y: dy1, w: wp, h: (by + bh) - dy1, o: 'v' }); }
+    else rects.push({ x: bx + bw - wp, y: by, w: wp, h: bh, o: 'v' });
+    for (const s of rects) {
+      if (s.w <= 0 || s.h <= 0) continue;
+      x.fillStyle = theme; x.fillRect(s.x, s.y, s.w, s.h);
+      if (s.o === 'h') {                                   // top-lit / base-shadow (reads as a wall, not a flat line)
+        x.fillStyle = lite; x.fillRect(s.x, s.y, s.w, 2);
+        x.fillStyle = dark; x.fillRect(s.x, s.y + s.h - 2, s.w, 2);
+      } else {
+        x.fillStyle = lite; x.fillRect(s.x, s.y, 2, s.h);
+        x.fillStyle = dark; x.fillRect(s.x + s.w - 2, s.y, 2, s.h);
+      }
+    }
+  }
+
   // per-building detail: floor tint, roof/awning trim, door, sign, interior furniture
   function _building(x, b) {
     const bx = b.c * TILE, by = b.r * TILE, bw = b.w * TILE, bh = b.h * TILE;
@@ -684,8 +787,13 @@ window.WM = (function () {
   const _TKEY = { 0: 'grass', 1: 'path', 2: 'floor', 3: 'wall', 4: 'tree', 5: 'water', 6: 'plaza' };
   function _tile(x, c, r) {
     const t = grid[r][c], px = c * TILE, py = r * TILE, v = hsh(c, r);
-    // if a downloaded tileset maps this terrain, blit it and skip procedural art
-    if (window.WA && WA.ready && WA.tile(x, _TKEY[t], px, py, TILE)) return;
+    // Generated/atlas terrain is OFF by default: the auto-painted atlas produced a
+    // stamped single-cell grid + noisy water and kept regenerating the manifest on
+    // world load, so procedural terrain (varied per-tile) always wins unless someone
+    // explicitly opts in via window.WORLD_ATLAS_TERRAIN = true after the tileset is
+    // fixed (per-tile variation + water QA). This is the durable kill-switch.
+    if (window.WORLD_ATLAS_TERRAIN === true && window.WA && WA.ready
+        && WA.tile(x, _TKEY[t], px, py, TILE)) return;
     if (t === T.GRASS) {
       x.fillStyle = v < .5 ? '#3a7d44' : '#357640'; x.fillRect(px, py, TILE, TILE);
       x.fillStyle = 'rgba(74,150,86,.55)'; for (let i = 0; i < 3; i++) { const a = hsh(c, r, i + 1), b = hsh(c, r, i + 5); x.fillRect(px + (a * (TILE - 3) | 0), py + (b * (TILE - 3) | 0), 2, 1); }
@@ -707,19 +815,13 @@ window.WM = (function () {
       x.fillStyle = v < .5 ? '#7a5230' : '#734c2c'; x.fillRect(px, py, TILE, TILE);
       x.fillStyle = 'rgba(0,0,0,.18)'; x.fillRect(px, py + (r % 2 ? 6 : 13), TILE, 1);
       x.fillStyle = 'rgba(255,220,170,.06)'; x.fillRect(px, py + 1, TILE, 1);
-    } else if (t === T.WALL) {                           // SOLID stone wall (mortar courses + top light / base shadow)
-      // THINNER read: where a wall borders interior floor, show a sliver of the
-      // room's floor along that edge so walls feel like walls, not solid blocks
-      const fL = c > 0 && grid[r][c - 1] === T.FLOOR, fR = c < COLS - 1 && grid[r][c + 1] === T.FLOOR;
-      const fU = r > 0 && grid[r - 1][c] === T.FLOOR, fD = r < ROWS - 1 && grid[r + 1][c] === T.FLOOR;
-      x.fillStyle = '#7a5230'; x.fillRect(px, py, TILE, TILE);        // floor peeks through insets
-      const ix = px + (fL ? 4 : 0), iy = py + (fU ? 4 : 0);
-      const iw = TILE - (fL ? 4 : 0) - (fR ? 4 : 0), ih = TILE - (fU ? 4 : 0) - (fD ? 4 : 0);
-      x.fillStyle = v < .5 ? '#8b909c' : '#7e838f'; x.fillRect(ix, iy, iw, ih);
-      x.fillStyle = 'rgba(0,0,0,.17)'; for (let ry = 5; ry < ih; ry += 6) x.fillRect(ix, iy + ry, iw, 1);      // horizontal courses
-      const soff = (r % 2) ? 10 : 0; x.fillStyle = 'rgba(0,0,0,.15)'; for (let rx = -soff; rx < iw; rx += 10) x.fillRect(ix + rx + 9, iy, 1, 6);  // staggered joints
-      x.fillStyle = 'rgba(255,255,255,.14)'; x.fillRect(ix, iy, iw, 2);           // top light
-      x.fillStyle = 'rgba(0,0,0,.32)'; x.fillRect(ix, iy + ih - 2, iw, 2);      // base shadow
+    } else if (t === T.WALL) {                           // WALL cell is still solid for collision, but no longer
+      // rendered as a fat 20px stone ring: paint it as the interior FLOOR look so the
+      // baked terrain shows no thick stone band. The thin themed wall is drawn on top
+      // per-building by _drawBuildingShell (outer WALL_PX of the footprint edge).
+      x.fillStyle = v < .5 ? '#7a5230' : '#734c2c'; x.fillRect(px, py, TILE, TILE);   // warm wood-plank (matches T.FLOOR)
+      x.fillStyle = 'rgba(0,0,0,.18)'; x.fillRect(px, py + (r % 2 ? 6 : 13), TILE, 1);
+      x.fillStyle = 'rgba(255,220,170,.06)'; x.fillRect(px, py + 1, TILE, 1);
       return;
     } else if (t === T.WALL_UNUSED_BRICK) {              // (legacy procedural brick — no longer reached)
       x.fillStyle = '#8a5a44'; x.fillRect(px, py, TILE, TILE);
@@ -775,6 +877,18 @@ window.WM = (function () {
     else if (d.kind === 'fountain') { x.fillStyle = '#8a8f9c'; x.beginPath(); x.arc(d.x, d.y, 9, 0, 6.283); x.fill(); x.fillStyle = '#3f7fb0'; x.beginPath(); x.arc(d.x, d.y, 7, 0, 6.283); x.fill(); x.fillStyle = '#aeb4c0'; x.fillRect(d.x - 1, d.y - 8, 2, 8); x.fillStyle = '#bfe4ff'; x.fillRect(d.x - 1, d.y - 10, 2, 3); x.fillStyle = 'rgba(190,228,255,.7)'; x.fillRect(d.x - 3, d.y - 1, 1, 1); x.fillRect(d.x + 2, d.y - 2, 1, 1); }
     else if (d.kind === 'statue') { x.fillStyle = '#6b6f7a'; x.fillRect(d.x - 5, d.y - 2, 10, 3); x.fillStyle = '#9aa0ad'; x.fillRect(d.x - 2, d.y - 14, 4, 12); x.beginPath(); x.arc(d.x, d.y - 15, 2.5, 0, 6.283); x.fill(); x.fillStyle = 'rgba(255,255,255,.2)'; x.fillRect(d.x - 2, d.y - 14, 1.5, 12); }
     else if (d.kind === 'plant') { x.fillStyle = '#6b4c2f'; x.fillRect(d.x - 2, d.y - 3, 4, 4); x.fillStyle = '#2f8542'; x.beginPath(); x.arc(d.x, d.y - 5, 4, 0, 6.283); x.fill(); x.fillStyle = '#3ea355'; x.beginPath(); x.arc(d.x - 1, d.y - 6, 2.4, 0, 6.283); x.fill(); }
+    else if (d.kind === 'picnic_table') {
+      // checkered blanket + wooden table with side benches + a little basket
+      x.fillStyle = '#b8433f'; x.fillRect(d.x - 8, d.y - 5, 16, 11);
+      x.fillStyle = '#e8e2d4';
+      for (let r = 0; r < 3; r++) for (let c = 0; c < 4; c++)
+        if ((r + c) % 2) x.fillRect(d.x - 8 + c * 4, d.y - 5 + r * 4, 4, Math.min(4, 11 - r * 4));
+      x.fillStyle = '#6b4c2f'; x.fillRect(d.x - 5, d.y - 3, 10, 5);
+      x.fillStyle = '#7a5836'; x.fillRect(d.x - 5, d.y - 4, 10, 2);
+      x.fillStyle = '#4a3b2a'; x.fillRect(d.x - 7, d.y - 2, 2, 3); x.fillRect(d.x + 5, d.y - 2, 2, 3);
+      x.fillStyle = '#8a5a2b'; x.fillRect(d.x + 1, d.y - 6, 4, 3);
+      x.fillStyle = '#c9a15a'; x.fillRect(d.x + 2, d.y - 7, 2, 1);
+    }
   }
 
   function drawTerrain(ctx) { if (terrainCanvas) ctx.drawImage(terrainCanvas, 0, 0); }
@@ -895,6 +1009,7 @@ window.WM = (function () {
     bumpWear, wearStage, loadWear, takeWearDirty, get wear() { return wear; },
     tileAt: (c, r) => (inb(c, r) ? grid[r][c] : -1),
     drawTerrain, drawBuildingLabels, fit, screenToWorld, worldToTile, attachControls, detachControls,
+    setTerrainImage,
     // edit API
     moveBuilding, resizeBuilding, addBuilding, deleteBuilding, setBuilding, buildingAtTile, exportLayout,
     addDecor, removeDecorNear, decorIndexNear, pickDecor, previewDecor,

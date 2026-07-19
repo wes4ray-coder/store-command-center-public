@@ -70,6 +70,20 @@ function _stateBadge(ctx, a, x, y, top) {
     case 'shopping':
       ctx.font = '8px serif'; ctx.fillText('🛍️', x + 10, y - 14);
       break;
+    case 'sitting':                                  // settled on a bench
+      ctx.font = '8px serif'; ctx.fillText('🪑', x + 10, y - 14);
+      break;
+    case 'picnicking': {                             // picnic basket + drifting crumbs
+      ctx.font = '8px serif'; ctx.fillText('🧺', x + 10, y - 14);
+      const k = (t / 700 + a.id) % 2;
+      if (k > 1.4) { ctx.fillStyle = '#e8d9a8'; ctx.fillRect(x - 6, y - 8 - k, 1, 1); }
+      break;
+    }
+    case 'admiring': {                               // sparkle that twinkles as they take it in
+      ctx.font = '8px serif'; ctx.globalAlpha = 0.6 + 0.4 * Math.sin(t / 400 + a.id);
+      ctx.fillText('✨', x + 10, y - 14); ctx.globalAlpha = 1;
+      break;
+    }
   }
 }
 

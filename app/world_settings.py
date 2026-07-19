@@ -47,6 +47,14 @@ DEFAULTS = {
     "world_leader_upgrade_hours": "12",
     # world
     "world_theme":            "futuristic",
+    # progressive tileset painting: agents slowly replace ONE procedural terrain
+    # tile at a time (QA + style-gated; world_tileset.auto_tick). Off by default.
+    "world_tileset_auto":     "0",
+    "world_tileset_auto_min": "180",
+    # Layer 2: one big generated whole-world terrain IMAGE drawn as the ground
+    # (terrain LOGIC stays on the grid). OFF by default — procedural terrain
+    # shows until this is on AND an image has been generated (world_terrain.py).
+    "world_terrain_image_enabled": "0",
     # pixel-art sprite generation — the model+LoRA the world-builder renders with.
     # empty model = the store's default image model. LoRA format "file:strength"
     # (must exist in the ComfyUI loras dir on the GPU box).
@@ -58,11 +66,11 @@ INT_KEYS = {"world_llm_interval_min", "world_active_start", "world_active_end",
             "world_meeting_interval_min", "world_min_item_cost", "world_min_price_cents",
             "world_max_discount_pct", "world_vision_candidates", "world_vision_retries",
             "world_vision_min_score", "world_bills_drive_interval_min",
-            "world_leader_upgrade_hours"}
+            "world_leader_upgrade_hours", "world_tileset_auto_min"}
 BOOL_KEYS = {"world_llm_enabled", "world_meetings_enabled", "world_incidents_enabled",
              "world_allow_free", "world_require_review", "world_vision_enabled",
              "world_crypto_mining_enabled", "world_bills_drive", "world_music_lyrics",
-             "world_leader_upgrades"}
+             "world_leader_upgrades", "world_tileset_auto", "world_terrain_image_enabled"}
 
 
 def get_all(conn=None):

@@ -73,7 +73,9 @@ async function renderView(view) {
       case 'homelab':       await renderHomelab();         break;
       case 'crypto':        await renderCrypto();          break;
       case 'oracle':        await renderOracle();          break;
+      case 'research':      await renderResearch();        break;
       case 'wallets':       await renderWallets();         break;
+      case 'nsfw':          await renderNsfw();            break;
       // Studio hub — Image / Video / Audio / 3D / Models / Queue as sub-tabs.
       // Legacy view names deep-link straight to the matching sub-tab.
       case 'studio':        await renderStudio();          break;

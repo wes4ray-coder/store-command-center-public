@@ -52,13 +52,16 @@ def manual_generate(req: GenerateRequest, background_tasks: BackgroundTasks):
 @router.get("/api/generations")
 def list_generations(status: Optional[str] = None):
     conn = get_conn()
+    # nsfw-flagged jobs never appear here — they live only in /api/nsfw/library.
     if status:
         rows = conn.execute(
-            "SELECT * FROM generations WHERE status=? ORDER BY created_at DESC", (status,)
+            "SELECT * FROM generations WHERE status=? AND COALESCE(nsfw,0)=0 "
+            "ORDER BY created_at DESC", (status,)
         ).fetchall()
     else:
         rows = conn.execute(
-            "SELECT * FROM generations ORDER BY created_at DESC LIMIT 50"
+            "SELECT * FROM generations WHERE COALESCE(nsfw,0)=0 "
+            "ORDER BY created_at DESC LIMIT 50"
         ).fetchall()
     conn.close()
     return [dict(r) for r in rows]

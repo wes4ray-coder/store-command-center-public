@@ -381,4 +381,36 @@ setting is `etsy_key`, Printify is `printify_key` (not `*_api_key`).
 
 ---
 
+## 🧠 OpenClaw long-context fix — LLM proxy consumers READ THIS (2026-07-18)
+
+Long OpenClaw chats were dying with `Context overflow: prompt too large for the model
+(precheck)` / `estimated context size exceeds safe threshold` and compaction timeouts.
+Root cause: **LM Studio on the node loads `google/gemma-4-12b-qat` at contextLength
+115000** (`~/.lmstudio/.internal/user-concrete-model-default-config/google/gemma-4-12b-qat.json`),
+but OpenClaw's config claimed a 262144 window with a 1,000,000-token agent default —
+so sessions grew past 115k before compaction ever fired (overflow diag showed
+`compactionTokens=115001`, one token over the real limit).
+
+Fixes (in `~/.openclaw/openclaw.json`, backup `openclaw.json.bak-ctxfix-2026-07-18`):
+- `agents.defaults.contextTokens`: 1000000 → **100000** (headroom under 115k).
+- `models.providers.lmstudio.models[*].contextWindow` set to the node's REAL
+  LM Studio load values: gemma-4-12b-qat / qwen3.5-9b / ministral-3-3b = 115000;
+  glm-4.6v-flash = 131072; qwen3-coder-30b + gemma-4-12b-it-qat-cpu = 262144;
+  qwen2.5-coder-32b / gemma-4-26b(-qat) / qwen3.6-35b / others without node
+  config = 8192 (conservative).
+- `agents.defaults.contextInjection`: always → **continuation-skip** (bootstrap
+  files no longer re-injected on safe continuation turns). Toggle back with
+  `openclaw config patch` if unwanted.
+- `agents.defaults.compaction.reserveTokens` = 12000.
+- Workspace bootstrap slimmed: injected set (AGENTS/SOUL/TOOLS/IDENTITY/USER/
+  HEARTBEAT/MEMORY.md) 25.0k → **10.8k chars**; bulk detail moved to
+  `memory/etiquette-heartbeats.md` + `memory/promotions-archive-2026-07.md`.
+
+**Rules going forward:** if you change a model's context length in LM Studio on the
+node, mirror it in `models.providers.lmstudio.models[].contextWindow` — the proxy
+passes bodies verbatim and cannot clamp for you. Anything driving the proxy
+(`/api/llm/v1`) should keep prompts ≤ ~100k tokens for the local models.
+
+---
+
 *This is a nested book within the main Platform Dev Book.*

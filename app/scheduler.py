@@ -39,7 +39,7 @@ def _minutes(key, default_min, floor_min=1):
 
 
 class SecurityScheduler:
-    JOBS = ("tick", "scan", "analyze", "audit", "backup", "guardian", "aiwatch")
+    JOBS = ("tick", "scan", "analyze", "audit", "backup", "guardian", "aiwatch", "agentwatch")
 
     def __init__(self):
         self.last = {j: 0.0 for j in self.JOBS}
@@ -105,6 +105,33 @@ class SecurityScheduler:
         except Exception as e:
             log.warning("swarm cron failed: %s", e)
 
+        # ── GPU idle-TTL sweep: unload LLMs that have sat idle past model_idle_ttl ──
+        # LM Studio auto-unloads models the store loaded (lms load --ttl), but a model
+        # loaded outside the store (dev-swarm/OpenClaw, bare JIT) can hold VRAM forever.
+        # This is the safety net; it no-ops unless the GPU is fully idle. Owner disables
+        # it by setting model_idle_ttl=0.
+        try:
+            from orchestrator import orch
+            r = orch.sweep_idle_llms()
+            if r.get("swept"):
+                log.info("gpu idle-sweep: unloaded %s", r["swept"])
+        except Exception as e:
+            log.warning("gpu idle-sweep failed: %s", e)
+
+        # ── Research Lab: recurring rechecks — Geniuses re-verify material prices
+        # on projects given a cadence (recur_days). Master toggle + per-project
+        # cadence; recur_tick() bumps next_run_at up front so failures can't loop.
+        if _setting("research_recur_enabled", "on") != "off" and \
+                now - self.last.get("research", 0) >= _minutes("research_recur_interval", 30, floor_min=5):
+            self.last["research"] = now
+            try:
+                import research_lab_market
+                r = research_lab_market.recur_tick()
+                if r.get("started"):
+                    log.info("research recheck: started projects %s", r["started"])
+            except Exception as e:
+                log.warning("research recheck failed: %s", e)
+
         # ── Company security audit: periodic snapshot + regression alerts ──
         # Independent of the Pi-hole monitor; gated by the control plane.
         if _setting("security_audit_enabled", "0") == "1" and \
@@ -146,6 +173,20 @@ class SecurityScheduler:
             except Exception as e:
                 log.warning("network guardian failed: %s", e)
                 self._ran("guardian", f"failed: {e}")
+
+        # ── Agent Watcher: diagnose failed/paused/stalled swarm + media jobs so
+        # agents (and the human) know what went wrong and how to fix it. On by
+        # default; every behaviour has its own toggle (see watcher.py).
+        if _setting("agent_watcher_enabled", "1") == "1" and \
+                now - self.last.get("agentwatch", 0) >= _minutes("agent_watcher_interval", 5, floor_min=2):
+            self._ran("agentwatch")
+            try:
+                import watcher
+                r = watcher.watch_tick()
+                self._ran("agentwatch", f"{r.get('new', 0)} new, {r.get('open', 0)} open")
+            except Exception as e:
+                log.warning("agent watcher failed: %s", e)
+                self._ran("agentwatch", f"failed: {e}")
 
         # ── AI Shield: watch agents for rogue behaviour (opt-in) ──
         if _setting("ai_watch_enabled", "0") == "1" and \

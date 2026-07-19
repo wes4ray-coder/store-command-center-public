@@ -38,6 +38,10 @@ SECRET_KEYS = {
     "kraken_api_key", "kraken_api_secret",
     # JellyCoin GPU-rig shared token (LAN mining auth)
     "jelly_miner_token",
+    # Pearl (PRL) node/wallet RPC password (Crypto → Pearl)
+    "pearl_rpc_pass",
+    # Square (Block) access token — Cash App Pay checkout links (Money tab)
+    "square_access_token",
 }
 
 

@@ -64,6 +64,8 @@ DEFAULTS = {
     "world_ops_gate_add_software":    "1",
     "world_ops_gate_post_etsy":       "1",
     "world_ops_gate_post_printify":   "1",
+    "world_ops_gate_cashapp_request":  "1",
+    "world_ops_gate_cashapp_checkout": "1",
 }
 
 # Kinds that CAN be always-gated, each with its own toggle + label (gates get a toggle).
@@ -72,6 +74,8 @@ GATEABLE = [
     ("add_software",  "💾 Code changes"),
     ("post_etsy",     "🛍️ Etsy listings"),
     ("post_printify", "👕 Printify listings"),
+    ("cashapp_request",  "💵 Cash App payment-request links"),
+    ("cashapp_checkout", "🟩 Cash App Pay checkout links"),
 ]
 
 

@@ -34,6 +34,8 @@ def get_settings():
     result.setdefault("cults3d_api_key", "")
     result.setdefault("enhance_model", ENHANCE_MODEL_DEFAULT)
     result.setdefault("nsfw_enabled", "")
+    result.setdefault("nsfw_display", "")
+    result.setdefault("nsfw_world", "")
     return _dec_secrets(result)   # decrypt credentials so the UI shows the saved values
 
 

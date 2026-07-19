@@ -34,6 +34,26 @@ def test_prune_keeps_only_n(tmp_path):
     assert remaining == ["store_db_20260104_000000.sqlite.gz", "store_db_20260105_000000.sqlite.gz"]
 
 
+def test_backups_listing_includes_db_snapshots(client):
+    """Settings → Backups must list the nightly store_db_*.sqlite.gz snapshots too
+    (regression: only store_backup_*.tar.gz was globbed, so the panel said
+    'No backups yet.' while nightly snapshots existed in BACKUP_DIR)."""
+    Path(BACKUP_DIR).mkdir(parents=True, exist_ok=True)
+    snap = Path(BACKUP_DIR) / "store_db_20260101_000000.sqlite.gz"
+    snap.write_bytes(b"x")
+    try:
+        r = client.get("/api/system/backups")
+        assert r.status_code == 200
+        rows = {b["name"]: b for b in r.json()["backups"]}
+        assert snap.name in rows, "nightly DB snapshot missing from the backups listing"
+        assert rows[snap.name]["kind"] == "db"
+        # …and the tar-based restore path must refuse it cleanly (no side effects)
+        r2 = client.post("/api/system/restore", json={"name": snap.name})
+        assert r2.status_code == 400
+    finally:
+        snap.unlink(missing_ok=True)
+
+
 def test_dest_dirs_skips_unmounted_external():
     import db
     conn = db.get_conn()

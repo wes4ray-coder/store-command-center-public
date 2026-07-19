@@ -5,7 +5,9 @@
    fed by GET /api/queue. Rendered in three spots: the bottom-left strip, the header
    pill, and the Studio GPU sub-view (#studio-queue-list). Polled every few seconds. */
 const QUEUE_ICON = { image:'\u{1F3A8}', video:'\u{1F3AC}', 'video chain':'\u{1F39E}\u{FE0F}',
-                     audio:'\u{1F3B5}', '3d':'\u{1F9E9}', llm:'\u{1F9E0}' };
+                     audio:'\u{1F3B5}', '3d':'\u{1F9E9}', llm:'\u{1F9E0}',
+                     // redacted NSFW jobs surface as a discreet generic "Private job"
+                     private:'\u{1F512}' };
 
 function queueJobsHtml(jobs) {
   if (!jobs || !jobs.length) return '<div class="q-empty">Nothing running — GPU idle.</div>';

@@ -50,6 +50,10 @@ PLACE_RESTORE = {   # location → {need: per-minute gain}
     "park":   {"fun": 2.0, "social": 2.0},
     "church": {"fulfillment": 6.0, "social": 3.0, "fun": 1.5},   # spiritual calm restores purpose/morale
     "library":{"fulfillment": 2.0},                              # studying is quietly fulfilling
+    # public-space leisure spots (Mayor's park & plaza upgrade)
+    "bench":  {"energy": 3.0, "fun": 2.0},                       # a quiet sit-down
+    "picnic": {"hunger": 4.0, "social": 4.0, "fun": 3.0},        # eating together on the green
+    "plaza":  {"fulfillment": 3.0, "fun": 2.5},                  # admiring the fountain/statues
 }
 
 # System B — Library/Knowledge: each Knowledge level makes an agent better at their

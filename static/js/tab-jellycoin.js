@@ -96,14 +96,15 @@ function _jlyBars(perRig) {
 
 async function cryptoLoadJelly() {
   const pane = document.getElementById('pane-crypto-jelly');
-  let st, wal, tok, nfts, missions, blocks, ws, pb, stats;
+  let st, wal, tok, nfts, missions, blocks, ws, pb, stats, pool;
   try {
-    [st, wal, tok, nfts, missions, blocks, ws, pb, stats] = await Promise.all([
+    [st, wal, tok, nfts, missions, blocks, ws, pb, stats, pool] = await Promise.all([
       api('/api/jelly/status'), api('/api/jelly/wallets'), api('/api/jelly/miner-token'),
       api('/api/jelly/nft/list'), api('/api/jelly/missions'), api('/api/jelly/blocks?limit=8'),
       api('/api/world/settings').catch(() => ({ settings: {} })),
       api('/api/jelly/peer-billing').catch(() => null),
       api('/api/jelly/stats').catch(() => null),
+      api('/api/jelly/pool').catch(() => null),
     ]);
   } catch (e) {
     pane.innerHTML = `<div class="empty"><div class="empty-icon">&#10060;</div>${esc(e.message)}</div>`;
@@ -190,6 +191,57 @@ async function cryptoLoadJelly() {
         <button class="btn-sm" onclick="jellyPeerBilling(${pb.enabled ? 'false' : 'true'})">${pb.enabled ? '⏸ Turn off' : '▶ Turn on'} billing</button>
         <button class="btn-sm" onclick="jellyPeerBilling(${pb.enabled})">💾 Save price</button>
       </div>
+    </div>` : ''}
+
+    ${pool ? `<div class="settings-group" style="margin-bottom:16px;">
+      <div class="settings-group-title">🤝 Buddy-Share Mining Pool ${hlp('When ON, every GPU-mined block is split proportionally by the shares each rig contributed this round, instead of winner-take-all. Map a buddy\'s rig to their peer:<name> wallet and their share of every block flows straight to it — the fair way to mine together with the friends you paired in the Peers/federation tab.')}
+        <span style="font-size:.62rem;font-weight:700;background:${pool.enabled ? 'rgba(34,197,94,.16)' : 'rgba(148,163,184,.16)'};color:${pool.enabled ? 'var(--green)' : 'var(--muted)'};border-radius:10px;padding:2px 8px;margin-left:8px;text-transform:uppercase;">${pool.enabled ? 'on' : 'off'}</span>
+      </div>
+      <div style="font-size:.78rem;color:var(--muted);line-height:1.7;">
+        <b>${pool.enabled ? 'ON — proportional share split' : 'OFF — winner-take-all mining'}.</b>
+        ${pool.enabled
+          ? 'Each block\'s reward is divided by the shares every rig submitted this round, then paid to each rig\'s mapped owner wallet.'
+          : 'Whoever solves the block keeps its whole reward. Turn this on to share rewards fairly across your buddies\' rigs.'}
+      </div>
+      <button class="btn-sm" style="margin-top:8px;" onclick="jellyPoolToggle(${pool.enabled ? 'false' : 'true'})">
+        ${pool.enabled ? '⏸ Turn off' : '▶ Turn on'} share splitting</button>
+
+      <div style="display:flex;gap:10px;flex-wrap:wrap;margin:14px 0 4px;">
+        ${_jlyStat('Round', '#' + pool.round_id)}
+        ${_jlyStat('Block reward', pool.block_reward_jly + ' JLY')}
+        ${_jlyStat('Share factor', pool.share_factor, 'How many shares a rig is credited per unit of proof-of-work it submits toward the current round.')}
+      </div>
+
+      <div style="font-size:.72rem;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin:12px 0 4px;">Shares this round</div>
+      ${(pool.shares_by_rig || []).length ? `<table class="mini-table" style="width:100%;font-size:.78rem;">
+        <tr><th style="text-align:left;">Rig</th><th style="text-align:left;">Owner wallet</th><th>Shares</th><th style="text-align:right;">Projected split</th></tr>
+        ${(pool.shares_by_rig || []).map(r => `<tr><td>${esc(r.rig)}</td>
+          <td style="color:var(--muted);">${esc(r.owner || '—')}</td>
+          <td style="text-align:center;">${(r.shares || 0).toLocaleString()}</td>
+          <td style="text-align:right;font-weight:600;">${(pool.projected_split || {})[r.owner] != null ? Number((pool.projected_split || {})[r.owner]).toLocaleString(undefined, { maximumFractionDigits: 4 }) + ' JLY' : '—'}</td></tr>`).join('')}
+      </table>` : `<div style="font-size:.78rem;color:var(--muted);">No shares yet this round — buddies' rigs will appear here once they mine.</div>`}
+
+      <div style="font-size:.72rem;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin:14px 0 4px;">Add / map a buddy rig</div>
+      <div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;">
+        <div class="field" style="margin:0;"><label>Rig ${hlp('Pick a rig that has already mined, or type the --name a buddy will start their miner with.')}</label>
+          <input id="jly-pool-rig" list="jly-pool-riglist" placeholder="rig name" style="width:150px;">
+          <datalist id="jly-pool-riglist">${(rigs || []).map(m => `<option value="${esc(m.name)}">`).join('')}</datalist></div>
+        <div class="field" style="margin:0;flex:1;min-width:160px;"><label>Owner wallet ${hlp('peer:<buddyName> routes rewards to a paired buddy\'s wallet; miner:<rig> keeps them on your own rig wallet.')}</label>
+          <input id="jly-pool-owner" placeholder="peer:willie" value="peer:"></div>
+        <button class="btn-sm" onclick="jellyPoolMap()">💾 Save mapping</button>
+      </div>
+      <div style="font-size:.72rem;color:var(--muted);line-height:1.7;margin-top:8px;">
+        A buddy joins by running <code style="word-break:break-all;">jellyminer.py --url http://127.0.0.1:8787 --token &lt;X-Jelly-Token from the Mining section above&gt; --name &lt;rigName&gt;</code>.
+        Their rig then shows up here — map it to their <code>peer:&lt;name&gt;</code> wallet (a peer you paired in the Peers/federation tab) and every block's share flows to them.
+      </div>
+
+      ${(pool.recent_payouts || []).length ? `
+      <div style="font-size:.72rem;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin:14px 0 4px;">Recent pool payouts</div>
+      <table class="mini-table" style="width:100%;font-size:.74rem;">
+        <tr><th>#</th><th style="text-align:left;">Owner</th><th style="text-align:right;">JLY</th></tr>
+        ${(pool.recent_payouts || []).slice(0, 12).map(p => `<tr><td style="text-align:center;">${p.height}</td>
+          <td>${esc(p.dst)}</td><td style="text-align:right;font-weight:600;">${_jlyFmt(p.amount)}</td></tr>`).join('')}
+      </table>` : ''}
     </div>` : ''}
 
     <div class="settings-group" style="margin-bottom:16px;">
@@ -309,6 +361,26 @@ async function jellyPeerBilling(enabled) {
   } catch (e) { toast?.(e.message); }
 }
 window.jellyPeerBilling = jellyPeerBilling;
+
+async function jellyPoolToggle(enabled) {
+  try {
+    await api('/api/jelly/pool', { method: 'POST', body: JSON.stringify({ enabled: !!enabled }) });
+    toast?.(enabled ? 'Buddy-share pool ON — blocks split by shares 🤝' : 'Pool off — back to winner-take-all');
+    _jlyReload();
+  } catch (e) { toast?.(e.message); }
+}
+window.jellyPoolToggle = jellyPoolToggle;
+
+async function jellyPoolMap() {
+  const rig = document.getElementById('jly-pool-rig')?.value.trim();
+  const owner = document.getElementById('jly-pool-owner')?.value.trim();
+  if (!rig || !owner) { toast?.('Give a rig name and an owner wallet'); return; }
+  try {
+    await api('/api/jelly/pool', { method: 'POST', body: JSON.stringify({ owners: { [rig]: owner } }) });
+    toast?.(`Mapped ${rig} → ${owner} ✓`); _jlyReload();
+  } catch (e) { toast?.(e.message); }
+}
+window.jellyPoolMap = jellyPoolMap;
 
 async function jellyTransfer(fromOverride) {
   const from = fromOverride || document.getElementById('jly-tx-from').value.trim();

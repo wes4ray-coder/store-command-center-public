@@ -8,6 +8,9 @@
 #   • 3d      → TripoSR (image → mesh)
 #   • audio   → AudioCraft / MusicGen (opt-in: --with-audio)
 #   • llm     → LM Studio + headless autostart service
+#   • guard   → gpu-guard.sh + gpu-guard.service (pauses the Store's unified AI
+#               queue while a Steam game / heavy GPU app runs, manages the miner)
+#   • miner   → JellyMiner (JellyCoin OpenCL miner) venv + jellyminer.service
 #   • services→ systemd --user units that autostart the above, + linger
 #
 # Runs ON THE NODE (Ubuntu). Everything is idempotent — re-run any time.
@@ -59,7 +62,7 @@ esac
 emit_status(){
   # single parseable line for the store UI
   local svc_line=""
-  echo "[NODE-STATUS] {\"os\":\"${OS_PRETTY//\"/}\",\"os_id\":\"$OS_ID\",\"os_ok\":$OS_OK,\"gpu\":\"${RESULT[gpu]:-unknown}\",\"comfyui\":\"${RESULT[comfyui]:-unknown}\",\"video\":\"${RESULT[video]:-unknown}\",\"model3d\":\"${RESULT[model3d]:-unknown}\",\"audio\":\"${RESULT[audio]:-unknown}\",\"lmstudio\":\"${RESULT[lmstudio]:-unknown}\",\"services\":\"${RESULT[services]:-unknown}\"}"
+  echo "[NODE-STATUS] {\"os\":\"${OS_PRETTY//\"/}\",\"os_id\":\"$OS_ID\",\"os_ok\":$OS_OK,\"gpu\":\"${RESULT[gpu]:-unknown}\",\"comfyui\":\"${RESULT[comfyui]:-unknown}\",\"video\":\"${RESULT[video]:-unknown}\",\"model3d\":\"${RESULT[model3d]:-unknown}\",\"audio\":\"${RESULT[audio]:-unknown}\",\"lmstudio\":\"${RESULT[lmstudio]:-unknown}\",\"services\":\"${RESULT[services]:-unknown}\",\"guard\":\"${RESULT[guard]:-unknown}\",\"miner\":\"${RESULT[miner]:-unknown}\"}"
 }
 
 if [ "$OS_OK" != "1" ]; then
@@ -333,6 +336,9 @@ setup_services(){
       local name; name="$(basename "$f")"
       # audiogen.service only if audio was set up
       [ "$name" = "audiogen.service" ] && [ "$WITH_AUDIO" != "1" ] && continue
+      # jellyminer.service is handled by setup_guard_miner (an existing unit may
+      # carry a literal token — never blindly overwritten here)
+      [ "$name" = "jellyminer.service" ] && continue
       sed -e "s#__HOME__#$HOME#g" -e "s#__UID__#$(id -u)#g" "$f" > "$UNITS/$name"
       ok "installed $name"
     done
@@ -344,6 +350,82 @@ setup_services(){
   [ "$WITH_AUDIO" = "1" ] && [ -f "$UNITS/audiogen.service" ] && systemctl --user enable audiogen.service >>"$LOG" 2>&1 && ok "enabled audiogen.service"
   loginctl enable-linger "$USER" >>"$LOG" 2>&1 && ok "linger enabled (services survive logout)" || warn "could not enable linger"
   set_result services ok
+}
+
+# ── GPU guard + JellyMiner (queue pause for games; JellyCoin OpenCL miner) ───
+# The Store passes STORE_URL + STORE_JELLY_TOKEN in the deploy env; they land in
+# ~/.config/store-node.env, which gpu-guard.sh and jellyminer.service both read.
+ENVF="$HOME/.config/store-node.env"
+
+_envf_set(){  # _envf_set KEY VALUE — upsert one line, keep the rest
+  touch "$ENVF"; chmod 600 "$ENVF"
+  if grep -q "^$1=" "$ENVF" 2>/dev/null; then
+    sed -i "s#^$1=.*#$1=$2#" "$ENVF"
+  else
+    echo "$1=$2" >> "$ENVF"
+  fi
+}
+
+setup_guard_miner(){
+  if [ "$MODE" = "check" ]; then
+    if [ -x "$HOME/gpu-guard.sh" ] && [ -f "$UNITS/gpu-guard.service" ]; then
+      ok "gpu-guard installed"; set_result guard ok
+    else warn "gpu-guard not installed"; set_result guard missing; fi
+    if [ -f "$UNITS/jellyminer.service" ] && [ -x "$HOME/jellyminer-venv/bin/python" ]; then
+      ok "JellyMiner installed"; set_result miner ok
+    else warn "JellyMiner not installed"; set_result miner missing; fi
+    return
+  fi
+  info "GPU guard (queue pause for games) + JellyMiner …"
+  mkdir -p "$HOME/.config" "$UNITS"
+  [ -n "${STORE_URL:-}" ]         && _envf_set STORE_URL "$STORE_URL"
+  [ -n "${STORE_JELLY_TOKEN:-}" ] && _envf_set JELLY_TOKEN "$STORE_JELLY_TOKEN"
+  # guard script + unit — always refreshed from the bundle (updates flow via deploy)
+  if [ -f "$HERE/gpu-guard.sh" ]; then
+    install -m 755 "$HERE/gpu-guard.sh" "$HOME/gpu-guard.sh" && ok "installed gpu-guard.sh"
+  fi
+  # miner script + its own venv (OpenCL — deliberately separate from the AI venvs)
+  [ -f "$HERE/jellyminer.py" ] && install -m 644 "$HERE/jellyminer.py" "$HOME/jellyminer.py"
+  if [ ! -x "$HOME/jellyminer-venv/bin/python" ]; then
+    python3 -m venv "$HOME/jellyminer-venv" >>"$LOG" 2>&1 && \
+      "$HOME/jellyminer-venv/bin/pip" install -q pyopencl numpy requests >>"$LOG" 2>&1 && \
+      ok "JellyMiner venv ready" || warn "JellyMiner venv install had issues (see $LOG)"
+  else
+    ok "JellyMiner venv already present"
+  fi
+  # OpenCL loader (the NVIDIA driver ships the ICD; this is just the dispatcher)
+  if ! ldconfig -p 2>/dev/null | grep -q libOpenCL; then
+    APT install -y ocl-icd-libopencl1 clinfo >/dev/null 2>&1 || \
+      warn "libOpenCL missing — install ocl-icd-libopencl1 for the miner"
+  fi
+  # miner unit: never overwrite an existing one (it may carry a literal token)
+  if [ ! -f "$UNITS/jellyminer.service" ]; then
+    if grep -q '^JELLY_TOKEN=' "$ENVF" 2>/dev/null && [ -f "$HERE/services/jellyminer.service" ]; then
+      sed -e "s#__HOME__#$HOME#g" "$HERE/services/jellyminer.service" > "$UNITS/jellyminer.service"
+      ok "installed jellyminer.service (env-file driven)"
+    else
+      warn "no JELLY_TOKEN yet — grab it from the Store UI (Crypto → JellyCoin → Mining),"
+      warn "add 'JELLY_TOKEN=…' to $ENVF, then re-run deploy to install jellyminer.service"
+    fi
+  else
+    ok "jellyminer.service already present (left untouched)"
+  fi
+  systemctl --user daemon-reload 2>>"$LOG"
+  # gpu-guard.service was copied by setup_services; enable + start (idempotent)
+  if [ -f "$UNITS/gpu-guard.service" ]; then
+    systemctl --user enable gpu-guard.service >>"$LOG" 2>&1
+    systemctl --user start  gpu-guard.service >>"$LOG" 2>&1 && ok "gpu-guard running"
+    set_result guard ok
+  else
+    warn "gpu-guard.service missing from bundle"; set_result guard missing
+  fi
+  if [ -f "$UNITS/jellyminer.service" ]; then
+    # enable only — gpu-guard starts/stops the miner around AI work
+    systemctl --user enable jellyminer.service >>"$LOG" 2>&1
+    set_result miner ok
+  else
+    set_result miner missing
+  fi
 }
 
 # ── run ──────────────────────────────────────────────────────────────────────
@@ -358,10 +440,11 @@ setup_3d
 setup_audio
 setup_lmstudio
 setup_services
+setup_guard_miner        # gpu-guard + JellyMiner (needs the units dir from setup_services)
 
 log ""
 info "Summary:"
-for k in gpu comfyui video model3d audio lmstudio services; do
+for k in gpu comfyui video model3d audio lmstudio services guard miner; do
   v="${RESULT[$k]:-unknown}"
   case "$v" in
     ok) log "  ${c_g}✓${c_0} $k";;

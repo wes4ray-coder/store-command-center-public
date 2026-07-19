@@ -21,7 +21,8 @@ BASE = os.environ.get("STORE_URL", "http://localhost:8787/store").rstrip("/")
 PW = os.environ.get("STORE_TEST_PASSWORD")
 
 VIEWS = ["dashboard", "world", "treasury", "studio", "etsy-printify", "portal", "social",
-         "cults3d", "resell", "github", "homelab", "network-security", "agent", "library", "settings"]
+         "cults3d", "resell", "github", "homelab", "network-security", "agent", "research",
+         "library", "settings"]
 
 failures = []
 

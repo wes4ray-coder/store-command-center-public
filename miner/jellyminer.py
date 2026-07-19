@@ -173,9 +173,33 @@ def main():
 
         header76 = bytes.fromhex(work["header76"])
         target = int(work["target"], 16)
-        target_hi = target >> 192                       # top 64 bits for the fast GPU compare
+        # Pool mode: the Store advertises a SHARE target (easier than the block
+        # target) only when pooling is ON. Grind to whichever we were given —
+        # same sha256d kernel, only the compare threshold + submit cadence change.
+        share_hex = work.get("share_target")
+        pool = share_hex is not None
+        cmp_target = int(share_hex, 16) if pool else target
+        cmp_hi = cmp_target >> 192                       # top 64 bits for the fast GPU compare
         hdr_words = np.frombuffer(header76, dtype=">u4").astype(np.uint32)
         hdr_buf = cl.Buffer(ctx, mf.READ_ONLY | mf.COPY_HOST_PTR, hostbuf=hdr_words)
+
+        def submit(nonce):
+            try:
+                r = sess.post(f"{args.url}/api/jelly/mining/submit", timeout=10,
+                              json={"work_id": work["work_id"], "nonce": nonce, "miner": args.name})
+                res = r.json()
+                if res.get("block"):
+                    print(f"✅ block {res['height']} accepted → split "
+                          f"+{res.get('reward', 0)} JLY across the pool")
+                elif res.get("ok") and res.get("share"):
+                    pass                                 # share accepted (quiet in pool mode)
+                elif res.get("ok"):
+                    print(f"✅ block {res['height']} accepted → +{res['reward']} JLY "
+                          f"(boosts paid: {res.get('boost_paid', 0)} JLY) → {res['wallet']}")
+                else:
+                    print(f"❌ rejected: {res.get('reason')}")
+            except Exception as e:
+                print(f"submit failed: {e}")
 
         base, hashes, t0, found = 0, 0, time.time(), None
         while time.time() - t0 < args.refresh and base < 0xFFFFFFFF:
@@ -183,7 +207,7 @@ def main():
             out_np[:] = 0
             cl.enqueue_copy(queue, out_buf, out_np)
             kern(queue, (args.batch,), None, hdr_buf,
-                 np.uint32(base), np.uint64(max(1, target_hi)), out_buf)
+                 np.uint32(base), np.uint64(max(1, cmp_hi)), out_buf)
             cl.enqueue_copy(queue, out_np, out_buf)
             queue.finish()
             hashes += args.batch
@@ -192,25 +216,19 @@ def main():
                 time.sleep((time.time() - tb) * throttle / (100 - throttle))
             if out_np[0]:
                 cand = int(out_np[1])
-                if verify_cpu(header76, cand, target):   # exact check (GPU compares 64 bits)
-                    found = cand
-                    break
+                if verify_cpu(header76, cand, cmp_target):  # exact check (GPU compares 64 bits)
+                    if pool:
+                        submit(cand)                     # stream each share, keep grinding
+                    else:
+                        found = cand
+                        break
         hashrate = hashes / max(0.001, time.time() - t0)
         print(f"height {work['height']}  diff {work.get('difficulty', 0):.2f}  "
-              f"{hashrate/1e6:.1f} MH/s" + ("  🎉 nonce found!" if found is not None else ""))
+              f"{hashrate/1e6:.1f} MH/s" + (" ⛏️ pool" if pool else "")
+              + ("  🎉 nonce found!" if found is not None else ""))
 
         if found is not None:
-            try:
-                r = sess.post(f"{args.url}/api/jelly/mining/submit", timeout=10,
-                              json={"work_id": work["work_id"], "nonce": found, "miner": args.name})
-                res = r.json()
-                if res.get("ok"):
-                    print(f"✅ block {res['height']} accepted → +{res['reward']} JLY "
-                          f"(boosts paid: {res.get('boost_paid', 0)} JLY) → {res['wallet']}")
-                else:
-                    print(f"❌ rejected: {res.get('reason')}")
-            except Exception as e:
-                print(f"submit failed: {e}")
+            submit(found)
 
 
 if __name__ == "__main__":

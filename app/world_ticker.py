@@ -59,6 +59,7 @@ def _loop():
             _safe("autobuild", lambda: __import__("world_build").maybe_autobuild(conn))
             _safe("achieve",   lambda: world_systems.check_achievements(conn))
             _safe("leader", lambda: __import__("world_leader").maybe_upgrade(conn))  # Mayor/Boss reinvest the fund (self-cadenced, user-gated)
+            _safe("tileset", lambda: __import__("world_tileset").auto_tick(conn))    # an agent paints ONE terrain tile (self-cadenced, toggle-gated)
 
             c = conn.cursor()
             # Scheduled cognition — the ONLY periodic LLM work. Loads a model at most

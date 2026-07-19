@@ -14,7 +14,7 @@ TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
 # 1) ordered list of local script srcs from index.html
-mapfile -t SRCS < <(grep -oE "script src='/store/(static/js/[^']+)'" "$IDX" | sed -E "s#script src='/store/##; s#'##")
+mapfile -t SRCS < <(grep -oE "script src='/store/(static/js/[^']+)'" "$IDX" | sed -E "s#script src='/store/##; s#'##; s#\?[^ ]*##")
 echo "scripts in load order: ${#SRCS[@]}"
 
 # 2) per-file syntax

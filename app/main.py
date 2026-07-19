@@ -22,7 +22,8 @@ from routers import (
     trends, settings, printify, etsy, agent, videos, resell, library, security,
     system, cults3d, models3d, node, audio, resell_browser, portal, github,
     world, world_ops, llm, homelab, social, mail, graph, money, crypto, wallets,
-    peers, oracle, jellycoin,
+    cashapp, peers, oracle, jellycoin, pearl, gpu_guard, watcher as watcher_router,
+    research, nsfw as nsfw_router,
 )
 from routers import prompts as prompts_router   # /api/prompts — the prompt editor
 
@@ -48,11 +49,23 @@ async def _auth_guard(request: Request, call_next):
     # with the X-Jelly-Token header (routers/jellycoin.py _check_miner).
     if path.startswith("/api/jelly/mining/"):
         return await call_next(request)
+    # GPU node guard: the gaming/desktop box heartbeats busy|free with no session
+    # (pauses the AI queue while a Steam game / heavy GPU app runs). Endpoints
+    # self-guard with the same X-Jelly-Token the mining rigs use.
+    if path.startswith("/api/gpu/guard/"):
+        return await call_next(request)
     # Peer RPC: a friend's Store install calls these from a REMOTE host with no
     # session. Every endpoint under this prefix self-guards with the X-Peer-Key
     # header (hash-matched against an APPROVED peer in routers/peers.py) except
     # /pair, which requires a one-time invite key.
     if path.startswith("/api/peers/rpc/"):
+        return await call_next(request)
+    # Etsy OAuth callback: Etsy redirects the user's browser here (through the
+    # reverse proxy, not 127.0.0.1) after they approve, with no store session
+    # guaranteed. The endpoint self-guards by matching the OAuth `state` param
+    # against the stored `etsy_pkce_state` (routers/etsy.py), so it's CSRF-safe
+    # without auth — it must be reachable session-less or the connect flow 401s.
+    if path == "/api/etsy/callback":
         return await call_next(request)
     # Allow internal localhost calls to API endpoints (cron jobs, agents)
     client_host = request.client.host if request.client else ""
@@ -130,6 +143,12 @@ async def startup():
     RESELL_UPLOADS.mkdir(parents=True, exist_ok=True)
     ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
     reconcile_stuck_media()   # fail any video/chain orphaned by a previous restart
+    try:
+        from swarm import reconcile_on_start as _swarm_reconcile
+        _swarm_reconcile()    # park swarm jobs a restart left mid-run (else "running" forever)
+    except Exception as ex:
+        import logging
+        logging.getLogger("store").warning("swarm reconcile_on_start failed: %s", ex)
     import scheduler
     scheduler.start()   # background security monitor (no-op until enabled in Settings)
     import world_ticker
@@ -170,7 +189,8 @@ for _mod in (auth, dashboard, proposals, designs, generate, tasks, models,
              trends, settings, printify, etsy, agent, videos, resell, library, security,
              system, cults3d, models3d, node, audio, resell_browser, portal, github,
              world, world_ops, llm, homelab, social, mail, graph, money, crypto, wallets,
-             peers, oracle, jellycoin, prompts_router):
+             cashapp, peers, oracle, jellycoin, pearl, gpu_guard, watcher_router, prompts_router,
+             research, nsfw_router):
     app.include_router(_mod.router)
 
 # ─── MCP SERVER ──────────────────────────────────────────────────────────────

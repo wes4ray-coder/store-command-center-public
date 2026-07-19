@@ -1,0 +1,7 @@
+# JellyMiner rig deps — install on the MINING box (GPU node or any old-GPU LAN rig),
+# not in the store server venv:
+#   python3 -m venv ~/jellyminer-venv && ~/jellyminer-venv/bin/pip install -r requirements.txt
+# Needs an OpenCL driver/ICD too — see README.md (clinfo is the debugging tool).
+pyopencl
+numpy
+requests

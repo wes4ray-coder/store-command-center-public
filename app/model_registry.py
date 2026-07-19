@@ -31,6 +31,27 @@ REGISTRY = [
      "default": "", "fallback": "enhance_model",
      "desc": "Model the security AI hunt and the world SOC review use to analyse "
              "anomalies (DNS/security events). Blank = use the global Text LLM."},
+    {"key": "assistant_model", "name": "AI Assistant — agent", "kind": "llm",
+     "default": "", "fallback": "enhance_model",
+     "desc": "Model the AI Assistant's agentic tool loop runs on. Blank = borrow "
+             "whatever model is loaded (falls back to the global Text LLM)."},
+    {"key": "watcher_model", "name": "Agent Watcher — doctor", "kind": "llm",
+     "default": "", "fallback": "enhance_model",
+     "desc": "Model the Agent Watcher uses to diagnose failed/stalled swarm jobs "
+             "(what happened + how to fix, fed back to the agents on re-run). "
+             "Blank = use the global Text LLM."},
+    {"key": "research_model", "name": "Research Genius", "kind": "llm",
+     "default": "", "fallback": "enhance_model",
+     "desc": "Model the Research Lab's Geniuses use to plan projects, digest fetched "
+             "pages and write the final illustrated reports. Blank = use the global "
+             "Text LLM."},
+    {"key": "nsfw_model", "name": "Private Studio — NSFW text LLM", "kind": "llm",
+     "default": "", "fallback": "enhance_model",
+     "desc": "Uncensored model for Private Studio prompt work (bootstrap authoring, "
+             "category generators, enhance). Blank = auto-pick an uncensored Qwen / "
+             "'abliterated' model if the node has one installed, else the global Text "
+             "LLM. For best results install and pick an uncensored variant (e.g. a "
+             "Qwen *-abliterated / *-uncensored build)."},
     {"key": "default_model", "name": "Image — default checkpoint", "kind": "image",
      "default": "dreamshaperXL_lightningDPMSDE.safetensors",
      "desc": "Default ComfyUI checkpoint for image generation. Overridable per "
@@ -51,6 +72,14 @@ _BY_KEY = {s["key"]: s for s in REGISTRY}
 def effective(slot: dict) -> str:
     """The value a slot resolves to, honouring its fallback slot when blank."""
     val = get_setting(slot["key"], slot.get("default", ""))
+    if not val and slot["key"] == "nsfw_model":
+        # Blank nsfw slot: prefer an uncensored model actually installed on the
+        # node (cached scan of LM Studio's model list) before the generic fallback.
+        try:
+            import nsfw as _nsfw
+            val = _nsfw.auto_detect_model()
+        except Exception:
+            val = ""
     if not val and slot.get("fallback"):
         val = get_setting(slot["fallback"], _BY_KEY.get(slot["fallback"], {}).get("default", ""))
     return val or ""

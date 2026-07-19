@@ -21,9 +21,14 @@ _BACKUP_SKIP = {"venv", "__pycache__", "backups"}
 def _list_backups():
     BACKUP_DIR.mkdir(parents=True, exist_ok=True)
     out = []
-    for p in sorted(BACKUP_DIR.glob("store_backup_*.tar.gz"), reverse=True):
-        st = p.stat()
-        out.append({"name": p.name, "size": st.st_size, "mtime": int(st.st_mtime)})
+    # Full-app archives (restorable from the UI) AND the nightly DB snapshots that
+    # backups.py writes — both live in BACKUP_DIR; listing only the former made the
+    # Settings panel claim "No backups yet." while snapshots existed.
+    for pattern, kind in (("store_backup_*.tar.gz", "app"), ("store_db_*.sqlite.gz", "db")):
+        for p in BACKUP_DIR.glob(pattern):
+            st = p.stat()
+            out.append({"name": p.name, "size": st.st_size, "mtime": int(st.st_mtime), "kind": kind})
+    out.sort(key=lambda b: b["mtime"], reverse=True)
     return out
 
 def _create_backup():
@@ -98,6 +103,10 @@ def restore_backup(data: dict):
     name = (data or {}).get("name", "")
     if "/" in name or ".." in name or not name:
         raise HTTPException(400, "Invalid name")
+    if not name.endswith(".tar.gz"):
+        raise HTTPException(400, "Only full-app backups (.tar.gz) can be restored here. "
+                                 "A DB snapshot (.sqlite.gz) is restored by unpacking it "
+                                 "over store.db while the server is stopped.")
     path = BACKUP_DIR / name
     if not path.exists():
         raise HTTPException(404, "Backup not found")

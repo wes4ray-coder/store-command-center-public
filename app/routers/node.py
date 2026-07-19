@@ -101,7 +101,9 @@ def node_deploy(body: dict = None):
     # stage the bundle
     _ssh(f"rm -rf ~/{_REMOTE} && mkdir -p ~/{_REMOTE}/services", timeout=20)
     files = [str(_BUNDLE / "node-setup.sh"), str(_BUNDLE / "store_videogen.py"),
-             str(_BUNDLE / "store_audiogen.py")]
+             str(_BUNDLE / "store_audiogen.py"), str(_BUNDLE / "gpu-guard.sh"),
+             str(BASE / "miner" / "jellyminer.py")]
+    files = [f for f in files if Path(f).exists()]
     up = _scp(files, f"~/{_REMOTE}/")
     if up.returncode != 0:
         raise HTTPException(502, f"failed to copy deploy files: {(up.stderr or '')[:200]}")
@@ -109,11 +111,26 @@ def node_deploy(body: dict = None):
     # 3D model helper scripts + the TripoSR CPU-mesh patch (setup_3d installs these).
     if (_BUNDLE / "model3d").exists():
         _scp([str(_BUNDLE / "model3d")], f"~/{_REMOTE}/")
+    # gpu-guard + jellyminer config: pass this box's LAN URL + the miner token so
+    # node-setup.sh can write ~/.config/store-node.env (heartbeats + mining auth).
+    env_prefix = ""
+    try:
+        import socket as _socket, shlex as _shlex
+        from routers.jellycoin import _miner_token
+        s = _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM)
+        s.connect((GPU_HOST, 22))
+        lan_ip = s.getsockname()[0]
+        s.close()
+        env_prefix = (f"STORE_URL={_shlex.quote(f'http://{lan_ip}:{PORT}')} "
+                      f"STORE_JELLY_TOKEN={_shlex.quote(_miner_token())} ")
+    except Exception:
+        env_prefix = ""   # guard/miner just skip config they don't receive
     # launch in the background on the node; ssh returns immediately
     flag = "--with-audio" if with_audio else ""
     launch = (f"cd ~/{_REMOTE} && chmod +x node-setup.sh && "
+              f"(chmod +x gpu-guard.sh 2>/dev/null || true) && "
               f": > ~/{_LOGFILE} && "
-              f"nohup bash node-setup.sh deploy {flag} > ~/{_LOGFILE} 2>&1 </dev/null & echo LAUNCHED")
+              f"nohup env {env_prefix}bash node-setup.sh deploy {flag} > ~/{_LOGFILE} 2>&1 </dev/null & echo LAUNCHED")
     r = _ssh(launch, timeout=30)
     if "LAUNCHED" not in (r.stdout or ""):
         raise HTTPException(502, f"could not start deploy: {(r.stderr or r.stdout or '')[:200]}")

@@ -104,17 +104,23 @@ def general_thumbnail(path: str, w: int = _THUMB_MAX):
 
 @router.get("/api/designs")
 def list_designs(status: str = "review", source: Optional[str] = None):
+    # nsfw designs are redacted from every listing; querying source='nsfw' directly
+    # is only allowed when the NSFW master AND display toggles are both on.
+    import nsfw as _nsfw
+    if source == "nsfw" and not _nsfw.visible():
+        raise HTTPException(404, "Not found")
     conn = get_conn()
+    _sfw = "COALESCE(d.nsfw,0)=0"
     # Approved tab shows both approved and published (published = approved + on Printify)
     if status == "approved":
-        where = "d.status IN ('approved','published') AND (d.source IS NULL OR d.source='pipeline')"
+        where = f"d.status IN ('approved','published') AND (d.source IS NULL OR d.source='pipeline') AND {_sfw}"
         params = ()
     elif source:
-        where = "d.status=? AND d.source=?"
+        where = "d.status=? AND d.source=?" + ("" if source == "nsfw" else f" AND {_sfw}")
         params = (status, source)
     else:
         # Default review: exclude generator-sourced designs
-        where = "d.status=? AND (d.source IS NULL OR d.source='pipeline')"
+        where = f"d.status=? AND (d.source IS NULL OR d.source='pipeline') AND {_sfw}"
         params = (status,)
     rows = conn.execute(f"""
         SELECT d.*,

@@ -127,6 +127,36 @@ document.addEventListener('visibilitychange', () => {
   else _startWorldLoops();
 });
 
+// ── Fullscreen the game: request FS on the canvas WRAPPER (excludes the stats
+// panel) so the town fills the screen; the canvas keeps width:100% so it spans
+// the wrapper, and we grow its height to 100vh while fullscreen. ─────────────
+function worldFullscreen() {
+  const wrap = document.getElementById('world-canvas-wrap');
+  if (!wrap) return;
+  if (document.fullscreenElement) { try { document.exitFullscreen(); } catch {} }
+  else { try { const p = wrap.requestFullscreen(); if (p && p.catch) p.catch(() => {}); } catch (e) { toast?.('Fullscreen not available'); } }
+}
+window.worldFullscreen = worldFullscreen;
+
+// The canvas backing store is sized from clientWidth/clientHeight in _resize()
+// (not per-frame), so on enter/exit we grow/shrink the canvas, re-run _resize,
+// then WM.fit() to recompute the camera to the new dimensions. Esc (native FS
+// exit) fires fullscreenchange too, so the same handler restores the size.
+document.addEventListener('fullscreenchange', () => {
+  const wrap = document.getElementById('world-canvas-wrap');
+  const cv = document.getElementById('world-canvas');
+  if (!wrap || !cv) return;
+  const fs = document.fullscreenElement === wrap;
+  cv.style.height = fs ? '100vh' : '600px';
+  wrap.style.borderRadius = fs ? '0' : '12px';
+  const btn = document.getElementById('world-fs-btn');
+  if (btn) btn.innerHTML = fs ? '⛶ Exit fullscreen' : '⛶ Fullscreen';
+  requestAnimationFrame(() => {                          // let layout settle first
+    if (window._worldResize) window._worldResize();
+    if (window.WM && WM.fit) WM.fit(cv._cssW || cv.clientWidth, cv._cssH || cv.clientHeight);
+  });
+});
+
 async function renderWorld() {
   _stopWorld();                  // clean any prior instance
   // keep _sprites/_selectedId — agents resume from where they stood and the
@@ -142,6 +172,7 @@ async function renderWorld() {
       <button class="btn" id="world-think-btn" style="padding:6px 12px">💭 Provoke a thought</button>
       <button class="btn" id="world-snd-btn" style="padding:6px 10px" title="Sound mixer — ambient + effects react to the live world" onclick="worldSndPanel()">🔊</button>
       <button class="btn" id="world-god-btn" style="padding:6px 12px" onclick="worldToggleEdit()">🛠️ Play God</button>
+      <button class="btn" id="world-fs-btn" style="padding:6px 12px" title="Fullscreen the game canvas (Esc to exit)" onclick="worldFullscreen()">⛶ Fullscreen</button>
       <button class="btn" style="padding:6px 14px;position:relative;background:#2a1f4a;border-color:#6d5aff;color:#c4b5fd;font-weight:600"
         title="Prayers · Workboard · Control · Republic · Finances · Settings — everything in one console" onclick="worldConsole('god')">🏛️ God Console
         <span id="world-god-badge" style="display:none;position:absolute;top:-6px;right:-6px;background:#ef4444;color:#fff;border-radius:10px;font-size:.62rem;font-weight:700;padding:1px 6px;min-width:16px;text-align:center"></span></button>
@@ -165,6 +196,7 @@ async function renderWorld() {
     <button class="btn" style="padding:4px 6px" onclick="worldEditAdd('decor:bench')">🪑</button>
     <button class="btn" style="padding:4px 6px" onclick="worldEditAdd('decor:statue')">🗿</button>
     <button class="btn" style="padding:4px 6px" onclick="worldEditAdd('decor:fountain')">⛲</button>
+    <button class="btn" style="padding:4px 6px" onclick="worldEditAdd('decor:picnic_table')" title="Picnic spot">🧺</button>
     <button class="btn" style="padding:4px 6px" onclick="worldEditAdd('decor:rock')">🪨</button>
     <span style="width:1px;height:16px;background:#33456b;margin:0 2px"></span>
     <span style="color:#7a86a0;font-size:.7rem">Work nodes:</span>
@@ -188,7 +220,7 @@ async function renderWorld() {
   </div>
   <div style="display:flex;gap:16px;flex-wrap:wrap;align-items:flex-start">
     <div style="flex:1 1 620px;min-width:320px">
-      <div style="background:#0a0f1a;border:1px solid var(--border,#233);border-radius:12px;padding:0;overflow:hidden">
+      <div id="world-canvas-wrap" style="background:#0a0f1a;border:1px solid var(--border,#233);border-radius:12px;padding:0;overflow:hidden">
         <canvas id="world-canvas" style="width:100%;height:600px;display:block;image-rendering:pixelated;cursor:grab"></canvas>
       </div>
       <div style="font-size:.72rem;color:var(--muted);margin-top:6px">
@@ -230,6 +262,13 @@ async function renderWorld() {
   try { const lr = await api('/api/world/layout'); _lay = lr?.layout; _wearSaved = lr?.wear; } catch {}
   WM.build(_lay);
   if (_wearSaved && WM.loadWear) WM.loadWear(_wearSaved);  // resume the town's worn trails
+  // Layer 2: swap in a generated whole-world terrain image ONLY when the feature
+  // is enabled (world_terrain_image_enabled) AND an image exists — else procedural.
+  try {
+    const tr = await api('/api/world/terrain');
+    if (tr && tr.enabled && tr.has_image && tr.url && WM.setTerrainImage)
+      WM.setTerrainImage('/store/static/' + tr.url);
+  } catch {}
   if (window.WN && WN.ready) WN.spawn(12);               // populate the town with wanderers
   if (window.WW) WW.spawn(() => {                        // wildlife + who scares it
     const w = Object.values(_sprites).map(s => ({ x: s.px, y: s.py }));
@@ -342,41 +381,7 @@ async function renderWorld() {
   _startWorldLoops();            // poll + RAF; visibilitychange pauses/resumes them
 }
 window.renderWorld = renderWorld;
-function worldSndToggle() {
-  const on = window.WAU ? WAU.toggle() : false;
-  const b = document.getElementById('world-snd-btn');
-  if (b) b.textContent = on ? '🔊' : '🔇';
-  const t = document.getElementById('world-snd-onoff');
-  if (t) t.textContent = on ? 'On' : 'Off';
-  toast?.(on ? 'Sound on' : 'Sound off');
-}
-window.worldSndToggle = worldSndToggle;
 
-/* the 🔊 mixer popover — master / ambient / effects sliders */
-function worldSndPanel() {
-  const old = document.getElementById('world-snd-pop');
-  if (old) { old.remove(); return; }
-  const btn = document.getElementById('world-snd-btn');
-  if (!btn || !window.WAU) return;
-  const r = btn.getBoundingClientRect();
-  const p = document.createElement('div');
-  p.id = 'world-snd-pop';
-  p.style.cssText = `position:fixed;top:${r.bottom + 6}px;left:${Math.max(8, r.left - 130)}px;z-index:950;` +
-    'background:#0f1626;border:1px solid #2a3752;border-radius:10px;padding:12px;width:238px;box-shadow:0 8px 30px rgba(0,0,0,.5)';
-  const row = (k, lbl) => `<div style="display:flex;align-items:center;gap:8px;margin:6px 0">
-    <span style="font-size:.72rem;color:#c7d2e5;width:60px">${lbl}</span>
-    <input type="range" min="0" max="100" value="${Math.round(WAU.vol(k) * 100)}" style="flex:1"
-      oninput="WAU.setVol('${k}', this.value/100)"></div>`;
-  p.innerHTML = `
-    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
-      <b style="font-size:.8rem;color:#e8eefc">🔊 Sound</b>
-      <button class="btn" id="world-snd-onoff" style="padding:2px 10px;font-size:.7rem" onclick="worldSndToggle()">${WAU.on ? 'On' : 'Off'}</button>
-    </div>
-    ${row('master', 'Master')}${row('amb', 'Ambient')}${row('sfx', 'Effects')}
-    <div style="font-size:.62rem;color:#54607a;margin-top:4px">Birdsong, wind, hammering and crowd murmur follow the live world — season, time, raids, who's working.</div>`;
-  document.body.appendChild(p);
-}
-window.worldSndPanel = worldSndPanel;
 function worldRecenter() {   // fit the whole city
   const cv = document.getElementById('world-canvas');
   if (cv) WM.fit(cv._cssW || cv.clientWidth, cv._cssH || cv.clientHeight);

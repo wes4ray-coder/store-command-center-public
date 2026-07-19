@@ -90,10 +90,13 @@ def sync(c):
         label = 1.0 if r["status"] in ("done", "approved", "failed") else -1.0
         n += add_example(c, f"prayer:{r['id']}", r["kind"],
                          f"{r['title']}. {r['detail'] or ''}", label, "god_verdict")
-    # 2) the design review pipeline
+    # 2) the design review pipeline (nsfw designs are excluded — Private-Studio
+    #    rejections are wired in explicitly by app/nsfw.py as their own deny
+    #    examples, and nsfw work must not skew the SFW studio's taste)
     try:
         for r in c.execute("SELECT id,status,prompt,product_type FROM designs "
-                           "WHERE status IN ('approved','published','rejected')").fetchall():
+                           "WHERE status IN ('approved','published','rejected') "
+                           "AND COALESCE(nsfw,0)=0").fetchall():
             label = 1.0 if r["status"] in ("approved", "published") else -1.0
             n += add_example(c, f"design:{r['id']}", "design",
                              f"{r['prompt'] or ''} ({r['product_type'] or 'design'})", label, "design_review")
@@ -103,6 +106,7 @@ def sync(c):
     try:
         for r in c.execute("SELECT id,prompt FROM generations WHERE status='done' "
                            "AND (source IS NULL OR source!='world_auto') "
+                           "AND COALESCE(nsfw,0)=0 "
                            "ORDER BY id DESC LIMIT 400").fetchall():
             n += add_example(c, f"gen:{r['id']}", "image", r["prompt"] or "", 0.7, "god_own_work")
     except Exception:

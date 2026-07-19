@@ -506,6 +506,8 @@
       <div class="nav-group-title">Studio <span class="nav-group-chev">&#9662;</span></div>
       <div class="nav-group-items">
         <div class="nav-item" data-view="studio"><span class="nav-icon">&#127917;</span><span>Studio</span><span class="nav-badge warn" id="badge-m3d">0</span></div>
+        <!-- Private Studio (NSFW) — hidden unless nsfw_enabled AND nsfw_display are on (tab-nsfw.js updateNsfwNav) -->
+        <div class="nav-item" data-view="nsfw" id="nav-nsfw" style="display:none;"><span class="nav-icon">&#128274;</span><span>Private Studio</span></div>
       </div>
     </div>
     <div class="nav-group" data-group="storefront">
@@ -537,6 +539,7 @@
       <div class="nav-group-title">Assist &amp; Config <span class="nav-group-chev">&#9662;</span></div>
       <div class="nav-group-items">
         <div class="nav-item" data-view="agent"><span class="nav-icon">&#129302;</span><span>AI Assistant</span></div>
+        <div class="nav-item" data-view="research"><span class="nav-icon">&#128300;</span><span>Research Lab</span></div>
         <div class="nav-item" data-view="library"><span class="nav-icon">&#128218;</span><span>Library</span></div>
         <div class="nav-item" data-view="graph"><span class="nav-icon">&#128376;&#65039;</span><span>Knowledge Graph</span></div>
         <div class="nav-item" data-view="settings"><span class="nav-icon">&#9881;&#65039;</span><span>Settings</span></div>
@@ -754,10 +757,12 @@
   <script src='/store/static/js/sec-system.js'></script>
   <!-- Card action handler + pipeline modals (restored from backup) -->
   <script src='/store/static/js/card-actions.js'></script>
+  <script src='/store/static/js/card-actions-handlers.js'></script>
   <!-- Shared tab helpers -->
   <script src='/store/static/js/tab-shared.js'></script>
   <!-- Admin / System settings panel (server config, backups, restart) -->
   <script src='/store/static/js/admin.js'></script>
+  <script src='/store/static/js/admin-node.js'></script>
   <!-- One module per tab (restored real implementations) -->
   <script src='/store/static/js/tab-etsy-printify.js'></script>
   <script src='/store/static/js/tab-image-gen.js'></script>
@@ -772,9 +777,13 @@
   <script src='/store/static/js/tab-money.js'></script>
   <script src='/store/static/js/tab-mail.js'></script>
   <script src='/store/static/js/tab-github.js'></script>
+  <script src='/store/static/js/github-swarm.js'></script>
+  <script src='/store/static/js/github-agents.js'></script>
   <script src='/store/static/js/tab-models3d.js'></script>
   <script src='/store/static/js/tab-videos.js'></script>
+  <script src='/store/static/js/videos-chains.js'></script>
   <script src='/store/static/js/tab-audio.js'></script>
+  <script src='/store/static/js/tab-nsfw.js'></script>
   <script src='/store/static/js/world-assets.js'></script>
   <script src='/store/static/js/world-buildings.js'></script>
   <script src='/store/static/js/world-npcs.js'></script>
@@ -803,11 +812,18 @@
   <script src='/store/static/js/world-roster.js'></script>
   <script src='/store/static/js/tab-treasury.js'></script>
   <script src='/store/static/js/tab-world.js'></script>
+  <script src='/store/static/js/world-sound.js'></script>
   <script src='/store/static/js/tab-homelab.js'></script>
   <script src='/store/static/js/tab-crypto.js'></script>
+  <script src='/store/static/js/crypto-node.js'></script>
+  <script src='/store/static/js/crypto-trading.js'></script>
+  <script src='/store/static/js/crypto-stocks.js'></script>
   <script src='/store/static/js/tab-jellycoin.js'></script>
+  <script src='/store/static/js/tab-pearl.js'></script>
   <script src='/store/static/js/tab-wallets.js'></script>
   <script src='/store/static/js/tab-oracle.js'></script>
+  <script src='/store/static/js/tab-oracle-history.js'></script>
+  <script src='/store/static/js/tab-research.js'></script>
   <script src='/store/static/js/graph-explorer.js'></script>
   <script src='/store/static/js/tab-graph.js'></script>
   <script>

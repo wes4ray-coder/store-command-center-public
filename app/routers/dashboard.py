@@ -47,40 +47,46 @@ def get_queue():
     the header bar, and the Studio GPU view.
     """
     jobs = []
+    # NSFW jobs run through the same queue but are redacted to a discreet generic
+    # chip ("Private job", no prompt/detail/kind) unless the display toggle is on.
+    import nsfw as _nsfw
+    _show_nsfw = _nsfw.display_on()
     conn = get_conn()
     try:
         rows = conn.execute("""
             SELECT id, 'image' AS kind, prompt AS label, status,
-                   NULL AS progress, NULL AS detail, created_at
+                   NULL AS progress, NULL AS detail, created_at, COALESCE(nsfw,0) AS nsfw
               FROM generations  WHERE status='generating'
             UNION ALL
             SELECT id, 'video' AS kind, prompt AS label, status,
-                   progress AS progress, progress_msg AS detail, created_at
+                   progress AS progress, progress_msg AS detail, created_at, COALESCE(nsfw,0) AS nsfw
               FROM videos       WHERE status IN ('queued','generating')
             UNION ALL
             SELECT id, 'video chain' AS kind, COALESCE(NULLIF(title,''), concept) AS label, status,
                    CASE WHEN total_segments>0
                         THEN CAST(completed_segments*100.0/total_segments AS INT) END AS progress,
-                   NULL AS detail, created_at
+                   NULL AS detail, created_at, COALESCE(nsfw,0) AS nsfw
               FROM video_chains WHERE status IN ('pending','generating')
             UNION ALL
             SELECT id, 'audio' AS kind, prompt AS label, status,
-                   NULL AS progress, progress_msg AS detail, created_at
+                   NULL AS progress, progress_msg AS detail, created_at, COALESCE(nsfw,0) AS nsfw
               FROM audio_clips  WHERE status IN ('queued','generating')
             UNION ALL
             SELECT id, '3d' AS kind, COALESCE(NULLIF(title,''), gen_prompt) AS label, status,
-                   NULL AS progress, progress_msg AS detail, created_at
+                   NULL AS progress, progress_msg AS detail, created_at, COALESCE(nsfw,0) AS nsfw
               FROM models3d     WHERE status='generating'
             ORDER BY created_at DESC
         """).fetchall()
         for r in rows:
             st = r["status"]
+            redact = bool(r["nsfw"]) and not _show_nsfw
             jobs.append({
-                "id": r["id"], "kind": r["kind"],
-                "label": (r["label"] or "").strip() or f'{r["kind"]} #{r["id"]}',
+                "id": r["id"], "kind": ("private" if redact else r["kind"]),
+                "label": (_nsfw.PRIVATE_LABEL if redact
+                          else (r["label"] or "").strip() or f'{r["kind"]} #{r["id"]}'),
                 "status": st,
                 "phase": "running" if st in ("generating", "running") else "queued",
-                "progress": r["progress"], "detail": r["detail"],
+                "progress": r["progress"], "detail": (None if redact else r["detail"]),
                 "origin": "store", "created_at": r["created_at"],
             })
     finally:
@@ -123,8 +129,20 @@ def get_queue():
                    "queued": len(jobs) - running, "by_kind": by_kind},
         "comfyui": comfy,
         "paused": orch.is_paused(),
+        "node_guard": _node_guard_info(),
         "busy": bool(jobs) or comfy["running"] > 0 or comfy["pending"] > 0,
     }
+
+
+def _node_guard_info() -> dict:
+    """Node interactive-use state (Steam game etc.) from the gpu-guard heartbeat.
+    Piggybacks the Dashboard's status poll to auto-resume a stale guard pause."""
+    try:
+        from routers import gpu_guard
+        gpu_guard.maybe_unstick()
+        return gpu_guard.guard_info()
+    except Exception:
+        return {"busy": False, "apps": [], "since": 0.0, "guard_paused": False}
 
 
 @router.post("/api/queue/pause")

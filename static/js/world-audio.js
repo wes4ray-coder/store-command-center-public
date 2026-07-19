@@ -11,9 +11,17 @@
      • water plips when the camera is near a pond, drums during a raid
      • event SFX: doors, blessing chime, product ship, raid alarm, coin
 
-   Everything synthesized, zero audio files. AudioContext arms on the user's
-   first click/keypress (browser autoplay policy).
-   localStorage: world_snd on/off · world_vol_master/_amb/_sfx (0..1).
+   Two layers:
+     1. synth — everything above synthesized live, zero audio files (fallback)
+     2. GENERATED — real wavs rendered by the store's own audio models
+        (Stable Audio / MusicGen via /api/world/audio, cached server-side).
+        When assets exist and the mixer's "Generated" toggle is on, ambience
+        plays those context-picked loops (day/season/night/raid) and SFX
+        prefer the generated one-shots; the synth covers anything missing.
+
+   AudioContext arms on the user's first click/keypress (autoplay policy).
+   localStorage: world_snd on/off · world_snd_gen generated on/off ·
+   world_vol_master/_amb/_sfx (0..1).
    ══════════════════════════════════════════════════════════════════════════ */
 window.WAU = (function () {
   let ctx = null, master = null, amb = null, sfxG = null, windGain = null;
@@ -55,7 +63,81 @@ window.WAU = (function () {
       src.connect(lp); lp.connect(windGain); windGain.connect(amb); src.start();
       clearInterval(pulse);
       pulse = setInterval(_ambTick, 600);              // the dynamic scheduler heartbeat
+      _fetchGen();                                     // learn which generated wavs exist
     } catch (e) { ctx = null; }
+  }
+
+  /* ── generated soundscape (wavs from the store's own audio models) ── */
+  const genOn = () => (localStorage.getItem('world_snd_gen') ?? '1') === '1';
+  let genList = null;            // key → url (fetched once per page)
+  const genBuf = {};             // key → AudioBuffer | 'loading' | 'err'
+  let genLoop = { key: null, src: null, g: null };
+  // API is a top-level const in app-core.js (script-global, not on window)
+  const _api = () => (typeof API === 'undefined' ? '' : API);
+  function _fetchGen() {
+    if (genList !== null) return;
+    genList = {};
+    fetch(_api() + '/api/world/audio/assets')
+      .then(r => r.json())
+      .then(j => { for (const a of (j.assets || [])) if (a.ready) genList[a.key] = a.url; })
+      .catch(() => {});
+  }
+  function _genBuffer(key) {     // decoded buffer, or null (kicks off an async decode)
+    if (!ctx || !genList || !genList[key]) return null;
+    const b = genBuf[key];
+    if (b && b !== 'loading' && b !== 'err') return b;
+    if (!b) {
+      genBuf[key] = 'loading';
+      fetch(_api() + genList[key])
+        .then(r => r.arrayBuffer())
+        .then(ab => ctx.decodeAudioData(ab))
+        .then(buf => { genBuf[key] = buf; })
+        .catch(() => { genBuf[key] = 'err'; });
+    }
+    return null;
+  }
+  function _genAmbKey() {        // context → which generated bed should play
+    if (st.phase === 'raid') return 'amb_raid';
+    if (!(st.hour >= 6 && st.hour < 20)) return 'amb_night';
+    return 'amb_day_' + (_SEASON_BIRDS[st.season] !== undefined ? st.season : 'spring');
+  }
+  function _genLoopStop(fade = 1.2) {
+    const { src, g } = genLoop;
+    genLoop = { key: null, src: null, g: null };
+    if (!src || !ctx) return;
+    try {
+      g.gain.setTargetAtTime(0.0001, ctx.currentTime, fade / 3);
+      setTimeout(() => { try { src.stop(); } catch {} }, fade * 1000 + 200);
+    } catch {}
+  }
+  function _genLoopTick() {      // keep the right bed looping (crossfade on change)
+    if (!genOn()) { if (genLoop.src) _genLoopStop(); return false; }
+    const want = _genAmbKey();
+    if (genLoop.key === want) return !!genLoop.src;
+    const buf = _genBuffer(want);
+    if (!buf) return !!genLoop.src;          // still decoding — keep what's playing
+    _genLoopStop();
+    const src = ctx.createBufferSource(); src.buffer = buf; src.loop = true;
+    const g = ctx.createGain(); g.gain.value = 0.0001;
+    src.connect(g); g.connect(amb); src.start();
+    g.gain.setTargetAtTime(0.55, ctx.currentTime, 0.8);
+    genLoop = { key: want, src, g };
+    return true;
+  }
+  function _playSfx(name, out) { // generated one-shot if ready, else the synth voice
+    const b = genOn() ? _genBuffer(name) : null;
+    if (b) {
+      const s = ctx.createBufferSource(); s.buffer = b;
+      s.connect(out || sfxG); s.start();
+      return;
+    }
+    SFX[name] && SFX[name]();
+  }
+  function genToggle() {
+    const on = !genOn();
+    localStorage.setItem('world_snd_gen', on ? '1' : '0');
+    if (!on) _genLoopStop();
+    return on;
   }
 
   // one synth voice on a channel: freq glide + exponential envelope
@@ -119,14 +201,20 @@ window.WAU = (function () {
 
   function _ambTick() {
     if (!ctx || !enabled() || document.hidden || !document.getElementById('world-canvas')) return;
-    if (windGain && Math.abs(windGain.gain.value - _windBase()) > 0.06)
-      windGain.gain.setTargetAtTime(_windBase(), ctx.currentTime, 2.5);
+    // generated bed (if any) replaces the synth BASE layer — wind/birds/crickets/
+    // drums come from the real recording; live accents (taps, murmur, plips) stay.
+    const gen = _genLoopTick();
+    const wBase = gen ? 0.015 : _windBase();
+    if (windGain && Math.abs(windGain.gain.value - wBase) > 0.06)
+      windGain.gain.setTargetAtTime(wBase, ctx.currentTime, 2.5);
     const day = st.hour >= 6 && st.hour < 20;
     const r = Math.random();
-    if (st.phase === 'raid') { if (r < 0.55) _warDrum(); return; }       // battle drowns the calm
-    if (day && r < 0.055 * (_SEASON_BIRDS[st.season] ?? 1)) _birdsong();
-    else if (!day && r < 0.07) _cricket();
-    if (Math.random() < (st.season === 'autumn' || st.season === 'winter' ? 0.05 : 0.02)) _gust();
+    if (st.phase === 'raid') { if (!gen && r < 0.55) _warDrum(); return; }  // battle drowns the calm
+    if (!gen) {
+      if (day && r < 0.055 * (_SEASON_BIRDS[st.season] ?? 1)) _birdsong();
+      else if (!day && r < 0.07) _cricket();
+      if (Math.random() < (st.season === 'autumn' || st.season === 'winter' ? 0.05 : 0.02)) _gust();
+    }
     if (st.working > 0 && Math.random() < 0.14) _workTaps();
     if (st.leisure >= 3 && Math.random() < 0.06) _murmur();
     if (st.nearWater && Math.random() < 0.10) _plip();
@@ -160,7 +248,7 @@ window.WAU = (function () {
     const now = performance.now();
     if (now - (_last[name] || 0) < throttleMs) return;
     _last[name] = now;
-    try { SFX[name] && SFX[name](); } catch {}
+    try { _playSfx(name); } catch {}
   }
 
   /* ── live state feeds ── */
@@ -193,14 +281,15 @@ window.WAU = (function () {
     // scale from the BASE channel volume (not the live gain — overlapping
     // positional calls would compound the attenuation and mute the channel)
     sfxG.gain.value = vol('sfx') * fall * Math.min(1.6, 0.7 + lis.scale * 0.35);
-    try { SFX[name] && SFX[name](); } catch {}
+    try { _playSfx(name); } catch {}
     setTimeout(() => { if (ctx) sfxG.gain.value = vol('sfx'); }, 400);
   }
 
   function toggle() {
     const on = !enabled();
     localStorage.setItem('world_snd', on ? '1' : '0');
-    if (on) _boot(); else if (ctx) { try { ctx.close(); } catch {} ctx = null; clearInterval(pulse); }
+    if (on) _boot();
+    else if (ctx) { _genLoopStop(0.1); try { ctx.close(); } catch {} ctx = null; clearInterval(pulse); }
     return on;
   }
 
@@ -208,6 +297,7 @@ window.WAU = (function () {
   window.addEventListener('pointerdown', arm, { passive: true });
   window.addEventListener('keydown', arm, { passive: true });
 
-  return { sfx, sfxAt, setListener, toggle, update, updateCam, setVol, vol,
-           get on() { return enabled(); }, get ready() { return !!ctx; } };
+  return { sfx, sfxAt, setListener, toggle, update, updateCam, setVol, vol, genToggle,
+           get on() { return enabled(); }, get ready() { return !!ctx; },
+           get genPref() { return genOn(); } };
 })();

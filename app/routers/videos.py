@@ -38,7 +38,7 @@ class ChainPromptsRequest(BaseModel):
 def list_video_chains():
     conn = get_conn()
     chains = conn.execute(
-        "SELECT * FROM video_chains ORDER BY created_at DESC"
+        "SELECT * FROM video_chains WHERE COALESCE(nsfw,0)=0 ORDER BY created_at DESC"
     ).fetchall()
     result = []
     for c in chains:
@@ -186,7 +186,8 @@ def generate_chain_prompts(req: ChainPromptsRequest):
 @router.get("/api/videos")
 def list_videos():
     conn = get_conn()
-    rows = conn.execute("SELECT * FROM videos ORDER BY created_at DESC").fetchall()
+    # nsfw-flagged videos never appear here — /api/nsfw/library only.
+    rows = conn.execute("SELECT * FROM videos WHERE COALESCE(nsfw,0)=0 ORDER BY created_at DESC").fetchall()
     conn.close()
     return [dict(r) for r in rows]
 
@@ -197,6 +198,10 @@ def get_video(vid_id: int):
     conn.close()
     if not row:
         raise HTTPException(status_code=404, detail="Video not found")
+    if row["nsfw"]:
+        import nsfw as _nsfw
+        if not _nsfw.visible():
+            raise HTTPException(status_code=404, detail="Video not found")
     return dict(row)
 
 @router.post("/api/videos/generate")

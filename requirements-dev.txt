@@ -1,0 +1,8 @@
+# Store Command Center — dev / verification tooling (optional; the server does not
+# need these to run). Installed by `./setup.sh --with-dev`:
+#   pytest      → ./run_tests.sh (the full suite in tests/)
+#   playwright  → tests/ui_regression.py + headless browser-verify of the SPA
+# After install, fetch the browser once:  ./venv/bin/playwright install chromium
+# (tools/verify_spa.sh additionally needs a system `node` binary for syntax checks.)
+pytest==9.1.1
+playwright==1.61.0
