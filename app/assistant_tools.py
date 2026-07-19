@@ -347,6 +347,25 @@ def resolve_call(tool: str, args: dict) -> dict:
             "body": args, "category": classify_call(method, path)}
 
 
+def _redact_secrets(obj):
+    """Never hand the ASSISTANT decrypted secrets. GET /api/settings decrypts credentials
+    for the human UI, but the assistant's auto-approved read tool would otherwise let a
+    prompt-injected read (e.g. text in a summarized email/page) exfil PayPal/Etsy/Kraken
+    keys and spend money OUTSIDE the world_ops gates. Redact any secret-named field in
+    whatever the tool returns — defense-in-depth across every endpoint, not just settings.
+    The human UI calls /api/settings directly and is unaffected."""
+    try:
+        from crypto import SECRET_KEYS as _SK
+    except Exception:
+        return obj
+    if isinstance(obj, dict):
+        return {k: ("***redacted***" if (isinstance(k, str) and k in _SK and v not in (None, "", 0))
+                    else _redact_secrets(v)) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_redact_secrets(x) for x in obj]
+    return obj
+
+
 def execute_resolved(res: dict, timeout: float = 300.0) -> dict:
     """Execute a resolved call in-process against the app (ASGI transport →
     127.0.0.1 client → rides the localhost auth bypass, like the MCP mount)."""
@@ -368,7 +387,7 @@ def execute_resolved(res: dict, timeout: float = 300.0) -> dict:
                 data = r.json()
             except ValueError:
                 data = (r.text or "")[:2000]
-            return {"status": r.status_code, "result": data}
+            return {"status": r.status_code, "result": _redact_secrets(data)}
 
     return asyncio.run(_go())
 

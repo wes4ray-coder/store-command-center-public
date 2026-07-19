@@ -36,6 +36,13 @@ def get_settings():
     result.setdefault("nsfw_enabled", "")
     result.setdefault("nsfw_display", "")
     result.setdefault("nsfw_world", "")
+    # P&L (Etsy) fee-model defaults — tunable so the margin view isn't magic numbers.
+    try:
+        from pnl import PNL_FEE_DEFAULTS
+        for k, v in PNL_FEE_DEFAULTS.items():
+            result.setdefault(k, str(v))
+    except Exception:
+        pass
     return _dec_secrets(result)   # decrypt credentials so the UI shows the saved values
 
 

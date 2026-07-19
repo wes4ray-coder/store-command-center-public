@@ -168,6 +168,41 @@ def connection_info():
     return {"public_url": PUBLIC_BASE_URL or "", "port": PORT, "lan_ip": lan_ip}
 
 
+@router.get("/api/peers/my-wallets")          # BEFORE /api/peers/{pid}/... — a literal
+def my_wallets_on_buddy_chains():             # segment must not be eaten as a {pid}
+    """What WE have earned on each buddy's chain.
+
+    JellyCoin is per-node: our mining shares, review pay and compute credits on a
+    buddy's network live in OUR peer:<name> wallet on THEIR ledger, not in our own
+    wallet list. Each buddy exposes it at rpc/wallet (authenticated with the key
+    they issued us), so fan out and collect. One unreachable buddy must never sink
+    the panel — failures come back as a per-peer note, not a 502."""
+    conn = get_conn()
+    peers = [dict(r) for r in conn.execute(
+        "SELECT id,name,base_url FROM peers WHERE status='approved' ORDER BY name").fetchall()]
+    conn.close()
+    out, total = [], 0.0
+    for p in peers:
+        row = {"peer_id": p["id"], "peer": p["name"], "base_url": p["base_url"]}
+        try:
+            w = _call_peer(_get_peer(p["id"]), "GET", "/api/peers/rpc/wallet", timeout=15)
+            bal = float(w.get("balance_jly") or 0)
+            row.update({"ok": True, "wallet": w.get("wallet"), "address": w.get("address"),
+                        "balance_jly": bal, "symbol": w.get("symbol") or "JLY",
+                        "billing": w.get("billing"),
+                        "price_per_llm_job_jly": w.get("price_per_llm_job_jly"),
+                        "price_per_review_jly": w.get("price_per_review_jly"),
+                        "recent_txs": (w.get("recent_txs") or [])[:8]})
+            total += bal
+        except HTTPException as e:            # offline / revoked / older build without the route
+            row.update({"ok": False, "error": str(e.detail)[:160]})
+        except Exception as e:
+            row.update({"ok": False, "error": str(e)[:160]})
+        out.append(row)
+    return {"wallets": out, "total_jly": round(total, 6),
+            "reachable": sum(1 for r in out if r.get("ok")), "peers": len(out)}
+
+
 @router.get("/api/peers/{pid}/model-check")   # NOT .../models — that path segment would
 def peer_models(pid: int):                    # shadow /api/peers/rpc/models ({pid}="rpc")
     """Ask a peer which models their node can serve (sender-side capability check)."""

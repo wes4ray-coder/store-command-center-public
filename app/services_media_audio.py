@@ -28,7 +28,21 @@ def _audio_env(engine: str = "") -> str:
         parts.append(f"HF_HOME={d}")
         if engine == "acestep":
             parts.append(f"STORE_ACE_STORAGE={d}/ace-step")
+    # Gated models (e.g. Stable Audio Open) need an HF token whose account has accepted
+    # the model's license — else the download raises GatedRepoError. Pass it through when
+    # configured (Settings → hf_token, stored encrypted at rest). Single-quoted for the
+    # remote shell; tokens are hf_[A-Za-z0-9_] so stripping quotes is safe.
+    tok = (get_setting("hf_token") or "").strip().replace("'", "")
+    if tok:
+        parts.append(f"HF_TOKEN='{tok}'")
+        parts.append(f"HUGGING_FACE_HUB_TOKEN='{tok}'")
     return " ".join(parts)
+
+
+# Engines whose model is GATED on Hugging Face (license must be accepted + an HF token
+# provided). Without a token these fail with GatedRepoError, so we fall back to a public
+# engine instead of spamming failures (which the world-security monitor then flags).
+GATED_ENGINES = {"stable_audio"}
 
 
 def _node_audio(mode: str, prompt: str, out_wav_local: str, duration: int = 8,
@@ -173,30 +187,44 @@ def run_audio_clip(clip_id: int):
     if not row:
         return
     row = dict(row)
-    eng = AUDIO_ENGINES.get(row["engine"] or "musicgen", AUDIO_ENGINES["musicgen"])
+    engine = row["engine"] or "musicgen"
+    fell_back = False
+    # A gated engine with no HF token WILL GatedRepoError — fall back to public MusicGen so
+    # the clip succeeds (same "music" kind) instead of failing on every attempt.
+    if engine in GATED_ENGINES and not (get_setting("hf_token") or "").strip():
+        logger.warning("Audio clip %d: engine '%s' is gated and no hf_token is set → using musicgen",
+                       clip_id, engine)
+        engine, fell_back = "musicgen", True
+    eng = AUDIO_ENGINES.get(engine, AUDIO_ENGINES["musicgen"])
     mode = "voice" if eng["kind"] == "voice" else "music"
-    model_id = row["model_id"] or eng["model"]
+    # after a fallback the row's model_id points at the gated model, so use the engine default
+    model_id = eng["model"] if fell_back else (row["model_id"] or eng["model"])
 
     ok, msg = _video_preflight()
     if not ok:
         _set_clip(clip_id, "failed", err=msg)
         return
-    _set_clip(clip_id, "generating", pmsg="Loading model…")
+    _set_clip(clip_id, "generating",
+              pmsg=("Stable Audio is gated (no HF token) — using MusicGen…" if fell_back else "Loading model…"))
     ts = int(datetime.now().timestamp())
     out = str(VIDEOS_DIR / f"clip_{clip_id}_{ts}.wav")
     with _VIDEO_RUN_LOCK:
         orch.video_acquire()
         try:
             _node_audio(mode, row["prompt"], out, duration=int(row["duration"] or 8),
-                        model_id=model_id, engine=row["engine"],
+                        model_id=model_id, engine=engine,
                         lyrics=(row["lyrics"] if "lyrics" in row.keys() else "") or "")
             _set_clip(clip_id, "done", path=out, pmsg="Done")
             logger.info("Audio clip %d done: %s", clip_id, out)
         except subprocess.TimeoutExpired:
             _set_clip(clip_id, "failed", err="Generation timed out")
         except Exception as ex:
+            m = str(ex)
+            if "GatedRepo" in m or "gated repo" in m.lower():
+                m = ("Model is gated on Hugging Face — accept its license at huggingface.co "
+                     "and set an HF token (Settings → hf_token), or use MusicGen.")
             logger.error("Audio clip %d failed: %s", clip_id, ex)
-            _set_clip(clip_id, "failed", err=str(ex)[:500])
+            _set_clip(clip_id, "failed", err=m[:500])
         finally:
             orch.video_release()
 

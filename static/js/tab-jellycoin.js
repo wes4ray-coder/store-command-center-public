@@ -96,15 +96,17 @@ function _jlyBars(perRig) {
 
 async function cryptoLoadJelly() {
   const pane = document.getElementById('pane-crypto-jelly');
-  let st, wal, tok, nfts, missions, blocks, ws, pb, stats, pool;
+  let st, wal, tok, nfts, missions, blocks, ws, pb, stats, pool, buddies, mine;
   try {
-    [st, wal, tok, nfts, missions, blocks, ws, pb, stats, pool] = await Promise.all([
+    [st, wal, tok, nfts, missions, blocks, ws, pb, stats, pool, buddies, mine] = await Promise.all([
       api('/api/jelly/status'), api('/api/jelly/wallets'), api('/api/jelly/miner-token'),
       api('/api/jelly/nft/list'), api('/api/jelly/missions'), api('/api/jelly/blocks?limit=8'),
       api('/api/world/settings').catch(() => ({ settings: {} })),
       api('/api/jelly/peer-billing').catch(() => null),
       api('/api/jelly/stats').catch(() => null),
       api('/api/jelly/pool').catch(() => null),
+      api('/api/peers').catch(() => null),
+      api('/api/peers/my-wallets').catch(() => null),
     ]);
   } catch (e) {
     pane.innerHTML = `<div class="empty"><div class="empty-icon">&#10060;</div>${esc(e.message)}</div>`;
@@ -113,6 +115,8 @@ async function cryptoLoadJelly() {
   _JLY.st = st;
   const companyOn = String((ws.settings || {}).world_crypto_mining_enabled) === '1';
   const rigs = st.miners || [];
+  const paired = ((buddies || {}).peers || []).filter(p => p.status === 'approved');
+  _JLY.paired = paired;
 
   pane.innerHTML = `
     <div class="section-header"><div><div class="section-title">🪼 JellyCoin (${esc(st.symbol)})</div>
@@ -192,6 +196,61 @@ async function cryptoLoadJelly() {
         <button class="btn-sm" onclick="jellyPeerBilling(${pb.enabled})">💾 Save price</button>
       </div>
     </div>` : ''}
+
+    ${mine ? `<div class="settings-group" style="margin-bottom:16px;">
+      <div class="settings-group-title">🌐 My wallets on buddies' chains ${hlp('JellyCoin is per-node: each store runs its OWN chain. What you earn on a buddy\'s network — mining shares, code reviews, lending them AI — sits in your wallet on THEIR ledger, not in your Wallets list below. This panel asks each paired buddy for your balance with the key they issued you.')}
+        <span style="font-size:.62rem;font-weight:700;background:rgba(148,163,184,.16);color:var(--muted);border-radius:10px;padding:2px 8px;margin-left:8px;">${mine.reachable}/${mine.peers} reachable</span>
+      </div>
+      ${(mine.wallets || []).length ? `
+      <div style="font-size:.78rem;color:var(--muted);line-height:1.7;margin-bottom:8px;">
+        Total earned away from home: <b style="color:var(--text);">${Number(mine.total_jly).toLocaleString(undefined, { maximumFractionDigits: 4 })} JLY</b>
+        across ${mine.peers} paired ${mine.peers === 1 ? 'buddy' : 'buddies'}.
+      </div>
+      <table class="mini-table" style="width:100%;font-size:.78rem;">
+        <tr><th style="text-align:left;">Buddy's network</th><th style="text-align:left;">My wallet there</th><th style="text-align:right;">Balance</th></tr>
+        ${(mine.wallets || []).map(w => `<tr>
+          <td>${esc(w.peer)}<div style="font-size:.66rem;color:var(--muted);">${esc(w.base_url || '')}</div></td>
+          <td style="color:var(--muted);">${w.ok ? esc(w.wallet || '—') : `<span style="color:var(--muted);">offline — ${esc(w.error || 'unreachable')}</span>`}</td>
+          <td style="text-align:right;font-weight:600;">${w.ok ? Number(w.balance_jly).toLocaleString(undefined, { maximumFractionDigits: 4 }) + ' ' + esc(w.symbol) : '—'}</td></tr>`).join('')}
+      </table>
+      <div style="font-size:.72rem;color:var(--muted);line-height:1.7;margin-top:8px;">
+        These are separate chains, not one shared ledger — a balance here can't be spent on your own network.
+        It buys AI compute and reviews <i>on that buddy's node</i>.
+      </div>`
+      : `<div style="font-size:.78rem;color:var(--muted);">No paired buddies yet. Pair one in <b>Settings → Peers</b>, then your balance on their chain shows up here.</div>`}
+    </div>` : ''}
+
+    <div class="settings-group" style="margin-bottom:16px;">
+      <div class="settings-group-title">🔗 Join a buddy's network ${hlp('Mining on YOUR node mints YOUR coin — a chain of your own. To grow a buddy\'s network instead, point the same miner at THEIR url with a rig token they hand you. Their node then pays your wallet on their chain (see the panel above).')}</div>
+      <div style="font-size:.78rem;color:var(--muted);line-height:1.7;">
+        Every store runs its own chain, so mining here grows <b>your</b> JLY. Pointing a rig at a buddy's node instead
+        makes you a miner on <b>theirs</b> — if they've turned the buddy-share pool on, you earn a proportional cut of
+        every block your shares helped find.
+      </div>
+      <div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;margin-top:10px;">
+        <div class="field" style="margin:0;"><label>Buddy's node ${hlp('Paired buddies from Settings → Peers. Pick "custom" to type any node URL.')}</label>
+          <select id="jly-join-peer" onchange="jellyJoinCmd()" style="min-width:150px;">
+            ${paired.length ? paired.map(p => `<option value="${esc(p.base_url || '')}">${esc(p.name)}</option>`).join('') : ''}
+            <option value="">— custom URL —</option>
+          </select></div>
+        <div class="field" style="margin:0;flex:1;min-width:170px;"><label>Node URL</label>
+          <input id="jly-join-url" oninput="jellyJoinCmd()" placeholder="http://their-host:8787"
+                 value="${esc((paired[0] || {}).base_url || '')}"></div>
+        <div class="field" style="margin:0;"><label>Their rig token ${hlp('The X-Jelly-Token from THEIR store (Crypto → JellyCoin → Mining). They hand it to you out of band — it only lets you donate hashpower, never read or move their funds.')}</label>
+          <input id="jly-join-token" oninput="jellyJoinCmd()" placeholder="paste their token" style="width:150px;"></div>
+        <div class="field" style="margin:0;"><label>My rig name ${hlp('Ask them to map this rig to your peer:<name> wallet in their pool panel, so your share of each block lands in your wallet on their chain.')}</label>
+          <input id="jly-join-rig" oninput="jellyJoinCmd()" placeholder="rig1" value="rig1" style="width:110px;"></div>
+      </div>
+      <div style="font-size:.76rem;color:var(--muted);line-height:1.8;margin-top:10px;">
+        Run on your GPU box: <code id="jly-join-cmd" style="word-break:break-all;">python3 jellyminer.py --url &lt;their url&gt; --token &lt;their token&gt; --name rig1</code>
+        <button class="btn-sm" style="margin-left:6px;" onclick="jellyJoinCopy()">📋 Copy</button>
+      </div>
+      <div style="font-size:.72rem;color:var(--muted);line-height:1.7;margin-top:8px;">
+        Same <a href="/api/jelly/mining/miner.py" style="color:var(--accent,#7aa2ff);">jellyminer.py</a> either way — only
+        <code>--url</code> changes. Ask your buddy to map <code>${esc((paired[0] || {}).name ? 'your rig' : 'your rig')}</code>
+        to your <code>peer:&lt;name&gt;</code> wallet on their side, or your shares pay their default rig wallet instead of you.
+      </div>
+    </div>
 
     ${pool ? `<div class="settings-group" style="margin-bottom:16px;">
       <div class="settings-group-title">🤝 Buddy-Share Mining Pool ${hlp('When ON, every GPU-mined block is split proportionally by the shares each rig contributed this round, instead of winner-take-all. Map a buddy\'s rig to their peer:<name> wallet and their share of every block flows straight to it — the fair way to mine together with the friends you paired in the Peers/federation tab.')}
@@ -326,6 +385,8 @@ async function cryptoLoadJelly() {
           <td style="text-align:center;">${b.boost ? _jlyFmt(b.boost) : '—'}</td></tr>`).join('')}
       </table>
     </div>`;
+
+  jellyJoinCmd();   // fill the join command from the pre-selected buddy
 }
 window.cryptoLoadJelly = cryptoLoadJelly;
 
@@ -381,6 +442,33 @@ async function jellyPoolMap() {
   } catch (e) { toast?.(e.message); }
 }
 window.jellyPoolMap = jellyPoolMap;
+
+// ── Join a buddy's network: build the miner command for THEIR node ───────────
+// The rig token is theirs to hand out (it only donates hashpower), so we never
+// fetch it — the user pastes what their buddy gave them.
+function _jellyJoinCmdText() {
+  const url = (document.getElementById('jly-join-url')?.value || '').trim();
+  const token = (document.getElementById('jly-join-token')?.value || '').trim();
+  const rig = (document.getElementById('jly-join-rig')?.value || '').trim() || 'rig1';
+  return `python3 jellyminer.py --url ${url || '<their url>'} `
+       + `--token ${token || '<their token>'} --name ${rig}`;
+}
+
+function jellyJoinCmd() {
+  const sel = document.getElementById('jly-join-peer');
+  const urlBox = document.getElementById('jly-join-url');
+  // picking a paired buddy fills the URL; "custom" leaves whatever is typed
+  if (sel && urlBox && document.activeElement === sel && sel.value) urlBox.value = sel.value;
+  const el = document.getElementById('jly-join-cmd');
+  if (el) el.textContent = _jellyJoinCmdText();
+}
+window.jellyJoinCmd = jellyJoinCmd;
+
+function jellyJoinCopy() {
+  navigator.clipboard.writeText(_jellyJoinCmdText());
+  toast?.('Copied ✓ — run it on the GPU box');
+}
+window.jellyJoinCopy = jellyJoinCopy;
 
 async function jellyTransfer(fromOverride) {
   const from = fromOverride || document.getElementById('jly-tx-from').value.trim();

@@ -12,8 +12,8 @@ function _spriteOffset(a) {
 function _agentSpeed(s) {
   const st = s.agent && s.agent.state;
   if (st === 'defending' || (s.agent && s.agent.role && s.agent.role !== 'downed')) return 1.9;  // raid urgency
-  if (st === 'leisure' || st === 'idle' || st === 'breakdown'
-      || st === 'sitting' || st === 'picnicking' || st === 'admiring') return 0.85;                // slow amble/mosey
+  if (st === 'leisure' || st === 'idle' || st === 'breakdown' || st === 'downed'
+      || st === 'sitting' || st === 'picnicking' || st === 'admiring') return 0.85;                // slow amble/mosey (downed = carried off, not sprinting)
   return 1.25;                                                                                     // normal walk to work
 }
 
@@ -46,6 +46,10 @@ function _drawWorld(ctx, canvas) {
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   ctx.fillStyle = '#070b12'; ctx.fillRect(0, 0, canvas.width, canvas.height);
   if (window.WSKY) WSKY.drawSpace(ctx, canvas, cam.scale);   // starfield behind the world when zoomed out to orbit
+  // PLANET: zoomed out to orbit → clip the whole world (+ season/lights) to a circle so the
+  // town reads as a round planet; the atmosphere rim + curved clouds go over it afterward.
+  const _planetOn = !!(window.WSKY && WSKY.planetAmount && WSKY.planetAmount(cam.scale) > 0);
+  if (_planetOn) { const pc = WSKY.planetCircle(canvas); ctx.save(); ctx.beginPath(); ctx.arc(pc.cx, pc.cy, pc.r, 0, 6.283); ctx.clip(); }
   ctx.setTransform(dpr * cam.scale, 0, 0, dpr * cam.scale, dpr * cam.x, dpr * cam.y);  // camera
   ctx.imageSmoothingEnabled = false;
 
@@ -78,6 +82,7 @@ function _drawWorld(ctx, canvas) {
   const list = Object.values(_sprites).sort((a, b) => a.py - b.py);
   for (const s of list) _character(ctx, s, s.moving);
   if (window.WF) WF.draw(ctx);           // products flowing through the department pipeline
+  if (window.WROCKET) WROCKET.draw(ctx); // JASA launch pad + rocket ferrying agents to the Moon ("to the moon")
   _drawThreats(ctx);                     // raid monsters (on top of the melee)
   _drawDefeatFx(ctx);                    // ⚔️ poof + label when a threat is slain
   _drawRoofs(ctx);                       // pseudo-3D roofs — solid when zoomed out, fade away close-up
@@ -92,6 +97,8 @@ function _drawWorld(ctx, canvas) {
   }
   _drawSeason(ctx, canvas);
   _drawLights(ctx, canvas);
+  if (_planetOn) ctx.restore();                              // end planet clip → sky layers draw AROUND the globe
+  if (window.WSKY && WSKY.drawAtmosphere) WSKY.drawAtmosphere(ctx, canvas, cam.scale);   // blue rim + limb shadow
   if (window.WSKY) WSKY.drawMoon(ctx, canvas, cam.scale);   // the moon drifts across the sky at night (screen space, zoomed-out)
   if (window.WSKY) WSKY.drawClouds(ctx, canvas, cam.scale); // clouds you pass through between orbit and town (over the moon)
   if (_edit.on) _drawEditOverlay(ctx);

@@ -155,6 +155,24 @@ def world_moon_remove():
     return {"ok": True}
 
 
+@router.get("/api/world/space")
+def world_space_status():
+    """JASA space-program overlay: agency, launch pad, active launch, Moon roster.
+    Same object injected into /api/world/state under the 'space' key."""
+    import world_space
+    return world_space.snapshot()
+
+
+@router.post("/api/world/space/launch")
+def world_space_launch():
+    """Force a launch now. 409 if a mission is already active or the feature is off."""
+    import world_space
+    ok, note = world_space.launch_now()
+    if not ok:
+        raise HTTPException(409, note)
+    return {"ok": True, "note": note, "space": world_space.snapshot()}
+
+
 @router.post("/api/world/raid")
 def world_raid_trigger(body: dict = Body(default={})):
     """Manually raise a raid. {'drill': true} spawns practice dummies when there are

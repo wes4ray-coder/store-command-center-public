@@ -51,6 +51,14 @@ DEFAULTS = {
     # decor, work nodes, landmarks) shortly after each change so they survive a
     # tab-flip/reload/restart. ON by default; off → only the 💾 Save button persists.
     "world_layout_autosave":  "1",
+    # per-entity sprite sheets (world_sprites): on-demand "this entity doing this
+    # action" sheet generation — need-triggered (a frontend cache-miss), pack-
+    # library-first, transparency+QA gated, budget-capped. The AUTO cadence
+    # (slow background backfill) is a separate toggle, OFF by default.
+    "world_sprites_enabled":  "1",
+    "world_sprites_max_hour": "6",      # generated sheets per rolling hour, max
+    "world_sprites_auto":     "0",
+    "world_sprites_auto_min": "240",
     # progressive tileset painting: agents slowly replace ONE procedural terrain
     # tile at a time (QA + style-gated; world_tileset.auto_tick). Off by default.
     "world_tileset_auto":     "0",
@@ -87,19 +95,26 @@ DEFAULTS = {
     # the procedural cratered disc when present.
     "world_moon_enabled":     "1",
     "world_moon_daytime":     "0",
+    # SPACE PROGRAM (JASA): a decoupled overlay that launches finance/crypto/research
+    # agents to the Moon and flies them home (world_space.py). Purely cosmetic — the
+    # town roster is untouched. ON by default; interval is the launch cadence.
+    "world_space_enabled":    "1",
+    "world_space_interval_min": "8",
 }
 
 INT_KEYS = {"world_llm_interval_min", "world_active_start", "world_active_end",
             "world_meeting_interval_min", "world_min_item_cost", "world_min_price_cents",
             "world_max_discount_pct", "world_vision_candidates", "world_vision_retries",
             "world_vision_min_score", "world_bills_drive_interval_min",
-            "world_leader_upgrade_hours", "world_tileset_auto_min"}
+            "world_leader_upgrade_hours", "world_tileset_auto_min",
+            "world_space_interval_min", "world_sprites_max_hour", "world_sprites_auto_min"}
 BOOL_KEYS = {"world_llm_enabled", "world_meetings_enabled", "world_incidents_enabled",
              "world_allow_free", "world_require_review", "world_vision_enabled",
              "world_crypto_mining_enabled", "world_bills_drive", "world_music_lyrics",
              "world_leader_upgrades", "world_tileset_auto", "world_terrain_image_enabled",
              "world_floor_image_enabled", "world_layout_autosave",
-             "world_moon_enabled", "world_moon_daytime"}
+             "world_moon_enabled", "world_moon_daytime", "world_space_enabled",
+             "world_sprites_enabled", "world_sprites_auto"}
 
 
 def get_all(conn=None):

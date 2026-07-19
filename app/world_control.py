@@ -65,8 +65,8 @@ SYSTEMS = [
 _SYS = {s["id"]: s for s in SYSTEMS}
 
 
-def _native_on(s):
-    raw = _get(s["key"], s["off"])
+def _val_on(s, raw):
+    """Interpret a raw setting value as on/off for this system's type."""
     if s.get("literal"):                 # non-boolean setting: on means raw == the "on" value
         return raw == s["on"]
     if s.get("numeric"):
@@ -77,28 +77,46 @@ def _native_on(s):
     return _truthy(raw)
 
 
+def _native_on(s):
+    return _val_on(s, _get(s["key"], s["off"]))
+
+
 def master_on():
     return _truthy(_get("company_master_on", "1"))
 
 
 def desired(sid):
-    raw = _get(f"company_desired_{sid}", None)
-    if raw is None:
-        return _native_on(_SYS[sid])
-    return _truthy(raw)
-
-
-def _apply():
-    """Cascade: each native switch = master AND that system's desired state."""
-    m = master_on()
-    for s in SYSTEMS:
-        want = m and desired(s["id"])
-        _set(s["key"], s["on"] if want else s["off"])
+    """Per-system INTENT = the native setting itself — the SINGLE SOURCE OF TRUTH. Control
+    no longer keeps a `company_desired_*` shadow that got re-cascaded over the native keys
+    (on every import + every panel action), silently reverting edits you made directly in
+    the ⚙️ Settings modal / 🛡️ Security Command. While the master is PAUSED all natives are
+    forced off, so we surface the saved pre-pause value so the panel shows what will resume."""
+    s = _SYS[sid]
+    if not master_on():
+        saved = _get(f"company_paused_{s['key']}", None)
+        if saved is not None:
+            return _val_on(s, saved)
+    return _native_on(s)
 
 
 def set_master(on):
-    _set("company_master_on", "1" if on else "0")
-    _apply()
+    """Master = a non-destructive PAUSE. Pausing snapshots each system's current native
+    value then forces it off; resuming restores from the snapshot. This never clobbers a
+    value you set directly elsewhere (unlike the old cascade)."""
+    was = master_on()
+    if on and not was:                                    # RESUME → restore pre-pause states
+        for s in SYSTEMS:
+            saved = _get(f"company_paused_{s['key']}", None)
+            if saved is not None:
+                _set(s["key"], saved)
+        _set("company_master_on", "1")
+    elif (not on) and was:                                # PAUSE → snapshot, then force off
+        for s in SYSTEMS:
+            _set(f"company_paused_{s['key']}", _get(s["key"], s["off"]))
+            _set(s["key"], s["off"])
+        _set("company_master_on", "0")
+    else:
+        _set("company_master_on", "1" if on else "0")
     try:
         import world_ops as wo
         wo.note("🟢 The Company is awake — automation resumed." if on
@@ -110,27 +128,31 @@ def set_master(on):
 
 
 def set_system(sid, on):
+    """Write the NATIVE key directly (the source of truth). While paused, remember the
+    intent in the snapshot so it takes effect when the master resumes."""
     if sid not in _SYS:
         return None
-    _set(f"company_desired_{sid}", "1" if on else "0")
-    _apply()
+    s = _SYS[sid]
+    val = s["on"] if on else s["off"]
+    if master_on():
+        _set(s["key"], val)
+    else:
+        _set(f"company_paused_{s['key']}", val)
     return panel()
 
 
 def init():
-    """One-time setup: capture current native states as the desired baseline and
-    switch the Company on. First run goes full-auto for the Company + World (the
-    creative/strategic loops); infra/security stay as they were."""
-    first = _get("company_control_init") != "1"
-    if first:
-        full_auto = {"create", "govern", "cognition", "meetings", "incidents"}
-        for s in SYSTEMS:
-            on = (s["id"] in full_auto) or _native_on(s)
-            _set(f"company_desired_{s['id']}", "1" if on else "0")
-        _set("company_master_on", "1")
-        _set("company_control_init", "1")
-        logger.info("world_control: first-run full-auto baseline set")
-    _apply()
+    """First-run ONLY: set the full-auto baseline once, natively. NEVER cascades on later
+    imports — that silent re-apply was the bug that reverted native edits every restart."""
+    if _get("company_control_init") == "1":
+        return
+    full_auto = {"create", "govern", "cognition", "meetings", "incidents"}
+    for s in SYSTEMS:
+        if s["id"] in full_auto:
+            _set(s["key"], s["on"])
+    _set("company_master_on", "1")
+    _set("company_control_init", "1")
+    logger.info("world_control: first-run full-auto baseline set (native keys)")
 
 
 # ── capabilities ("mini-MCP"): trigger an action, receive a product ──────────
@@ -216,7 +238,7 @@ def panel():
         "master": m,
         "systems": [{
             "id": s["id"], "label": s["label"], "group": s["group"], "desc": s.get("desc", ""),
-            "desired": desired(s["id"]), "effective": (m and desired(s["id"])),
+            "desired": desired(s["id"]), "effective": (m and _native_on(s)),
         } for s in SYSTEMS],
         "capabilities": [{"id": c["id"], "label": c["label"], "group": c["group"]} for c in CAPABILITIES],
         "sell": {

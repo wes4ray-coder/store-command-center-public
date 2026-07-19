@@ -93,9 +93,14 @@ _LOGIN_MAX    = 8                # failures in the window before lockout
 
 
 def _client_ip(request: Request) -> str:
-    xff = request.headers.get("x-forwarded-for", "")
-    return (xff.split(",")[0].strip() if xff else "") or \
-           (request.client.host if request.client else "unknown")
+    # Rate-limit key. Cloudflare sets CF-Connecting-IP to the TRUE client IP and overwrites
+    # any client-supplied value, and the app is only reachable THROUGH Cloudflare — so it
+    # can't be spoofed. NEVER key the limiter on the client-controllable leftmost
+    # X-Forwarded-For (that let an attacker rotate fake IPs to dodge the lockout entirely).
+    cf = (request.headers.get("cf-connecting-ip") or "").strip()
+    if cf:
+        return cf
+    return request.client.host if request.client else "unknown"
 
 
 @router.post("/login", include_in_schema=False)
@@ -135,8 +140,8 @@ class PasswordChange(BaseModel):
 async def change_password(body: PasswordChange):
     if not _check_password(body.current):
         raise HTTPException(400, "Current password is incorrect")
-    if len(body.new_password) < 4:
-        raise HTTPException(400, "Password must be at least 4 characters")
+    if len(body.new_password) < 8:
+        raise HTTPException(400, "Password must be at least 8 characters")
     _set_stored_hash(body.new_password)
     from auth_core import _flag_default_pw
     _flag_default_pw(False)                 # a chosen password ends the first-run state

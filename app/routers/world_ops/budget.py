@@ -77,10 +77,7 @@ def ops_config(body: dict = Body(...)):
             if m not in ("review", "budget"):
                 raise HTTPException(400, "mode must be 'review' or 'budget'")
             updates["world_ops_automation_mode"] = m
-            # keep the control-plane's auto_publish desired state in sync, or its
-            # next cascade would silently revert a mode set from the God Console
-            conn.execute("INSERT OR REPLACE INTO settings (key,value) VALUES (?,?)",
-                         ("company_desired_auto_publish", "1" if m == "budget" else "0"))
+            # (world_control now reads world_ops_automation_mode live — no shadow to sync)
         if "cap_cents" in body:
             updates["world_ops_cap_cents"] = int(body["cap_cents"])
         elif "cap_dollars" in body:

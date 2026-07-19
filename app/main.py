@@ -23,7 +23,8 @@ from routers import (
     system, cults3d, models3d, node, audio, resell_browser, portal, github,
     world, world_ops, llm, homelab, social, mail, graph, money, crypto, wallets,
     cashapp, peers, oracle, jellycoin, pearl, gpu_guard, watcher as watcher_router,
-    research, nsfw as nsfw_router,
+    research, nsfw as nsfw_router, systems as systems_router,
+    health as health_router, pnl as pnl_router,
 )
 from routers import prompts as prompts_router   # /api/prompts — the prompt editor
 
@@ -175,6 +176,12 @@ class CachedStaticFiles(StaticFiles):
 
 
 RESELL_UPLOADS.mkdir(parents=True, exist_ok=True)
+# These mount at IMPORT time, but the runtime dirs are only created in startup()
+# (and by setup.sh) — and none of them are tracked in git, so a fresh clone has
+# neither. StaticFiles raises "Directory does not exist" and the app dies before
+# it ever serves a request. Create them here, next to the mount that needs them.
+for _d in ("designs", "videos"):
+    (BASE / _d).mkdir(parents=True, exist_ok=True)
 app.mount("/designs", CachedStaticFiles(directory=str(BASE / "designs")), name="designs")
 app.mount("/videos",  CachedStaticFiles(directory=str(BASE / "videos")),  name="videos")
 # App JS/CSS can change on deploy and aren't content-hashed → shorter cache so an
@@ -190,8 +197,24 @@ for _mod in (auth, dashboard, proposals, designs, generate, tasks, models,
              system, cults3d, models3d, node, audio, resell_browser, portal, github,
              world, world_ops, llm, homelab, social, mail, graph, money, crypto, wallets,
              cashapp, peers, oracle, jellycoin, pearl, gpu_guard, watcher_router, prompts_router,
-             research, nsfw_router):
+             research, nsfw_router, systems_router, health_router, pnl_router):
     app.include_router(_mod.router)
+
+# ─── PLUGINS (drop-in, auto-discovered) ──────────────────────────────────────
+# Third-party add-ons live in gitignored plugins/<name>/ folders. ALL discovery
+# and hardening lives in app/plugin_host.py: per-plugin enable/disable (settings
+# key plugin_disabled_<id>), manifest `requires` dep checks, a route-collision
+# guard, import isolation, and per-plugin status at GET /api/plugins. Mounted
+# BEFORE the MCP server below so plugin routes are MCP-exposed like core ones.
+# Guarded so even a plugin_host bug can never break boot.
+try:
+    import plugin_host
+    plugin_host.mount_plugins(app)
+    PLUGIN_MANIFESTS = plugin_host.PLUGIN_MANIFESTS   # back-compat alias (tests/tools)
+except Exception as _e:
+    import logging as _plg
+    _plg.getLogger("store").warning("plugin host failed to mount: %s", _e)
+    PLUGIN_MANIFESTS = []
 
 # ─── MCP SERVER ──────────────────────────────────────────────────────────────
 # Expose every /api endpoint to OpenClaw (and any MCP client) as a callable tool,

@@ -9,7 +9,9 @@
 const _BLD_SPRITE = { bar: 'bld_tavern', arcade: 'bld_arcade', cafe: 'bld_cafe', tv: 'bld_shop_1',
                       lounge: 'bld_shop_1', church: 'bld_church', library: 'bld_library',
                       townhall: 'bld_townhall', exec: 'bld_shop_2', gas: 'bld_shop_2',
-                      research: 'bld_library' };
+                      research: 'bld_library',
+                      // the four standalone dept buildings reuse existing pack sprites as a fallback
+                      mail: 'bld_shop_2', homelab: 'bld_shop_1', pearl: 'bld_shop_1', assistant: 'bld_shop_2' };
 function _bldSprite(b) {
   if (b.loc && _BLD_SPRITE[b.loc]) return _BLD_SPRITE[b.loc];
   if (b.kind === 'house') return (b.id % 2) ? 'bld_house_2' : 'bld_house_1';
@@ -27,9 +29,14 @@ function _drawBuildingSprites(ctx) {
   ctx.globalAlpha = alpha;
   for (const b of (WM.buildings || [])) {
     if (b.kind === 'hq') continue;                         // HQ keeps its furnished interior
-    const name = _bldSprite(b); if (!name || !WA.hasSprite(name)) continue;
     const cx = (b.c + b.w / 2) * TL, baseY = (b.r + b.h) * TL - 2;
     const targetH = Math.min(b.h * TL * 1.02, b.w * TL * 1.1);   // fill the lot, keep aspect
+    // chain: the building's OWN generated sheet (frame 0 — buildings don't bob)
+    // → its shared-kind own sheet → the downloaded pack sprite → procedural lot.
+    if (window.WSP && WSP.ready &&
+        (WSP.drawStatic(ctx, 'building_' + b.id, 'idle', cx, baseY, targetH) ||
+         WSP.drawStatic(ctx, 'building_' + (b.loc || b.kind), 'idle', cx, baseY, targetH))) continue;
+    const name = _bldSprite(b); if (!name || !WA.hasSprite(name)) continue;
     WA.drawSprite(ctx, name, cx, baseY, targetH);
   }
   ctx.restore();
@@ -134,6 +141,11 @@ const _ROOF_PAL = {
   library:  [['#4c7a68', '#3a5f50', '#639a85']],
   townhall: [['#a98a3f', '#846b2f', '#c4a557']],
   exec:     [['#8f4545', '#6d3434', '#ad6060']],
+  research: [['#5b5f9e', '#454877', '#7d82c5']],
+  mail:     [['#a85f7e', '#824860', '#c57e9c']],
+  homelab:  [['#4a7fa8', '#38618a', '#6b9cc9']],
+  pearl:    [['#4f8a72', '#3d6957', '#6fab8f']],
+  assistant:[['#7a5fa8', '#5d488a', '#9a7ec9']],
 };
 const _FACE_PAL = ['#d9c9a8', '#cbb491', '#c2c8ce', '#d1bfae'];
 function _roofAlpha() {

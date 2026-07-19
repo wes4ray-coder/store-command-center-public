@@ -741,6 +741,7 @@
   <script src='/store/static/js/settings-prompts.js'></script>
   <script src='/store/static/js/settings-updates-github.js'></script>
   <script src='/store/static/js/settings-peers.js'></script>
+  <script src='/store/static/js/settings-systems.js'></script>
 
   <script src='/store/static/js/lib-core.js'></script>
   <script src='/store/static/js/lib-browse.js'></script>
@@ -792,6 +793,7 @@
   <script src='/store/static/js/world-map.js'></script>
   <script src='/store/static/js/world-sky.js'></script>
   <script src='/store/static/js/world-moon-map.js'></script>
+  <script src='/store/static/js/world-rocket.js'></script>
   <script src='/store/static/js/world-render.js'></script>
   <script src='/store/static/js/world-render-buildings.js'></script>
   <script src='/store/static/js/world-render-combat.js'></script>
@@ -827,12 +829,14 @@
   <script src='/store/static/js/tab-research.js'></script>
   <script src='/store/static/js/graph-explorer.js'></script>
   <script src='/store/static/js/tab-graph.js'></script>
+  <script src='/store/static/js/plugin-loader.js'></script>
   <script>
     document.addEventListener('DOMContentLoaded', () => {
       const navItems = document.querySelectorAll('.nav-item');
       
       renderView('dashboard');
       startQueuePolling();   // universal queue → bottom-left strip + header pill, polled live
+      initPlugins();   // drop-in plugins: nav items + frontend scripts (no-op when none installed)
 
       navItems.forEach(item => {
         item.addEventListener('click', () => {

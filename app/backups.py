@@ -10,16 +10,20 @@ Settings (all optional):
   backup_enabled       "1"/"0"   default on
   backup_interval_min   minutes   default 1440 (daily)
   backup_dest_dir       path      off-box copy target (e.g. /media/.../store-backups)
+  backup_node_dir       path      GPU-node scp target (2nd physical box; default ~/store-backups; blank = off)
   backup_keep           int       how many to retain per destination (default 14)
 """
 import gzip
 import logging
 import sqlite3
+import subprocess
 from datetime import datetime
 from pathlib import Path
 
-from config import DB_PATH, BACKUP_DIR
+from config import DB_PATH, BACKUP_DIR, GPU_HOST, GPU_SSH_USER
 from db import get_conn
+
+_SSH_OPTS = ["-o", "StrictHostKeyChecking=no", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15"]
 
 log = logging.getLogger("store")
 
@@ -55,6 +59,31 @@ def _dest_dirs():
         if r not in seen:
             seen.add(r); out.append(Path(d))
     return out
+
+
+def _backup_to_node(local_gz: Path, key_file: Path, keep: int):
+    """Off-MACHINE copy to the GPU node (a SECOND physical box on the LAN, 127.0.0.1)
+    via scp — real redundancy the same-disk/same-room copies don't give: it survives the
+    server's disk or the whole server box dying. Sends the DB snapshot + the .secret_key
+    (the encrypted DB is useless without it). Opt out by clearing the `backup_node_dir`
+    setting. Never raises out of run_scheduled_backup — the caller records it as an error."""
+    node_dir = _setting("backup_node_dir", "~/store-backups").strip()
+    if not node_dir:
+        return None                                  # node backup disabled
+    tgt = f"{GPU_SSH_USER}@{GPU_HOST}"
+    r = subprocess.run(["ssh", *_SSH_OPTS, tgt, f"mkdir -p {node_dir}"],
+                       capture_output=True, text=True, timeout=30)
+    if r.returncode != 0:
+        raise RuntimeError((r.stderr or "ssh mkdir failed").strip()[:200])
+    subprocess.run(["scp", *_SSH_OPTS, str(local_gz), f"{tgt}:{node_dir}/"],
+                   capture_output=True, text=True, timeout=180, check=True)
+    if key_file.exists():
+        subprocess.run(["scp", *_SSH_OPTS, str(key_file), f"{tgt}:{node_dir}/.secret_key"],
+                       capture_output=True, text=True, timeout=60, check=True)
+    # prune old snapshots on the node (keep the newest `keep`)
+    prune = f"ls -1t {node_dir}/store_db_*.sqlite.gz 2>/dev/null | tail -n +{max(1, keep) + 1} | xargs -r rm -f"
+    subprocess.run(["ssh", *_SSH_OPTS, tgt, prune], capture_output=True, text=True, timeout=30)
+    return f"{tgt}:{node_dir}/{local_gz.name}"
 
 
 def _snapshot_gz(dest_file: Path):
@@ -111,6 +140,16 @@ def run_scheduled_backup(keep=None):
         except Exception as e:
             errors.append(f"{d}: {e}")
             log.error("backup to %s failed: %s", d, e)
+    # off-MACHINE copy to the GPU node (a second physical box) — survives the server dying
+    try:
+        local_gz = Path(BACKUP_DIR) / name
+        if local_gz.exists():
+            sent = _backup_to_node(local_gz, key_file, keep)
+            if sent:
+                copies.append(sent)
+    except Exception as e:
+        errors.append(f"node: {e}")
+        log.error("backup to node failed: %s", e)
     log.info("scheduled DB backup wrote %d copies (%s)%s", len(copies), name,
              (" errors: " + "; ".join(errors)) if errors else "")
     # record last-run in settings for the UI/status

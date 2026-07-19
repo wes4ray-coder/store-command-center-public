@@ -15,6 +15,7 @@ Endpoints (chain logic lives in jellycoin.py):
     agents can talk it up in-world; nothing external is auto-posted.
 """
 import secrets
+import hmac
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Body, Request
@@ -23,6 +24,7 @@ from fastapi.responses import FileResponse
 from deps import *          # get_conn, get_setting, _call_lmstudio, logger
 import jellycoin
 from prompts import get_prompt
+from world_defs import run_llm_job
 
 router = APIRouter()
 
@@ -48,7 +50,7 @@ def _check_miner(request: Request):
     host = request.client.host if request.client else ""
     if host in ("127.0.0.1", "::1", "testclient"):
         return
-    if request.headers.get("X-Jelly-Token", "") != _miner_token():
+    if not hmac.compare_digest(request.headers.get("X-Jelly-Token", ""), _miner_token()):
         raise HTTPException(403, "bad or missing X-Jelly-Token")
 
 
@@ -302,7 +304,10 @@ def jelly_mission_draft(payload: dict = Body(default={})):
             "Write the pitch now.")
     title, pitch = f"JLY {kind} pitch", ""
     try:
-        raw = _call_lmstudio(get_prompt("jelly_mission"), user, max_tokens=700)
+        # through the unified queue — the orch loads the model (with idle-TTL) and
+        # the draft shows up as a queue entry instead of a bare JIT call
+        raw = run_llm_job(lambda: _call_lmstudio(get_prompt("jelly_mission"), user, max_tokens=700),
+                          "jelly:mission-draft", wait=240)
         pitch = (raw or "").strip()
         if pitch:
             title = pitch.splitlines()[0].strip("# ").strip()[:80] or title

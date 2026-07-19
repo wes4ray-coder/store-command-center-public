@@ -96,6 +96,11 @@ def world_state():
     raid = world_raid.snapshot(c)                      # active threats / combat (system D)
     security = {"systems": world_security.scan_systems(c),   # whole-store log health (chunk 2)
                 "posture": world_security.real_posture(c)}   # the REAL Command Center (grade/shield/attackers)
+    try:
+        import world_space
+        space = world_space.snapshot(conn)                   # JASA space program overlay (never raises)
+    except Exception:
+        space = None
     placements_out = world_items.placements(c)          # furniture/yard pieces agents bought (item economy)
     art = []                                            # real generated images → wall art in houses (chunk 5)
     try:
@@ -121,6 +126,7 @@ def world_state():
         "orchestra": orchestra,
         "raid": raid,
         "security": security,
+        "space": space,
         "art": art,
         "placements": placements_out,
         "achievements": achievements,

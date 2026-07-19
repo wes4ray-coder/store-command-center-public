@@ -52,22 +52,40 @@ window.WM = (function () {
   // reheal() can re-decode from scratch and re-bake without a page/browser restart.
   let _terrainUrl = null, _floorUrl = null;
   let _rehealing = false;
-  // ── CHUNKED TERRAIN + LOD STREAMER ───────────────────────────────────────────
+  // ── CHUNKED TERRAIN + LOD PYRAMID STREAMER ───────────────────────────────────
   // Instead of one giant 2640×2080 resident canvas (which browsers evict under memory
   // pressure and which can't scale to 4k/8k/moon maps), the ground is rendered as:
-  //   • _overview — a small whole-map canvas (W/_OV) used when zoomed OUT, and as a
-  //     cheap fallback UNDER full-res chunks that are still baking (so never blank);
-  //   • _chunks   — full-res tiles baked ON DEMAND for the visible viewport when zoomed
-  //     IN, and EVICTED once off-screen for a while. Memory stays flat regardless of map
-  //     size because only ~what's on screen is ever resident. The moon map reuses this.
-  let _overview = null;
-  const _OV = 2;                                   // overview downscale (W/2×H/2 ≈ crisp to ~0.5×)
+  //   • _overview + _MIPS — a small MIP PYRAMID of whole-map canvases (W/2, W/4, W/8).
+  //     Zoomed out we blit the COARSEST level that's still crisp at the current scale
+  //     (cheaper drawImage + no blurry upscale). The finest level (_overview, W/2) is
+  //     ALSO the fallback UNDER full-res chunks that are still baking (so never blank).
+  //     Only the finest is baked with the full structPass; the coarser levels are just
+  //     downscales of it (built lazily), so map side-effects run exactly once.
+  //   • _chunks   — full-res tiles baked ON DEMAND in a CENTERED DISC WINDOW around the
+  //     camera-centre chunk (a 5×5 block minus its corners at radius 2.5), which PREFETCHES
+  //     neighbours so panning never pops in, then EVICTED once they age out of the window.
+  //     Memory stays flat regardless of map size — only the disc is ever resident. The
+  //     moon map reuses this.
+  let _overview = null;                            // finest LOD (W/_OV = W/2) — structPass source + fallback under chunks
+  const _OV = 2;                                   // finest overview downscale (W/2×H/2 ≈ crisp to ~0.5×)
+  const _MIP_D = [4, 8];                            // coarser pyramid downscales (W/4, W/8); index → _MIPS slot
+  const _MIPS = [null, null];                       // lazily-built coarser levels (downscaled from _overview)
   let _structPass = false;                         // true only during the full pass that fills waterTiles/hqRooms/locations
   const _chunks = new Map();                       // "cx,cy" -> {cv, wx, wy, seen}
   const CHUNK_CW = 22, CHUNK_CH = 26;              // chunk size in TILES (440×520 px; 132/22=6 × 104/26=4 = 24, exact)
-  const CHUNK_LOD = 0.5;                           // below this camera.scale → overview only; at/above → stream full-res chunks
+  const CHUNK_LOD = 0.5;                           // below this camera.scale → pyramid only; at/above → stream full-res chunks
   const CHUNK_EVICT_MS = 8000;                     // free a chunk unseen for this long
   const CHUNK_BUDGET = 2;                          // max chunk bakes per frame (no hitch)
+  const WINDOW_R = 2.5;                             // disc window radius in chunks (→ a 5×5 block minus its corners = prefetch ring)
+  // Precompute the disc offsets ONCE (no per-frame allocation): every (dx,dy) whose
+  // chunk-index distance from the centre chunk is within WINDOW_R (rounds the corners off).
+  const _discOffsets = (() => {
+    const r = Math.ceil(WINDOW_R), out = [];
+    for (let dy = -r; dy <= r; dy++) for (let dx = -r; dx <= r; dx++)
+      if (Math.hypot(dx, dy) <= WINDOW_R + 1e-6) out.push([dx, dy]);
+    return out;
+  })();
+  const DISC_MAX = _discOffsets.length;            // max resident chunks in the disc window (21 at R=2.5)
   const camera = { x: 0, y: 0, scale: 1 };
   let _fitScale = 0.25;      // scale at which the whole map fits the viewport (set in fit()); the space/orbit bands key off this so they're viewport-independent
   let _nextId = 1;
@@ -84,11 +102,14 @@ window.WM = (function () {
 
   const KIND_COLOR = { hq: '#8fb3ff', house: '#6b7ba0', shop: '#6aa6d6', leisure: '#f0b45a',
                        townhall: '#fde047', exec: '#fb7185', church: '#cdbff0', library: '#8fc7a9',
-                       research: '#818cf8' };
+                       research: '#818cf8',
+                       // standalone dept buildings (like Research Lab — NOT HQ rooms)
+                       mail: '#f9a8d4', homelab: '#7dd3fc', pearl: '#a7f3d0', assistant: '#d8b4fe' };
   // distinct roof colour per named venue/loc so no two building types look alike
   const LOC_COLOR = { bar: '#e0714a', arcade: '#a26cf0', tv: '#4aa0e0', cafe: '#d1a05a',
                       church: '#cdbff0', library: '#8fc7a9', townhall: '#fde047', exec: '#fb7185',
-                      park: '#5bb46a', gas: '#e05a6a', lounge: '#c07ad0', research: '#818cf8' };
+                      park: '#5bb46a', gas: '#e05a6a', lounge: '#c07ad0', research: '#818cf8',
+                      mail: '#f9a8d4', homelab: '#7dd3fc', pearl: '#a7f3d0', assistant: '#d8b4fe' };
 
   // ── organic-map helpers ──
   const TAU = Math.PI * 2;
@@ -185,7 +206,9 @@ window.WM = (function () {
 
     // ── scatter buildings organically along the roads (inner: civic/leisure; outer: shops/homes) ──
     const leisure = [['bar', 'Bar 🍺'], ['arcade', 'Arcade 🕹️'], ['tv', 'Lounge 📺'], ['cafe', 'Café ☕']];
-    const civic = [['church', 'Church ⛪'], ['library', 'Library 📚'], ['townhall', 'Town Hall 🏛️'], ['exec', 'Exec Office 💼'], ['research', 'Research Lab 🔬']];
+    const civic = [['church', 'Church ⛪'], ['library', 'Library 📚'], ['townhall', 'Town Hall 🏛️'], ['exec', 'Exec Office 💼'], ['research', 'Research Lab 🔬'],
+                   // the store's four "homeless" systems get real standalone places (self-contained, like the Research Lab — the HQ layout is untouched)
+                   ['mail', 'Mail Room 📬'], ['homelab', 'Homelab 🖥️'], ['pearl', 'Pearl Mine 🦪'], ['assistant', 'AI Assistant 🤖']];
     const shopNames = ['Diner', 'Market', 'Bank', 'Gym', 'Salon', 'Bakery', 'Books', 'Garage', 'Clinic', 'Deli', 'Toys', 'Pharmacy'];
     for (const [k, lbl] of leisure) _tryPlace(ri(6, 7), ri(5, 6), 12, 26, { kind: 'leisure', loc: k, label: lbl, color: LOC_COLOR[k] || KIND_COLOR.leisure }, rnd, pick, CX, CY);
     for (const [k, lbl] of civic) _tryPlace(ri(6, 8), ri(5, 7), 13, 28, { kind: k, loc: k, label: lbl, color: KIND_COLOR[k] }, rnd, pick, CX, CY);
@@ -326,8 +349,9 @@ window.WM = (function () {
         locations['defense'] = { col: b.c + (b.w / 2 | 0), row: b.r + b.h + 2 };   // rally point south of HQ (raid)
       } else if (b.loc) {
         locations[b.loc] = interior;
-        // the Research Geniuses' dept has no HQ desk — their "desk" IS the lab
-        if (b.loc === 'research') locations['desk:research'] = interior;
+        // standalone dept buildings have no HQ desk — their "desk" IS the building
+        // (Research Lab + the four homeless systems: Mail / Homelab / Pearl / Assistant)
+        if (['research', 'mail', 'homelab', 'pearl', 'assistant'].includes(b.loc)) locations['desk:' + b.loc] = interior;
       }
       else if (b.kind === 'house') houseSlots.push(interior);
     }
@@ -337,12 +361,20 @@ window.WM = (function () {
 
   function build(saved) {
     _genBase();
+    // Capture the freshly-placed NEW department buildings so an OLDER saved layout (which
+    // predates them) can gain them without a destructive full regen that wipes hand-edits.
+    const _NEW_DEPTS = new Set(['mail', 'homelab', 'pearl', 'assistant']);
+    const _newDeptBldgs = buildings.filter(b => b.loc && _NEW_DEPTS.has(b.loc)).map(b => ({ ...b }));
     if (saved && Array.isArray(saved.buildings) && saved.buildings.length) {
       buildings = saved.buildings.map(b => ({ ...b }));
+      _nextId = Math.max(0, ...buildings.map(b => b.id || 0)) + 1;
+      // non-destructive merge: add any new dept building the saved layout is missing, with
+      // a fresh id (so Mail/Homelab/Pearl/Assistant show up; autosave then persists them).
+      const haveLocs = new Set(buildings.map(b => b.loc).filter(Boolean));
+      for (const nb of _newDeptBldgs) if (!haveLocs.has(nb.loc)) { nb.id = _nextId++; buildings.push(nb); }
       if (Array.isArray(saved.decor)) decor = saved.decor.map(d => ({ ...d }));
       if (Array.isArray(saved.nodes) && saved.nodes.length) { nodes = saved.nodes.map(n => ({ ...n })); _rebuildLocations(); }
       if (Array.isArray(saved.landmarks)) landmarks = saved.landmarks.map(l => ({ ...l }));
-      _nextId = Math.max(0, ...buildings.map(b => b.id || 0)) + 1;
     }
     _leisureSpots();
     rasterize();
@@ -621,10 +653,11 @@ window.WM = (function () {
     }
   }
 
-  // Whole-map LOW-RES overview (the zoomed-out LOD + the fallback under baking chunks).
-  // This is the ONE full pass over the map, so it also (re)populates waterTiles/hqRooms/
-  // locations via _structPass. Small + always resident; if the browser evicts it,
-  // terrainAlive()/reheal() rebuild it.
+  // Whole-map LOW-RES overview: the FINEST pyramid level (W/2) + the fallback under baking
+  // chunks. This is the ONE full pass over the map, so it also (re)populates waterTiles/
+  // hqRooms/locations via _structPass. Small + always resident; if the browser evicts it,
+  // terrainAlive()/reheal() rebuild it. The coarser pyramid levels are pure downscales of
+  // THIS canvas (see _mip), so the structPass runs exactly once per bake — never per level.
   function _bakeOverview() {
     if (!_overview) { _overview = document.createElement('canvas'); _overview.width = Math.ceil(W / _OV); _overview.height = Math.ceil(H / _OV); }
     const x = _overview.getContext('2d'); x.imageSmoothingEnabled = false;
@@ -635,6 +668,29 @@ window.WM = (function () {
     _paintRegion(x, 0, 0, COLS, ROWS);
     _structPass = false;
     x.setTransform(1, 0, 0, 1, 0, 0);
+  }
+
+  // Lazily build a COARSER pyramid level (index i → downscale _MIP_D[i]) by smoothly
+  // downscaling the finest overview — cheaper + crisper than upscaling W/2 when zoomed way
+  // out. Nulled on _bake() so it rebuilds from the fresh overview.
+  function _mip(i) {
+    if (!_overview) return null;
+    if (!_MIPS[i]) {
+      const d = _MIP_D[i], cv = document.createElement('canvas');
+      cv.width = Math.ceil(W / d); cv.height = Math.ceil(H / d);
+      const x = cv.getContext('2d');
+      x.imageSmoothingEnabled = true; x.imageSmoothingQuality = 'high';
+      x.drawImage(_overview, 0, 0, cv.width, cv.height);
+      _MIPS[i] = cv;
+    }
+    return _MIPS[i];
+  }
+  // Pick the COARSEST level that still renders crisp (≤1 texel per screen pixel) at `scale`:
+  // a level of downscale D maps each texel to D*scale screen pixels, so it upscales (blurs)
+  // once D*scale > 1. Return the largest such D (coarsest → cheapest blit), else the finest.
+  function _baseFor(scale) {
+    for (let i = _MIP_D.length - 1; i >= 0; i--) if (_MIP_D[i] * scale <= 1.0001) return _mip(i) || _overview;
+    return _overview;
   }
 
   // One FULL-RES chunk (baked on demand for the visible viewport, evicted when off-screen).
@@ -653,6 +709,7 @@ window.WM = (function () {
   // overview (the one full pass) and drop the full-res cache so visible chunks re-bake lazily.
   function _bake() {
     _bakeOverview();
+    _MIPS[0] = _MIPS[1] = null;   // coarser pyramid levels rebuild lazily from the fresh overview
     _chunks.clear();
   }
 
@@ -825,7 +882,8 @@ window.WM = (function () {
   // the tone derives from b.kind. The picker UI is a later task — support b.theme now.
   const _WALL_PAL = { hq: '#8b909c', house: '#9a8b76', shop: '#7f93ab', leisure: '#c19a5e',
                       townhall: '#bda257', exec: '#ab6a6a', church: '#897fb0', library: '#5f9a86',
-                      research: '#7d86cf' };
+                      research: '#7d86cf',
+                      mail: '#c58aa6', homelab: '#5f8ab0', pearl: '#7ab098', assistant: '#9a86c5' };
   function _themeForKind(kind) { return _WALL_PAL[kind] || _WALL_PAL.house; }
   // lighten (f>0) / darken (f<0) a #rrggbb toward white / black
   function _shade(hex, f) {
@@ -1187,28 +1245,39 @@ window.WM = (function () {
     }
   }
 
-  // Draw the ground under the live camera transform. Zoomed OUT → the cheap whole-map
-  // overview. Zoomed IN → the overview as an instant fallback, then full-res chunks for
-  // just the visible viewport (baked on a per-frame budget, evicted once off-screen), so
-  // memory stays flat no matter how big the map is. `canvas` gives the viewport size used
-  // to pick visible chunks (falls back to overview-only if it's missing).
+  // Draw the ground under the live camera transform. Zoomed OUT → the coarsest still-crisp
+  // pyramid level (cheap blit). Zoomed IN → the finest overview as an instant fallback, then
+  // full-res chunks baked in a CENTERED DISC WINDOW around the camera-centre chunk (prefetch
+  // ring, baked on a per-frame budget, evicted once they age out of the window) — only the
+  // chunks that actually overlap the viewport are blitted (the overview covers the rest), so
+  // both baking and drawImage cost stay flat no matter how big the map is. `canvas` gives the
+  // viewport size (falls back to pyramid-only if it's missing).
   function drawTerrain(ctx, canvas) {
     if (!_overview) return;
-    ctx.drawImage(_overview, 0, 0, W, H);                       // base LOD (also the fallback under baking chunks)
-    if (camera.scale < CHUNK_LOD || !canvas) return;            // zoomed out → overview is enough
+    if (camera.scale < CHUNK_LOD || !canvas) {                  // zoomed out → coarsest crisp pyramid level is enough
+      ctx.drawImage(_baseFor(camera.scale), 0, 0, W, H);
+      return;
+    }
+    ctx.drawImage(_overview, 0, 0, W, H);                       // finest LOD as the instant fallback under baking chunks
 
     const vw = canvas._cssW || canvas.clientWidth || 0, vh = canvas._cssH || canvas.clientHeight || 0;
     if (!vw || !vh) return;
-    // visible world rect → chunk index span (+1 chunk margin so panning stays ahead)
-    const wx0 = (0 - camera.x) / camera.scale, wy0 = (0 - camera.y) / camera.scale;
-    const wx1 = (vw - camera.x) / camera.scale, wy1 = (vh - camera.y) / camera.scale;
     const cwPx = CHUNK_CW * TILE, chPx = CHUNK_CH * TILE;
     const nX = Math.ceil(COLS / CHUNK_CW), nY = Math.ceil(ROWS / CHUNK_CH);
-    const cx0 = Math.max(0, Math.floor(wx0 / cwPx) - 1), cx1 = Math.min(nX - 1, Math.floor(wx1 / cwPx) + 1);
-    const cy0 = Math.max(0, Math.floor(wy0 / chPx) - 1), cy1 = Math.min(nY - 1, Math.floor(wy1 / chPx) + 1);
+    // camera-centre world point → its chunk index (the disc window is centred here)
+    const ccx = (vw * 0.5 - camera.x) / camera.scale, ccy = (vh * 0.5 - camera.y) / camera.scale;
+    const centerCX = Math.floor(ccx / cwPx), centerCY = Math.floor(ccy / chPx);
+    // visible world rect → chunk span that actually needs BLITTING (overview covers the rest)
+    const wx0 = (0 - camera.x) / camera.scale, wy0 = (0 - camera.y) / camera.scale;
+    const wx1 = (vw - camera.x) / camera.scale, wy1 = (vh - camera.y) / camera.scale;
+    const vcx0 = Math.max(0, Math.floor(wx0 / cwPx)), vcx1 = Math.min(nX - 1, Math.floor(wx1 / cwPx));
+    const vcy0 = Math.max(0, Math.floor(wy0 / chPx)), vcy1 = Math.min(nY - 1, Math.floor(wy1 / chPx));
     const now = performance.now();
     let budget = CHUNK_BUDGET;
-    for (let cy = cy0; cy <= cy1; cy++) for (let cx = cx0; cx <= cx1; cx++) {
+    // 1) BAKE/keep-alive the centred disc window (prefetch neighbours → no pan pop-in)
+    for (let i = 0; i < _discOffsets.length; i++) {
+      const cx = centerCX + _discOffsets[i][0], cy = centerCY + _discOffsets[i][1];
+      if (cx < 0 || cy < 0 || cx >= nX || cy >= nY) continue;
       const k = cx + ',' + cy;
       let ch = _chunks.get(k);
       if (!ch) {
@@ -1216,9 +1285,14 @@ window.WM = (function () {
         budget--; ch = _bakeChunk(cx, cy); _chunks.set(k, ch);
       }
       ch.seen = now;
-      ctx.drawImage(ch.cv, ch.wx, ch.wy);
     }
-    if (_chunks.size > 16) for (const [k, ch] of _chunks)       // evict off-screen chunks (bounded memory)
+    // 2) BLIT only the resident chunks overlapping the viewport (cheap; overview under fills gaps)
+    for (let cy = vcy0; cy <= vcy1; cy++) for (let cx = vcx0; cx <= vcx1; cx++) {
+      const ch = _chunks.get(cx + ',' + cy);
+      if (ch) ctx.drawImage(ch.cv, ch.wx, ch.wy);
+    }
+    // 3) evict chunks that aged out of the window (bounded memory ≈ DISC_MAX resident)
+    if (_chunks.size > DISC_MAX) for (const [k, ch] of _chunks)
       if (now - ch.seen > CHUNK_EVICT_MS) _chunks.delete(k);
   }
   const BLD_ICON = { hq: '🏢', townhall: '🏛️', exec: '💼', library: '📚', church: '⛪',

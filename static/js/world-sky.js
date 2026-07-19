@@ -7,6 +7,30 @@
 const WSKY = (() => {
   let _stars = null, _sw = 0, _sh = 0;
 
+  // ── gradient cache ────────────────────────────────────────────────────────────
+  // createRadialGradient every frame is a known perf sink here (same lesson as the
+  // town render's cached _vgGrad vignette). _memoRadial keeps the LAST gradient for a
+  // given cache-slot and only rebuilds when its key (rounded geometry/params) changes.
+  // Slow-moving centres (moon, moon-shadow) round to whole units so most frames reuse
+  // the cached object; a still camera reuses the atmosphere gradient indefinitely.
+  const _gradCache = {};   // slot -> { key, grad }
+  function _memoRadial(ctx, slot, key, x0, y0, r0, x1, y1, r1, stops) {
+    const c = _gradCache[slot];
+    if (c && c.key === key) return c.grad;
+    const g = ctx.createRadialGradient(x0, y0, r0, x1, y1, r1);
+    for (const [o, col] of stops) g.addColorStop(o, col);
+    _gradCache[slot] = { key, grad: g };
+    return g;
+  }
+  // Moon halo — soft round glow; centre drifts slowly so rounding to whole px gives a
+  // high cache-hit rate while staying visually smooth.
+  function _moonGlowGrad(ctx, mx, my, mr) {
+    const key = Math.round(mx) + ',' + Math.round(my) + ',' + Math.round(mr);
+    return _memoRadial(ctx, 'moonGlow', key, mx, my, mr * 0.6, mx, my, mr * 2.4, [
+      [0, 'rgba(220,226,248,0.32)'], [1, 'rgba(220,226,248,0)']
+    ]);
+  }
+
   // The space band fades in as you zoom OUT below the fit scale. Keyed off WM.fitScale
   // (the zoom at which the whole map fits) so it's viewport-independent — fullscreen and
   // windowed have very different fit zooms. top = where stars begin; full = deep orbit.
@@ -103,9 +127,8 @@ const WSKY = (() => {
     const mx = (-0.08 + 1.16 * p) * w;
     const my = h * (0.26 - 0.10 * Math.sin(p * Math.PI));   // gentle arc, high in the middle of the pass
     ctx.save(); ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.globalAlpha = a;
-    const glow = ctx.createRadialGradient(mx, my, mr * 0.6, mx, my, mr * 2.4);   // soft halo
-    glow.addColorStop(0, 'rgba(220,226,248,0.32)'); glow.addColorStop(1, 'rgba(220,226,248,0)');
-    ctx.fillStyle = glow; ctx.beginPath(); ctx.arc(mx, my, mr * 2.4, 0, 6.283); ctx.fill();
+    ctx.fillStyle = _moonGlowGrad(ctx, mx, my, mr);   // soft halo (cached — see _memoRadial)
+    ctx.beginPath(); ctx.arc(mx, my, mr * 2.4, 0, 6.283); ctx.fill();
     if (_moonImg && _moonImg.complete && _moonImg.naturalWidth) {
       // Generators tend to draw a moon DISC centered in the frame with dark space around
       // it; clip to the circle AND overscale ~1.5× so the central disc fills the circle
@@ -147,10 +170,14 @@ const WSKY = (() => {
     const sy = H * (0.42 + 0.16 * Math.sin(p * Math.PI));
     const R = 0.26 * W;                             // big soft patch in WORLD units
     const aMax = 0.30 * night;
-    const g = ctx.createRadialGradient(sx, sy, R * 0.15, sx, sy, R);
-    g.addColorStop(0, `rgba(6,10,26,${aMax})`);
-    g.addColorStop(0.6, `rgba(6,10,26,${aMax * 0.55})`);
-    g.addColorStop(1, 'rgba(6,10,26,0)');
+    // cached: sx/sy drift slowly (moon-linked), R is constant, aMax tracks the slow
+    // night curve — round all three so most frames reuse the same gradient object.
+    const key = Math.round(sx) + ',' + Math.round(sy) + ',' + Math.round(R) + ',' + Math.round(aMax * 100);
+    const g = _memoRadial(ctx, 'groundShadow', key, sx, sy, R * 0.15, sx, sy, R, [
+      [0, `rgba(6,10,26,${aMax})`],
+      [0.6, `rgba(6,10,26,${aMax * 0.55})`],
+      [1, 'rgba(6,10,26,0)']
+    ]);
     ctx.save(); ctx.fillStyle = g; ctx.beginPath(); ctx.arc(sx, sy, R, 0, 6.283); ctx.fill(); ctx.restore();
   }
 
@@ -173,20 +200,139 @@ const WSKY = (() => {
     return c;
   }
   function _cloudAmt(scale) { const s = spaceAmount(scale); return Math.max(0, 1 - Math.abs(s - 0.45) / 0.35); }
-  function drawClouds(ctx, canvas, scale) {
-    const amt = _cloudAmt(scale); if (amt <= 0.02) return;
+
+  // ── PLANET-FROM-SPACE illusion ────────────────────────────────────────────────
+  // As you zoom OUT the town no longer reads as a rectangle on black but as a round
+  // planet: the world render is clipped to planetCircle (done by the orchestrator),
+  // an atmosphere rim glow hugs the limb, and the cloud band curves over the globe.
+  //
+  // planetAmount mirrors spaceAmount's ramp but is exposed separately so the planet
+  // look can be tuned independently of the star/space backdrop.
+  function _planetBands() {
+    const f = (window.WM && WM.fitScale) ? WM.fitScale : 0.25;
+    return { top: f * 0.92, full: f * 0.42 };
+  }
+  function planetAmount(scale) {
+    const { top, full } = _planetBands();
+    if (scale >= top) return 0;
+    if (scale <= full) return 1;
+    return (top - scale) / (top - full);
+  }
+
+  // The circle (DEVICE px) that inscribes the world's on-screen bounds. Centre = the
+  // map centre (W/2,H/2) projected to screen; r = half the smaller on-screen map side,
+  // nudged out ~2% so the clip/atmosphere sit just past the terrain edge. Matches the
+  // render loop's transform: x_dev = dpr*(cam.x + x_world*cam.scale). Guards WM missing.
+  function planetCircle(canvas) {
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
     const w = canvas.width, h = canvas.height;
-    if (!_cloudBand || _cbW !== w) { _cloudBand = _buildCloudBand(w); _cbW = w; }
-    const t = performance.now() / 1000;
-    ctx.save(); ctx.setTransform(1, 0, 0, 1, 0, 0);
-    for (const b of [{ y: h * 0.14, spd: 13, a: 0.55 }, { y: h * 0.44, spd: 27, a: 0.42 }]) {
-      const off = (t * b.spd) % w;
-      ctx.globalAlpha = amt * b.a;
-      ctx.drawImage(_cloudBand, -off, b.y); ctx.drawImage(_cloudBand, w - off, b.y);   // tiled + wrap
-    }
+    if (!window.WM) return { cx: w / 2, cy: h / 2, r: Math.max(w, h) };
+    const cam = WM.camera, W = WM.W, H = WM.H;
+    const cx = dpr * (cam.x + W / 2 * cam.scale);
+    const cy = dpr * (cam.y + H / 2 * cam.scale);
+    const r = 0.5 * Math.min(W, H) * cam.scale * dpr * 1.02;
+    return { cx, cy, r };
+  }
+
+  // Atmosphere: a soft blue rim glow hugging planetCircle that fades outward, plus a
+  // subtle dark inner-limb ring so the disc reads round. Screen space, own transform.
+  // Gradient cached (rebuilds only when the circle geometry moves — i.e. on zoom/pan).
+  function drawAtmosphere(ctx, canvas, scale) {
+    const amt = planetAmount(scale);
+    if (amt <= 0.01) return;
+    const pc = planetCircle(canvas);
+    if (!(pc.r > 0)) return;
+    const cx = pc.cx, cy = pc.cy, r = pc.r;
+    const key = Math.round(cx) + ',' + Math.round(cy) + ',' + Math.round(r);
+    // one radial does both jobs: transparent through the body, a dark limb just inside
+    // the edge (roundness), a bright blue rim at the edge, then a halo fading outward.
+    const g = _memoRadial(ctx, 'atmosphere', key, cx, cy, r * 0.5, cx, cy, r * 1.25, [
+      [0.0, 'rgba(10,16,38,0)'],
+      [0.533, 'rgba(10,16,38,0)'],
+      [0.62, 'rgba(10,16,38,0.34)'],   // inner-limb shadow
+      [0.66, 'rgba(120,170,255,0.06)'],
+      [0.693, 'rgba(130,180,255,0.55)'],  // bright rim at ~the edge
+      [0.787, 'rgba(120,170,255,0.18)'],
+      [1.0, 'rgba(120,170,255,0)']
+    ]);
+    ctx.save();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.globalAlpha = amt;
+    ctx.fillStyle = g;
+    ctx.beginPath(); ctx.arc(cx, cy, r * 1.25, 0, 6.283); ctx.fill();
     ctx.restore();
   }
 
-  return { drawSpace, spaceAmount, drawMoon, drawGroundShadow, setMoonImage, drawClouds, moonScreenRect };
+  // Reusable offscreen buffer + falloff mask for the planetary cloud layer (cached).
+  let _cloudLayer = null, _clW = 0, _clH = 0;
+  function _getCloudLayer(w, h) {
+    if (!_cloudLayer || _clW !== w || _clH !== h) {
+      _cloudLayer = document.createElement('canvas'); _cloudLayer.width = w; _cloudLayer.height = h; _clW = w; _clH = h;
+    }
+    return _cloudLayer;
+  }
+
+  function drawClouds(ctx, canvas, scale) {
+    const fly = _cloudAmt(scale);          // classic mid-transition fly-through amount
+    const p = planetAmount(scale);         // how "planet" the view is
+    if (fly <= 0.02 && p <= 0.02) return;
+    const w = canvas.width, h = canvas.height;
+    if (!_cloudBand || _cbW !== w) { _cloudBand = _buildCloudBand(w); _cbW = w; }
+    const t = performance.now() / 1000;
+
+    // PLANETARY cloud layer: several drifting bands rendered to an offscreen buffer,
+    // then masked with a radial falloff (dense centre → clear limb) via destination-in
+    // and blitted CLIPPED to the globe so the clouds curve over it instead of lying flat.
+    if (p > 0.02 && window.WM) {
+      const pc = planetCircle(canvas);
+      if (pc.r > 0) {
+        const layer = _getCloudLayer(w, h), lx = layer.getContext('2d');
+        lx.setTransform(1, 0, 0, 1, 0, 0);
+        lx.globalCompositeOperation = 'source-over';
+        lx.clearRect(0, 0, w, h);
+        const rows = [h * 0.10, h * 0.30, h * 0.50, h * 0.70];
+        for (let i = 0; i < rows.length; i++) {
+          const off = (t * (11 + i * 7)) % w;
+          lx.globalAlpha = 0.5;
+          lx.drawImage(_cloudBand, -off, rows[i]); lx.drawImage(_cloudBand, w - off, rows[i]);
+        }
+        // radial falloff mask (cached) — keep dense centre, fade to nothing at the limb
+        const mkey = Math.round(pc.cx) + ',' + Math.round(pc.cy) + ',' + Math.round(pc.r);
+        const mask = _memoRadial(lx, 'cloudMask', mkey, pc.cx, pc.cy, pc.r * 0.05, pc.cx, pc.cy, pc.r * 0.98, [
+          [0, 'rgba(255,255,255,1)'],
+          [0.55, 'rgba(255,255,255,0.9)'],
+          [0.82, 'rgba(255,255,255,0.45)'],
+          [1, 'rgba(255,255,255,0)']
+        ]);
+        lx.globalAlpha = 1;
+        lx.globalCompositeOperation = 'destination-in';
+        lx.fillStyle = mask; lx.fillRect(0, 0, w, h);
+        lx.globalCompositeOperation = 'source-over';
+        ctx.save();
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+        ctx.beginPath(); ctx.arc(pc.cx, pc.cy, pc.r, 0, 6.283); ctx.clip();
+        ctx.globalAlpha = Math.min(1, 0.35 + 0.65 * p);
+        ctx.drawImage(layer, 0, 0);
+        ctx.restore();
+      }
+    }
+
+    // Classic flat fly-through bands — full effect when only partway zoomed out, fading
+    // away as the planet forms so they don't fight the curved planetary layer.
+    if (fly > 0.02) {
+      const fa = fly * (1 - Math.min(1, p * 0.85));
+      if (fa > 0.01) {
+        ctx.save(); ctx.setTransform(1, 0, 0, 1, 0, 0);
+        for (const b of [{ y: h * 0.14, spd: 13, a: 0.55 }, { y: h * 0.44, spd: 27, a: 0.42 }]) {
+          const off = (t * b.spd) % w;
+          ctx.globalAlpha = fa * b.a;
+          ctx.drawImage(_cloudBand, -off, b.y); ctx.drawImage(_cloudBand, w - off, b.y);   // tiled + wrap
+        }
+        ctx.restore();
+      }
+    }
+  }
+
+  return { drawSpace, spaceAmount, drawMoon, drawGroundShadow, setMoonImage, drawClouds, moonScreenRect, planetAmount, planetCircle, drawAtmosphere };
 })();
 window.WSKY = WSKY;

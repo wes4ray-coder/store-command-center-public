@@ -41,7 +41,22 @@ DEPARTMENTS = {
     "finance":    ("Finance Desk", "#eab308"),
     "netsec":     ("Network Sec",  "#94a3b8"),
     "research":   ("Research Lab", "#818cf8"),
+    # four standalone-building depts (NOT HQ rooms — self-contained places like the
+    # Research Lab). They give the store's previously "homeless" systems a body:
+    # Mail (IMAP/SMTP + quotes), Homelab (Docker + *arr), Pearl (PRL miner),
+    # AI Assistant (agentic loop). Only Assistant has a real activity signal today.
+    "mail":       ("Mail Room",    "#f9a8d4"),
+    "homelab":    ("Homelab",      "#7dd3fc"),
+    "pearl":      ("Pearl Mine",   "#a7f3d0"),
+    "assistant":  ("AI Assistant", "#d8b4fe"),
 }
+
+# How long a *completed* unit of discrete work (a WooCommerce push, a money
+# mission, a security finding, a social post…) keeps its department's production
+# line running so the ship is actually visible. The GPU studios (image/video/…)
+# have long-lived 'queued/generating' rows and don't need this; the store's other
+# arms finish work in an instant, so we light their desk for a short window after.
+DEPT_WORK_WINDOW_MIN = 15
 
 # The 8 real OpenClaw agents → named, persistent characters.
 OPENCLAW_AGENTS = [
@@ -82,6 +97,12 @@ WORKER_POOL = [
     ("w_res_1",    "Newton", "research", "research",  "#818cf8"),
     ("w_res_2",    "Curie",  "research", "research",  "#a5b4fc"),
     ("w_res_3",    "Vinci",  "research", "research",  "#6366f1"),
+    # the four formerly-homeless systems — each gets a resident worker bound to its
+    # own standalone building (Mail Room / Homelab / Pearl Mine / AI Assistant).
+    ("w_mail_1",   "Miles",  "mail",      "mail",      "#f9a8d4"),
+    ("w_lab_1",    "Docky",  "homelab",   "homelab",   "#7dd3fc"),
+    ("w_pearl_1",  "Clara",  "pearl",     "pearl",     "#a7f3d0"),
+    ("w_asst_1",   "Jarvis", "assistant", "assistant", "#d8b4fe"),
 ]
 
 # ── Economy ───────────────────────────────────────────────────────────────────
@@ -102,6 +123,8 @@ DEPT_TOOL = {
     "models3d":   "3d printer",      "publishing": "printing press",
     "devlab":     "server rack",     "resell":  "cardboard shipping box",
     "trends":     "crystal ball",    "research": "microscope",
+    "mail":       "mailbox",         "homelab": "server rack",
+    "pearl":      "mining pickaxe",  "assistant": "robot assistant",
 }
 
 
@@ -245,6 +268,32 @@ def live_activity():
     activity["models3d"] = _count("SELECT COUNT(*) FROM models3d WHERE status IN ('queued','generating','pending')")
     activity["resell"]   = _count("SELECT COUNT(*) FROM resell_auto_tasks WHERE status='pending'") \
                          + _count("SELECT COUNT(*) FROM automation_log WHERE status='running' AND created_at > datetime('now','-10 minutes')")
+
+    # ── the store's OTHER arms: desks that used to sit dark now light up on the
+    # SAME real backend signals world_sim already PAYS them for (WORK_METRICS).
+    # These finish work in an instant, so a recent-completion window keeps the
+    # dept's line running (and shipping) long enough to see. Every count is
+    # guarded by _count → a missing table contributes 0, never raises. ADDITIVE:
+    # this never touches the five GPU-studio signals above. Keys are DEPT names
+    # (world-factory.js animates a room while activity[room.dept] > 0).
+    _w = f"datetime('now','-{DEPT_WORK_WINDOW_MIN} minutes')"
+    activity["portal"]     = _count(f"SELECT COUNT(*) FROM portal_pushes WHERE kind='product' AND pushed_at > {_w}")          # WooCommerce/affiliate/Etsy/Cults3D product pushes
+    activity["publishing"] = _count(f"SELECT COUNT(*) FROM portal_pushes WHERE kind IN ('portfolio','media') AND pushed_at > {_w}")  # media/portfolio published to WP/Nextcloud
+    activity["social"]     = _count(f"SELECT COUNT(*) FROM social_posts WHERE COALESCE(posted_at, created_at) > {_w}")        # composed/posted social content
+    activity["trends"]     = _count(f"SELECT COUNT(*) FROM proposals WHERE COALESCE(updated_at, created_at) > {_w}")          # Etsy/Printify/trend proposals
+    activity["storefront"] = _count(f"SELECT COUNT(*) FROM designs WHERE status='published' AND updated_at > {_w}")           # listings going live (Etsy/Printify)
+    activity["devlab"]     = _count(f"SELECT COUNT(*) FROM swarm_events WHERE created_at > {_w}")                             # dev-swarm pipeline steps
+    activity["netsec"]     = _count(f"SELECT COUNT(*) FROM security_findings WHERE COALESCE(updated_at, first_seen) > {_w}")  # security scans/findings
+    activity["finance"]    = _count(f"SELECT COUNT(*) FROM money_missions   WHERE COALESCE(updated_at, created_at) > {_w}") \
+                           + _count(f"SELECT COUNT(*) FROM crypto_backtests WHERE created_at > {_w}") \
+                           + _count(f"SELECT COUNT(*) FROM wallet_sends     WHERE COALESCE(updated_at, created_at) > {_w}")   # money missions + backtests + sends
+    # AI Assistant — the ONLY one of the four formerly-homeless systems with a real,
+    # persisted activity signal: any recent assistant/tool message lights the room.
+    # assistant_messages.ts is a Unix EPOCH (time.time()), so it compares to an epoch
+    # offset, NOT the datetime('now',...) window the desks above use. Guarded → 0 if absent.
+    activity["assistant"]  = _count(f"SELECT COUNT(*) FROM assistant_messages WHERE ts > strftime('%s','now') - {DEPT_WORK_WINDOW_MIN * 60}")
+    # Mail / Homelab / Pearl have their building + worker, but NO signal table exists to
+    # animate them yet (see world_sim.WORK_METRICS note) — deliberately left un-fabricated.
     conn.close()
 
     try:

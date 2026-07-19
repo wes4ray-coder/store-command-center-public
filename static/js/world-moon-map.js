@@ -125,15 +125,95 @@ window.WMOON = (function () {
     ctx.fillStyle = 'rgba(255,255,255,0.9)'; ctx.font = `${T * 0.8}px sans-serif`; ctx.textBaseline = 'top'; ctx.fillText('🪼', fx + T * 0.2, fy - T * 2.55);
   }
 
+  // ── ambient lunar life: astronauts wandering the base + a rover on patrol ──
+  let _life = null;
+  function _initLife() {
+    const T = TILE(), b = _base();
+    _life = {
+      astronauts: Array.from({ length: 4 }, () => ({
+        cx: b.x + (Math.random() * 2 - 1) * T * 7,
+        cy: b.y + T * (2 + Math.random() * 3),
+        phase: Math.random() * 6.28, spd: 0.25 + Math.random() * 0.4, rad: T * (2 + Math.random() * 4),
+      })),
+      rover: Math.random() * 6.28,
+    };
+  }
+  function _drawShadow(ctx, x, y, r) { ctx.fillStyle = 'rgba(10,10,16,0.45)'; ctx.beginPath(); ctx.ellipse(x, y, r, r * 0.4, 0, 0, 6.283); ctx.fill(); }
+  function _drawAstronaut(ctx, x, y, bob, T) {
+    const s = T * 0.5, dy = Math.abs(Math.sin(bob)) * s * 0.15;
+    _drawShadow(ctx, x, y + s, s * 0.7);
+    ctx.fillStyle = '#eef1f6'; ctx.fillRect(x - s * 0.4, y - s * 0.9 - dy, s * 0.8, s * 1.1);   // suit
+    ctx.fillStyle = '#dfe3ea'; ctx.fillRect(x - s * 0.6, y - s * 0.75 - dy, s * 0.25, s * 0.7);  // pack
+    ctx.beginPath(); ctx.arc(x, y - s * 1.05 - dy, s * 0.42, 0, 6.283); ctx.fill();               // helmet
+    ctx.fillStyle = '#f0b000'; ctx.beginPath(); ctx.arc(x, y - s * 1.02 - dy, s * 0.26, 0, 6.283); ctx.fill(); // gold visor
+  }
+  function _drawRover(ctx, x, y, dir, T) {
+    const s = T * 0.9;
+    _drawShadow(ctx, x, y + s * 0.5, s * 1.1);
+    ctx.fillStyle = '#3a3f4a'; for (const wx of [-0.7, 0.7]) { ctx.beginPath(); ctx.arc(x + wx * s, y + s * 0.4, s * 0.3, 0, 6.283); ctx.fill(); }
+    ctx.fillStyle = '#c9ccd4'; ctx.fillRect(x - s, y - s * 0.3, s * 2, s * 0.6);                  // chassis
+    ctx.fillStyle = '#1b2b52'; ctx.fillRect(x - s * 0.5, y - s * 0.75, s, s * 0.4);               // solar top
+    ctx.strokeStyle = '#e8e8ee'; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.moveTo(x + dir * s * 0.9, y - s * 0.3); ctx.lineTo(x + dir * s * 1.3, y - s); ctx.stroke();   // antenna
+  }
+  function _drawLife(ctx) {
+    if (!_life) _initLife();
+    const T = TILE(), b = _base(), now = performance.now() / 1000;
+    const rt = _life.rover + now * 0.15;
+    _drawRover(ctx, b.x + Math.cos(rt) * T * 11, b.y + T * 4.5 + Math.sin(rt) * T * 4, Math.cos(rt) >= 0 ? 1 : -1, T);
+    for (const a of _life.astronauts) {
+      const ax = a.cx + Math.cos(a.phase + now * a.spd) * a.rad;
+      const ay = a.cy + Math.sin((a.phase + now * a.spd) * 0.7) * a.rad * 0.5;
+      _drawAstronaut(ctx, ax, ay, now * a.spd * 3 + a.phase, T);
+    }
+  }
+
+  // ── arriving crew: agents flown up by the space program, doing research near the base ──
+  // Reads _worldState.space.on_moon (produced by the sim). Deterministic placement per index
+  // with a gentle time-driven wander, IN ADDITION to the ambient _drawLife astronauts.
+  function _drawArrivals(ctx) {
+    if (typeof _worldState === 'undefined' || !_worldState) return;
+    const sp = _worldState.space; if (!sp || !sp.on_moon || !sp.on_moon.length) return;
+    const T = TILE(), b = _base(), now = performance.now() / 1000, n = sp.on_moon.length;
+    for (let i = 0; i < n; i++) {
+      const m = sp.on_moon[i];
+      const ang = (i / n) * 6.283 + i * 1.27;                 // spread deterministically around the base
+      const rad = T * (5.5 + (i % 3) * 1.6);
+      const jx = b.x + Math.cos(ang) * rad;
+      const jy = b.y + T * 3 + Math.sin(ang) * rad * 0.45;
+      const wx = jx + Math.sin(now * 0.5 + i) * T * 0.6;      // small research wander
+      const wy = jy + Math.cos(now * 0.4 + i * 1.3) * T * 0.3;
+      _drawAstronaut(ctx, wx, wy, now * 1.4 + i, T);
+      // research gizmo: a scanner probe planted beside them + a faint sample beam
+      ctx.strokeStyle = '#9aa4b8'; ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.moveTo(wx + T * 0.6, wy + T * 0.2); ctx.lineTo(wx + T * 0.6, wy - T * 0.7); ctx.stroke();
+      ctx.fillStyle = 'rgba(120,220,160,0.7)'; ctx.beginPath(); ctx.arc(wx + T * 0.6, wy - T * 0.8, T * 0.14, 0, 6.283); ctx.fill();
+      ctx.strokeStyle = 'rgba(120,220,160,0.35)'; ctx.beginPath(); ctx.moveTo(wx + T * 0.6, wy - T * 0.8); ctx.lineTo(wx - T * 0.2, wy + T * 0.1); ctx.stroke();
+      // name pill above the helmet
+      const nm = (m && m.name) ? m.name : 'crew';
+      ctx.font = `${Math.round(T * 0.45)}px sans-serif`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      const wpx = ctx.measureText(nm).width + T * 0.4;
+      ctx.fillStyle = 'rgba(10,14,26,0.55)'; ctx.fillRect(wx - wpx / 2, wy - T * 2.0, wpx, T * 0.62);
+      ctx.fillStyle = '#eaf1ff'; ctx.fillText(nm, wx, wy - T * 1.69);
+      ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
+    }
+  }
+
   // ── Earth hanging in the black sky (screen space, upper area) ──
+  // Both radial gradients are memoized by canvas size (ex/ey/er derive from w/h), so they're
+  // built once per resize instead of every frame (was a per-frame alloc → measurable lag).
+  let _earthCache = null;
   function _drawEarth(ctx, canvas) {
-    const w = canvas.width, h = canvas.height, er = 0.09 * Math.min(w, h);
-    const ex = w * 0.78, ey = h * 0.2;
-    const glow = ctx.createRadialGradient(ex, ey, er * 0.7, ex, ey, er * 2.2);
-    glow.addColorStop(0, 'rgba(120,170,255,0.28)'); glow.addColorStop(1, 'rgba(120,170,255,0)');
+    const w = canvas.width, h = canvas.height;
+    if (!_earthCache || _earthCache.w !== w || _earthCache.h !== h) {
+      const er = 0.09 * Math.min(w, h), ex = w * 0.78, ey = h * 0.2;
+      const glow = ctx.createRadialGradient(ex, ey, er * 0.7, ex, ey, er * 2.2);
+      glow.addColorStop(0, 'rgba(120,170,255,0.28)'); glow.addColorStop(1, 'rgba(120,170,255,0)');
+      const body = ctx.createRadialGradient(ex - er * 0.3, ey - er * 0.3, er * 0.2, ex, ey, er);
+      body.addColorStop(0, '#4a90e0'); body.addColorStop(0.7, '#2f6bb0'); body.addColorStop(1, '#173a66');
+      _earthCache = { w, h, er, ex, ey, glow, body };
+    }
+    const { er, ex, ey, glow, body } = _earthCache;
     ctx.fillStyle = glow; ctx.beginPath(); ctx.arc(ex, ey, er * 2.2, 0, 6.283); ctx.fill();
-    const body = ctx.createRadialGradient(ex - er * 0.3, ey - er * 0.3, er * 0.2, ex, ey, er);
-    body.addColorStop(0, '#4a90e0'); body.addColorStop(0.7, '#2f6bb0'); body.addColorStop(1, '#173a66');
     ctx.fillStyle = body; ctx.beginPath(); ctx.arc(ex, ey, er, 0, 6.283); ctx.fill();
     ctx.save(); ctx.beginPath(); ctx.arc(ex, ey, er, 0, 6.283); ctx.clip();
     ctx.fillStyle = 'rgba(90,190,120,0.7)';                         // continents
@@ -169,6 +249,8 @@ window.WMOON = (function () {
     ctx.imageSmoothingEnabled = false;
     _drawGround(ctx, canvas);
     _drawFeatures(ctx);
+    _drawLife(ctx);                     // ambient astronauts + rover (animated)
+    _drawArrivals(ctx);                 // crew flown up by the space program, doing research
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     _drawEarth(ctx, canvas);
     if (_trans > 0) { ctx.globalAlpha = _trans; ctx.fillStyle = '#000'; ctx.fillRect(0, 0, canvas.width, canvas.height); ctx.globalAlpha = 1; _trans = Math.max(0, _trans - 0.06); }

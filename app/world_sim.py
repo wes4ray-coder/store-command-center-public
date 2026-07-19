@@ -12,8 +12,8 @@ world_build.py; shared constants/helpers in world_defs.py.
 import time, json, sqlite3
 
 from deps import get_conn
-from world_defs import (NEEDS, OPENCLAW_DB, mget, mset, clamp, level_for,
-                        log_agent, log_town)
+from world_defs import (NEEDS, OPENCLAW_DB, DEPT_WORK_WINDOW_MIN, mget, mset,
+                        clamp, level_for, log_agent, log_town)
 import world_skills
 import world_settings
 import jellycoin
@@ -67,6 +67,13 @@ WORK_METRICS = {
     "sec_fixed":   ("SELECT COUNT(*) FROM security_findings WHERE status='remediated'",          "netsec"),
     "swarm_step":  ("SELECT COUNT(*) FROM swarm_events WHERE kind IN ('plan','code','test','result')", "swarm"),
     "research_done": ("SELECT COUNT(*) FROM research_projects WHERE status='done'",              "research"),
+    # AI Assistant — each assistant reply is a completed turn of agentic work. The
+    # monotonic count pays Jarvis on the increase (guarded → missing table = 0).
+    "asst_reply":  ("SELECT COUNT(*) FROM assistant_messages WHERE role='assistant'",           "assistant"),
+    # NOTE: Mail / Homelab / Pearl have NO persisted completed-work signal table today
+    # (mail send + quotes aren't logged; homelab tables are config/registry only; the
+    # PRL miner reports live over SSH/RPC, nothing stored). Their buildings + workers
+    # exist, but there is no metric to pay/animate them until a signal table lands.
 }
 
 # In-progress signals — makes the right worker *look* busy at their desk (no pay).
@@ -78,6 +85,20 @@ BUSY_METRICS = {
     # time-bound: a stuck 'running' row (crashed automation) must NOT signal forever
     "resell":   "SELECT COUNT(*) FROM automation_log WHERE status='running' AND created_at > datetime('now','-10 minutes')",
     "research": "SELECT COUNT(*) FROM research_projects WHERE status='running'",
+    # newer desks — the seeded worker poses 'working' while its real backend signal
+    # is fresh (same window live_activity uses). job_class-keyed; guarded loop → a
+    # missing table is 0. ADDITIVE: never removes/changes the studio signals above.
+    "portal":   f"SELECT COUNT(*) FROM portal_pushes WHERE kind='product' AND pushed_at > datetime('now','-{DEPT_WORK_WINDOW_MIN} minutes')",
+    "social":   f"SELECT COUNT(*) FROM social_posts WHERE COALESCE(posted_at, created_at) > datetime('now','-{DEPT_WORK_WINDOW_MIN} minutes')",
+    "trends":   f"SELECT COUNT(*) FROM proposals WHERE COALESCE(updated_at, created_at) > datetime('now','-{DEPT_WORK_WINDOW_MIN} minutes')",
+    "etsy":     f"SELECT COUNT(*) FROM designs WHERE status='published' AND updated_at > datetime('now','-{DEPT_WORK_WINDOW_MIN} minutes')",
+    "finance":  f"SELECT COUNT(*) FROM money_missions WHERE COALESCE(updated_at, created_at) > datetime('now','-{DEPT_WORK_WINDOW_MIN} minutes')",
+    "netsec":   f"SELECT COUNT(*) FROM security_findings WHERE COALESCE(updated_at, first_seen) > datetime('now','-{DEPT_WORK_WINDOW_MIN} minutes')",
+    "swarm":    f"SELECT COUNT(*) FROM swarm_events WHERE created_at > datetime('now','-{DEPT_WORK_WINDOW_MIN} minutes')",
+    # AI Assistant — Jarvis looks busy while a chat is live. NOTE: assistant_messages.ts
+    # is a Unix-EPOCH REAL (time.time()), NOT a datetime string, so this compares against
+    # an epoch offset — the datetime('now',...) form used above would silently never match.
+    "assistant": f"SELECT COUNT(*) FROM assistant_messages WHERE ts > strftime('%s','now') - {DEPT_WORK_WINDOW_MIN * 60}",
 }
 
 

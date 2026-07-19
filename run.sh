@@ -21,4 +21,10 @@ exec "$SCRIPT_DIR/venv/bin/uvicorn" \
     --host "$HOST" \
     --port "$PORT" \
     --workers 1 \
-    --proxy-headers
+    --proxy-headers \
+    --forwarded-allow-ips "127.0.0.1"
+    # SECURITY: --forwarded-allow-ips MUST stay narrow. It's the list of peers uvicorn
+    # trusts to set X-Forwarded-* (which rewrites request.client.host). The auth guard's
+    # localhost bypass keys on request.client.host==127.0.0.1, so if this is EVER widened
+    # to "*", any external client could send `X-Forwarded-For: 127.0.0.1` and be treated
+    # as localhost → full auth bypass. NEVER set FORWARDED_ALLOW_IPS=* / this flag to "*".
