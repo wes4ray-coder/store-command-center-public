@@ -37,7 +37,7 @@ function _drawWear(ctx) {
    axes in the woods, pages in the library, blades on the wall during a raid.
    The camera is the listener (WAU.sfxAt) — zoom onto a spot and it gets loud;
    distance culling + the per-name throttle inside sfxAt keep it sparse. */
-const _ACTION_SND = { mine: 'mine', woodcut: 'chop', farm: 'farm', fish: 'fish', build: 'build' };
+const _ACTION_SND = { mine: 'mine', woodcut: 'chop', farm: 'farm', fish: 'fish', build: 'build', hunt: 'hunt' };
 let _sfxNext = 0;
 function _actionSfx() {
   if (!window.WAU || !WAU.ready || !WAU.sfxAt) return;
@@ -70,6 +70,19 @@ function _drawEditOverlay(ctx) {
     ctx.fillStyle = 'rgba(167,139,250,.25)'; ctx.fillRect(gh.c * TL, gh.r * TL, gh.w * TL, gh.h * TL);
     ctx.strokeStyle = '#c4b5fd'; ctx.lineWidth = 2; ctx.strokeRect(gh.c * TL, gh.r * TL, gh.w * TL, gh.h * TL);
   }
+  if (_edit.addGhost && _edit.add) {                              // Layer-3 interior-placement tile-snap ghost
+    const g = _edit.addGhost, b = WM.buildingAtTile(g.col, g.row);
+    const ic = ({ 'interior:door': '🚪', 'interior:window': '🪟', 'interior:object': '🪑',
+                  'interior:plant': '🪴', 'interior:crate': '📦' })[g.add] || '▪';
+    const onRing = b && (g.col === b.c || g.row === b.r || g.col === b.c + b.w - 1 || g.row === b.r + b.h - 1);
+    const ok = b && (!onRing || g.add === 'interior:door');       // mirrors WM.addInterior's guard
+    ctx.save();
+    ctx.strokeStyle = ok ? '#6ee7a8' : '#f87171'; ctx.lineWidth = 1.5; ctx.setLineDash([4, 3]);
+    ctx.strokeRect(g.col * TL, g.row * TL, TL, TL); ctx.setLineDash([]);
+    ctx.globalAlpha = 0.9; ctx.font = '12px sans-serif'; ctx.textAlign = 'center';
+    ctx.fillText(ic, g.col * TL + TL / 2, g.row * TL + TL / 2 + 4);
+    ctx.restore();
+  }
   if (_edit.agentGhost) {                                      // a PERSON picked up (RCT-style) — show them lifted + target
     const g = _edit.agentGhost, t = WM.worldToTile(g.x, g.y), tp = WM.tileToPx(t.col, t.row);
     const onNode = WM.nodeIndexNear(g.x, g.y) >= 0;
@@ -94,6 +107,15 @@ function _drawEditOverlay(ctx) {
       ctx.fillText(g.p.emoji, g.x, g.y - 4);
       ctx.font = '9px sans-serif'; ctx.fillStyle = '#c4b5fd';
       ctx.fillText('▷ drop to place', g.x, g.y - S - 10);
+      ctx.restore();
+    }
+    else if (g.type === 'structure') {                        // an agent-built structure, carried
+      ctx.save();
+      ctx.globalAlpha = 0.35; ctx.fillStyle = '#000';
+      ctx.beginPath(); ctx.ellipse(g.x, g.y + 2, 10, 4, 0, 0, 6.283); ctx.fill();
+      ctx.globalAlpha = 0.85; _drawStructShape(ctx, g.s.kind, g.x, g.y);
+      ctx.font = '9px sans-serif'; ctx.textAlign = 'center'; ctx.fillStyle = '#c4b5fd';
+      ctx.fillText('▷ drop to place', g.x, g.y + 8);
       ctx.restore();
     }
     else if (g.type === 'decor' && WM.previewDecor) { WM.previewDecor(ctx, g.kind, g.x, g.y); }
@@ -211,15 +233,24 @@ function _drawStructShape(ctx, kind, x, y) {
   }
 }
 function _drawConstruction(ctx) {
+  window._structPos = [];                               // rebuilt each frame; edit-mode hit tests read it
   const con = _worldState && _worldState.company && _worldState.company.construction;
   if (!con) return;
   const bn = WM.locations && WM.locations['build']; if (!bn) return;
   const TL = WM.TILE;
   const slotPos = (slot) => WM.tileToPx(bn.col - 3 + (slot % 5) * 1.6, bn.row + 3 + ((slot / 5) | 0) * 2.3);
-  for (const b of (con.built || [])) { const p = slotPos(b.slot); _drawStructShape(ctx, b.kind, p.x, p.y); }
+  // saved override (ox/oy) wins; else the computed slot — so old structures stay put.
+  const posOf = (b) => (b.ox != null && b.oy != null) ? { x: b.ox, y: b.oy } : slotPos(b.slot);
+  for (const b of (con.built || [])) {
+    const p = posOf(b);
+    b._px = p.x; b._py = p.y;                            // cache current pixel pos for hit-test/drag
+    if (b.id != null) _structPos.push({ x: p.x, y: p.y, s: b });
+    if (_edit.pdrag && _edit.pdrag.type === 'structure' && _edit.pdrag.s === b) continue;  // carried → ghost draws it
+    _drawStructShape(ctx, b.kind, p.x, p.y);
+  }
   // every in-flight project rises in parallel: blueprints haul materials, frames build up.
   for (const pr of (con.projects || [])) {
-    const p = slotPos(pr.slot);
+    const p = posOf(pr);
     if (pr.status === 'blueprint') {
       // faint dashed ghost + a material (haul) bar
       ctx.save(); ctx.globalAlpha = 0.14; _drawStructShape(ctx, pr.kind, p.x, p.y); ctx.restore();
@@ -243,7 +274,7 @@ function _drawConstruction(ctx) {
 }
 
 /* Resource nodes agents skill at while idle — procedural, readable icons with an emoji tag. */
-const _NODE_EMOJI = { woodcut: '🪓', mine: '⛏️', farm: '🌾', fish: '🎣', build: '🔨' };
+const _NODE_EMOJI = { woodcut: '🪓', mine: '⛏️', farm: '🌾', fish: '🎣', build: '🔨', hunt: '🏹' };
 function _drawNodes(ctx) {
   const TL = WM.TILE;
   for (const nd of (WM.nodes || [])) {
@@ -275,6 +306,12 @@ function _drawNodes(ctx) {
       ctx.strokeStyle = '#8a6238'; ctx.lineWidth = 2; ctx.strokeRect(x - 8, y - 10, 16, 14);
       ctx.beginPath(); ctx.moveTo(x - 8, y - 10); ctx.lineTo(x + 8, y + 4); ctx.moveTo(x + 8, y - 10); ctx.lineTo(x - 8, y + 4); ctx.stroke();
       ctx.fillStyle = '#a9763f'; ctx.fillRect(x - 9, y + 4, 18, 3);
+    } else if (nd.kind === 'hunt') {                                     // straw archery butt on a stand (a huntable spot)
+      ctx.fillStyle = '#7a5230'; ctx.fillRect(x - 1, y - 2, 2, 8);       // post
+      ctx.fillStyle = '#d9c07a'; ctx.beginPath(); ctx.arc(x, y - 6, 6, 0, 6.283); ctx.fill();   // straw target
+      ctx.strokeStyle = '#b89a4a'; ctx.lineWidth = 1; ctx.beginPath(); ctx.arc(x, y - 6, 4, 0, 6.283); ctx.stroke();
+      ctx.fillStyle = '#c0453a'; ctx.beginPath(); ctx.arc(x, y - 6, 1.6, 0, 6.283); ctx.fill();  // bullseye
+      ctx.strokeStyle = '#caa06a'; ctx.lineWidth = 1; ctx.beginPath(); ctx.moveTo(x - 8, y - 9); ctx.lineTo(x + 1, y - 6); ctx.stroke();  // stuck arrow
     }
     ctx.font = '9px sans-serif'; ctx.textAlign = 'center';
     ctx.fillText(_NODE_EMOJI[nd.kind] || '', x, y - 15);

@@ -44,9 +44,32 @@ window.WM = (function () {
   let landmarks = [];        // big pack sprites (park trees) {col,row,kind}
   let nodes = [];            // resource nodes {col,row,kind} for idle-skilling (woodcut/mine/farm/fish/build)
   let waterTiles = [];       // {col,row} of pond/water cells — animated live by the renderer
-  let terrainCanvas = null;
   let _terrainImg = null;    // Layer-2: one generated whole-world ground image (null = procedural per-tile)
+  let _floorImg = null;      // Layer-2b: ONE shared interior-floor texture blitted under every building (null = procedural per-kind tint only)
+  // Self-heal: browsers reclaim the backing store of large off-DOM canvases / decoded
+  // images under memory pressure. The element refs stay valid (.complete === true) but
+  // draw nothing, so terrain silently blanks after a while. We keep the SOURCE URLs so
+  // reheal() can re-decode from scratch and re-bake without a page/browser restart.
+  let _terrainUrl = null, _floorUrl = null;
+  let _rehealing = false;
+  // ── CHUNKED TERRAIN + LOD STREAMER ───────────────────────────────────────────
+  // Instead of one giant 2640×2080 resident canvas (which browsers evict under memory
+  // pressure and which can't scale to 4k/8k/moon maps), the ground is rendered as:
+  //   • _overview — a small whole-map canvas (W/_OV) used when zoomed OUT, and as a
+  //     cheap fallback UNDER full-res chunks that are still baking (so never blank);
+  //   • _chunks   — full-res tiles baked ON DEMAND for the visible viewport when zoomed
+  //     IN, and EVICTED once off-screen for a while. Memory stays flat regardless of map
+  //     size because only ~what's on screen is ever resident. The moon map reuses this.
+  let _overview = null;
+  const _OV = 2;                                   // overview downscale (W/2×H/2 ≈ crisp to ~0.5×)
+  let _structPass = false;                         // true only during the full pass that fills waterTiles/hqRooms/locations
+  const _chunks = new Map();                       // "cx,cy" -> {cv, wx, wy, seen}
+  const CHUNK_CW = 22, CHUNK_CH = 26;              // chunk size in TILES (440×520 px; 132/22=6 × 104/26=4 = 24, exact)
+  const CHUNK_LOD = 0.5;                           // below this camera.scale → overview only; at/above → stream full-res chunks
+  const CHUNK_EVICT_MS = 8000;                     // free a chunk unseen for this long
+  const CHUNK_BUDGET = 2;                          // max chunk bakes per frame (no hitch)
   const camera = { x: 0, y: 0, scale: 1 };
+  let _fitScale = 0.25;      // scale at which the whole map fits the viewport (set in fit()); the space/orbit bands key off this so they're viewport-independent
   let _nextId = 1;
 
   const inb = (c, r) => c >= 0 && r >= 0 && c < COLS && r < ROWS;
@@ -279,6 +302,13 @@ window.WM = (function () {
     else if (b.door === 'E') { dc = b.c + b.w - 1; dr = b.r + (b.h / 2 | 0); }
     else { dc = b.c + (b.w / 2 | 0); dr = b.r + b.h - 1; }
     if (inb(dc, dr)) grid[dr][dc] = T.FLOOR;
+    // Layer-3 interior doors are openings → walkable FLOOR so pathfinding allows them
+    // (a door on the wall ring punches a real opening; on an interior tile it stays floor).
+    if (b.interior) for (const it of b.interior) {
+      if (it.kind !== 'door') continue;
+      const ic = b.c + it.lc, ir = b.r + it.lr;
+      if (inb(ic, ir)) grid[ir][ic] = T.FLOOR;
+    }
     return { col: dc, row: dr };
   }
 
@@ -354,6 +384,7 @@ window.WM = (function () {
     b.w = Math.max(3, Math.min(30, b.w + dw));
     b.h = Math.max(3, Math.min(24, b.h + dh));
     b.c = Math.min(b.c, COLS - b.w - 1); b.r = Math.min(b.r, ROWS - b.h - 1);
+    if (b.interior) b.interior = b.interior.filter(e => e.lc < b.w && e.lr < b.h);   // drop interior items now outside the smaller footprint
     rasterize();
   }
   function addBuilding(kind, c, r) {
@@ -370,8 +401,50 @@ window.WM = (function () {
     for (let i = buildings.length - 1; i >= 0; i--) { const b = buildings[i]; if (col >= b.c && col < b.c + b.w && row >= b.r && row < b.r + b.h) return b; }
     return null;
   }
-  const exportLayout = () => ({ buildings: buildings.map(b => ({ ...b })), decor,
+  // ── Layer-3 PER-TILE INTERIOR (play-god): doors / windows / objects on a BUILDING-LOCAL
+  // grid (lc = col - b.c, lr = row - b.r). Building-local so they move with the building for
+  // free; they ride exportLayout/build like any building field and auto-save via scheduleSave. ──
+  function addInterior(id, col, row, kind) {
+    const b = byId(id); if (!b) return false;
+    const lc = col - b.c, lr = row - b.r;
+    if (lc < 0 || lr < 0 || lc >= b.w || lr >= b.h) return false;         // must sit within the footprint
+    const onRing = lc === 0 || lr === 0 || lc === b.w - 1 || lr === b.h - 1;
+    if (onRing && kind !== 'door') return false;                         // only doors may sit on the wall ring (they are openings)
+    if (!b.interior) b.interior = [];
+    b.interior = b.interior.filter(e => !(e.lc === lc && e.lr === lr));   // one item per tile (replace)
+    b.interior.push({ lc, lr, kind });
+    rasterize();                                                         // re-stamp (door→FLOOR) + re-bake
+    return true;
+  }
+  function removeInteriorAt(id, col, row) {
+    const b = byId(id); if (!b || !b.interior || !b.interior.length) return false;
+    const lc = col - b.c, lr = row - b.r, n = b.interior.length;
+    b.interior = b.interior.filter(e => !(e.lc === lc && e.lr === lr));
+    if (b.interior.length === n) return false;
+    rasterize();
+    return true;
+  }
+  const exportLayout = () => ({ buildings: buildings.map(b => b.interior ? { ...b, interior: b.interior.map(e => ({ ...e })) } : { ...b }), decor,
                                 nodes: nodes.map(n => ({ ...n })), landmarks: landmarks.map(l => ({ ...l })) });
+
+  // ── AUTO-SAVE (play-god): persist hand edits without a manual 💾 click ──
+  // Debounced so a drag/resize burst coalesces into ONE POST after it settles.
+  // Called only from user-edit paths (never build()/rasterize()), so loading a
+  // saved layout can't trigger a save loop. Toggle: window._wmLayoutAutosave
+  // (set from the world_layout_autosave setting on tab load); undefined = ON.
+  let _saveTimer = null;
+  function scheduleSave() {
+    if (window._wmLayoutAutosave === false) return;   // toggle off → only 💾 saves
+    clearTimeout(_saveTimer);
+    _saveTimer = setTimeout(() => {
+      _saveTimer = null;
+      try {
+        api('/api/world/layout', { method: 'POST', body: JSON.stringify({ layout: exportLayout() }) })
+          .then(() => { const el = document.getElementById('world-autosave-note'); if (el) { el.textContent = '✓ saved'; setTimeout(() => { if (el.textContent === '✓ saved') el.textContent = ''; }, 1400); } })
+          .catch(() => {});
+      } catch (e) { /* never let a save error break editing */ }
+    }, 800);
+  }
   // fine-grained decor placement (play-god) — pixel-precise, saved in the layout
   function addDecor(px, py, kind) { decor.push({ x: px, y: py, kind }); _bake(); }
   function removeDecorNear(px, py) {
@@ -425,6 +498,7 @@ window.WM = (function () {
   // re-bakes). Terrain LOGIC (pathfinding/water/wear) stays on the grid — this is
   // a pure visual skin. Passing a falsy url reverts to procedural per-tile art.
   function setTerrainImage(url) {
+    _terrainUrl = url || null;
     if (!url) { _terrainImg = null; _bake(); return; }
     const img = new Image();
     img.onload = () => { _terrainImg = img; _bake(); };
@@ -432,27 +506,154 @@ window.WM = (function () {
     img.src = url;
   }
 
-  // ── bake terrain (+ decor) as detailed pixel art ──
-  function _bake() {
-    if (!terrainCanvas) { terrainCanvas = document.createElement('canvas'); terrainCanvas.width = W; terrainCanvas.height = H; }
-    const x = terrainCanvas.getContext('2d'); x.imageSmoothingEnabled = false; x.clearRect(0, 0, W, H);
-    waterTiles = [];
-    // Layer 2: if a generated terrain image is loaded, blit it as the whole ground
-    // and skip the per-tile NATURAL terrain (grass/path/plaza/water/tree/mountain).
-    // We STILL walk the grid to collect waterTiles (live water animation) and to
-    // paint building FLOOR/WALL cells, so buildings render on top of the image.
+  // Flicker fix: set the generated terrain image WITHOUT re-baking. The caller runs
+  // build()→_bake() right after, so the (single) bake sees _terrainImg already present
+  // and paints the image directly — no procedural→image swap on load. Pass the source
+  // url too so reheal() can re-decode it after a browser memory-eviction.
+  function setTerrainImageEl(img, url) { _terrainImg = img || null; if (url !== undefined) _terrainUrl = url || null; }
+
+  // Layer-2b: swap in ONE shared generated interior-floor texture (loads async, then
+  // re-bakes). It is blitted under EVERY building interior in _building() and the
+  // per-kind FLOOR_TINT is washed over it at low alpha so buildings still read
+  // distinct. Passing a falsy url reverts to the procedural per-kind tint floor.
+  function setFloorImage(url) {
+    _floorUrl = url || null;
+    if (!url) { _floorImg = null; _bake(); return; }
+    const img = new Image();
+    img.onload = () => { _floorImg = img; _bake(); };
+    img.onerror = () => { _floorImg = null; };
+    img.src = url;
+  }
+  // Flicker-free variant (mirrors setTerrainImageEl): set WITHOUT re-baking; the
+  // caller runs build()→_bake() right after so the single bake already sees it.
+  function setFloorImageEl(img, url) { _floorImg = img || null; if (url !== undefined) _floorUrl = url || null; }
+
+  // ── SELF-HEAL: detect + recover a browser-evicted overview ───────────────────
+  // terrainAlive(): sample a few points of the small always-resident _overview. If they're
+  // ALL fully transparent, the browser reclaimed its backing store and the ground has
+  // silently blanked. (Full-res chunks self-recover — they're re-baked on demand — so the
+  // overview is the only long-lived surface worth watching.) Returns true when there's
+  // nothing to heal (no overview yet) so callers don't thrash before the first bake.
+  function terrainAlive() {
+    if (!_overview) return true;
+    try {
+      const x = _overview.getContext('2d'), ow = _overview.width, oh = _overview.height;
+      const pts = [[ow*0.5, oh*0.5], [ow*0.15, oh*0.2], [ow*0.85, oh*0.25], [ow*0.2, oh*0.8], [ow*0.8, oh*0.82]];
+      for (const [px, py] of pts) {
+        const d = x.getImageData(px | 0, py | 0, 2, 2).data;
+        for (let i = 3; i < d.length; i += 4) if (d[i] !== 0) return true;  // any opaque pixel → alive
+      }
+      return false;   // every probe fully transparent → evicted
+    } catch (e) { return true; }   // readback blocked → assume alive, don't thrash
+  }
+
+  // reheal(): re-decode the terrain + floor images FROM their source URLs (the in-memory
+  // elements may themselves be evicted, so a plain _bake() isn't enough) and re-bake. With
+  // no URLs it just re-bakes procedural ground, which also restores an evicted canvas.
+  async function reheal() {
+    if (_rehealing) return;
+    _rehealing = true;
+    try {
+      const jobs = [];
+      if (_terrainUrl) jobs.push(_reload(_terrainUrl).then(img => { if (img) _terrainImg = img; }));
+      if (_floorUrl)   jobs.push(_reload(_floorUrl).then(img => { if (img) _floorImg = img; }));
+      if (jobs.length) await Promise.all(jobs);
+      _bake();   // restores procedural ground even if the images failed to reload
+    } catch (e) {
+      try { _bake(); } catch {}
+    } finally { _rehealing = false; }
+  }
+  function _reload(url) {
+    return new Promise(res => {
+      const img = new Image();
+      img.onload = () => { (img.decode ? img.decode().catch(() => {}) : Promise.resolve()).then(() => res(img)); };
+      img.onerror = () => res(null);
+      img.src = url + (url.includes('?') ? '&' : '?') + '_rh=' + (W + H);  // stable suffix, avoids a stale evicted cache entry
+    });
+  }
+
+  // Layout-guided img2img — the "alpha map maker" helper. Exports the PROCEDURAL layout
+  // (roads/water/plaza/fields + building footprints) as a base image so the terrain
+  // generator's img2img matches your real map. Crucially it must NOT export a generated
+  // terrain image (that'd feed the image back into itself), so we paint PROCEDURAL ground
+  // (_terrainImg temporarily nulled) DIRECTLY into the w×h target via _paintRegion — no
+  // giant intermediate canvas, and it's independent of the chunk cache. Returns a PNG
+  // dataURL, or null on failure.
+  function exportLayoutBase(w, h) {
+    const saved = _terrainImg;
+    try {
+      _terrainImg = null;
+      const off = document.createElement('canvas'); off.width = w; off.height = h;
+      const octx = off.getContext('2d'); octx.imageSmoothingEnabled = false;
+      octx.setTransform(w / W, 0, 0, h / H, 0, 0);             // world coords → w×h target
+      _paintRegion(octx, 0, 0, COLS, ROWS);                    // full procedural map (structPass off: no side effects)
+      octx.setTransform(1, 0, 0, 1, 0, 0);
+      return off.toDataURL('image/png');
+    } catch (e) {
+      return null;
+    } finally {
+      _terrainImg = saved; _bake();                            // restore the live view (overview + chunk cache)
+    }
+  }
+
+  // ── PAINT one tile-region of the ground into an (already-transformed) context ──
+  // Pure drawing: terrain tiles + buildings + decor whose footprint touches the region
+  // (+1-tile margin so overhanging walls/roofs aren't clipped at chunk seams). The ONLY
+  // side effects (waterTiles / hqRooms / desk-locations) are guarded by _structPass, so
+  // they run exactly once (the overview full pass) and never per-chunk.
+  function _bIntersects(b, tc0, tr0, tc1, tr1) {
+    return b.c < tc1 + 1 && b.c + b.w > tc0 - 1 && b.r < tr1 + 1 && b.r + b.h > tr0 - 1;
+  }
+  function _paintRegion(x, tc0, tr0, tc1, tr1) {
     const useImg = _terrainImg && _terrainImg.complete && _terrainImg.naturalWidth;
-    if (useImg) x.drawImage(_terrainImg, 0, 0, W, H);
-    for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) {
+    if (useImg) x.drawImage(_terrainImg, 0, 0, W, H);   // whole ground image; the ctx transform clips it to this region
+    for (let r = tr0; r < tr1; r++) for (let c = tc0; c < tc1; c++) {
       const t = grid[r][c];
       if (!useImg || t === T.FLOOR || t === T.WALL) _tile(x, c, r);
-      if (t === T.WATER) waterTiles.push({ col: c, row: r });
+      if (t === T.WATER && _structPass) waterTiles.push({ col: c, row: r });   // live-water list: full pass only
     }
-    // Building floors/detail first, then the thin themed wall shell on top of the
-    // footprint edge (so the shell sits on the building edge over the floor).
-    for (const b of buildings) _building(x, b);
-    for (const b of buildings) _drawBuildingShell(x, b);
-    for (const d of decor) _decorSprite(x, d);
+    // Building floors/detail first, then the thin themed wall shell on top of the edge.
+    for (const b of buildings) if (_bIntersects(b, tc0, tr0, tc1, tr1)) _building(x, b);
+    for (const b of buildings) if (_bIntersects(b, tc0, tr0, tc1, tr1)) _drawBuildingShell(x, b);
+    for (const d of decor) {
+      const dc = d.x / TILE, dr = d.y / TILE;
+      if (dc >= tc0 - 1 && dc < tc1 + 1 && dr >= tr0 - 1 && dr < tr1 + 1) _decorSprite(x, d);
+    }
+  }
+
+  // Whole-map LOW-RES overview (the zoomed-out LOD + the fallback under baking chunks).
+  // This is the ONE full pass over the map, so it also (re)populates waterTiles/hqRooms/
+  // locations via _structPass. Small + always resident; if the browser evicts it,
+  // terrainAlive()/reheal() rebuild it.
+  function _bakeOverview() {
+    if (!_overview) { _overview = document.createElement('canvas'); _overview.width = Math.ceil(W / _OV); _overview.height = Math.ceil(H / _OV); }
+    const x = _overview.getContext('2d'); x.imageSmoothingEnabled = false;
+    x.setTransform(1 / _OV, 0, 0, 1 / _OV, 0, 0);       // draw in world coords, scaled down
+    x.clearRect(0, 0, W, H);
+    _structPass = true;
+    waterTiles = [];
+    _paintRegion(x, 0, 0, COLS, ROWS);
+    _structPass = false;
+    x.setTransform(1, 0, 0, 1, 0, 0);
+  }
+
+  // One FULL-RES chunk (baked on demand for the visible viewport, evicted when off-screen).
+  function _bakeChunk(cx, cy) {
+    const tc0 = cx * CHUNK_CW, tr0 = cy * CHUNK_CH;
+    const tc1 = Math.min(COLS, tc0 + CHUNK_CW), tr1 = Math.min(ROWS, tr0 + CHUNK_CH);
+    const wx = tc0 * TILE, wy = tr0 * TILE, ww = (tc1 - tc0) * TILE, wh = (tr1 - tr0) * TILE;
+    const cv = document.createElement('canvas'); cv.width = ww; cv.height = wh;
+    const x = cv.getContext('2d'); x.imageSmoothingEnabled = false;
+    x.translate(-wx, -wy);                               // world coords → chunk-local
+    _paintRegion(x, tc0, tr0, tc1, tr1);                 // _structPass stays false → pure draw
+    return { cv, wx, wy, seen: performance.now() };
+  }
+
+  // Structure/appearance changed (edit, terrain/floor image swap, decor add): rebuild the
+  // overview (the one full pass) and drop the full-res cache so visible chunks re-bake lazily.
+  function _bake() {
+    _bakeOverview();
+    _chunks.clear();
   }
 
   const _hex = (h, a) => { const n = parseInt((h || '#888').slice(1), 16); return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${a})`; };
@@ -485,7 +686,7 @@ window.WM = (function () {
   // building, not a plain grid). 5 rooms up top, 4 below, each with a door onto
   // the corridor. Gear + nameplates are drawn LIVE (they need async sprites).
   function _hqRooms(x, b) {
-    hqRooms = [];
+    if (_structPass) hqRooms = [];        // geometry list rebuilt only on the full pass, not per-chunk
     const ix0 = (b.c + 1) * TILE, iy0 = (b.r + 1) * TILE, iw = (b.w - 2) * TILE, ih = (b.h - 2) * TILE;
     const hallH = Math.max(TILE * 1.2, Math.round(ih * 0.15));
     const topH = Math.floor((ih - hallH) / 2), botH = ih - hallH - topH, hallY = iy0 + topH;
@@ -504,8 +705,10 @@ window.WM = (function () {
       const rw = iw / band.depts.length;
       band.depts.forEach((dept, i) => {
         const zx = ix0 + i * rw, zy = band.y, zw = rw, zh = band.h, cc = DEPT_TINT[dept] || '#8ab';
-        hqRooms.push({ dept, x: zx + zw / 2, y: zy + zh / 2, x0: zx, y0: zy, w: zw, h: zh, tint: cc, door: band.door });
-        locations['desk:' + dept] = { col: Math.round(zx / TILE + zw / TILE / 2 - 0.5), row: Math.round(zy / TILE + zh / TILE / 2 - 0.5) };  // agents operate here
+        if (_structPass) {
+          hqRooms.push({ dept, x: zx + zw / 2, y: zy + zh / 2, x0: zx, y0: zy, w: zw, h: zh, tint: cc, door: band.door });
+          locations['desk:' + dept] = { col: Math.round(zx / TILE + zw / TILE / 2 - 0.5), row: Math.round(zy / TILE + zh / TILE / 2 - 0.5) };  // agents operate here
+        }
         x.fillStyle = _hex(cc, 0.15); x.fillRect(zx + 1, zy + 1, zw - 2, zh - 2);                   // floor tint
         // OFFICE + FACTORY split: carpet-tiled office along the back wall, a
         // concrete production strip mid-room where the live WF machine line runs.
@@ -630,44 +833,137 @@ window.WM = (function () {
     if (f < 0) { const k = 1 + f; R *= k; G *= k; B *= k; } else { R += (255 - R) * f; G += (255 - G) * f; B += (255 - B) * f; }
     return `rgb(${R | 0},${G | 0},${B | 0})`;
   }
-  // Stroke a themed wall band on the outer WALL_PX of the building's footprint edge,
-  // leaving a gap at the door tile (aligned with the T.FLOOR opening _stamp punches).
-  function _drawBuildingShell(x, b) {
+  // Geometry of the themed wall band: the outer WALL_PX of the footprint edge, with a
+  // gap at the door tile (aligned with the T.FLOOR opening _stamp punches). Each rect is
+  // tagged with its edge (T/B/L/R) so the painter can put the crisp keyline on the side
+  // that faces OUT (toward terrain) vs IN (toward the floor).
+  function _shellRects(b) {
     const bx = b.c * TILE, by = b.r * TILE, bw = b.w * TILE, bh = b.h * TILE, wp = WALL_PX;
-    const theme = b.theme || _themeForKind(b.kind);
-    const lite = _shade(theme, 0.24), dark = _shade(theme, -0.30);
     const d = _doorPx(b);                                   // door tile (same math as _stamp)
     const dx0 = d.c * TILE, dx1 = (d.c + 1) * TILE;         // door opening pixel span (horizontal edges)
     const dy0 = d.r * TILE, dy1 = (d.r + 1) * TILE;         // door opening pixel span (vertical edges)
     const rects = [];
     // TOP edge band (skip door span when door is on the N side)
-    if (d.side === 'N') { rects.push({ x: bx, y: by, w: dx0 - bx, h: wp, o: 'h' }, { x: dx1, y: by, w: (bx + bw) - dx1, h: wp, o: 'h' }); }
-    else rects.push({ x: bx, y: by, w: bw, h: wp, o: 'h' });
+    if (d.side === 'N') { rects.push({ x: bx, y: by, w: dx0 - bx, h: wp, edge: 'T' }, { x: dx1, y: by, w: (bx + bw) - dx1, h: wp, edge: 'T' }); }
+    else rects.push({ x: bx, y: by, w: bw, h: wp, edge: 'T' });
     // BOTTOM edge band (skip door span when door is on the S side)
-    if (d.side === 'S') { rects.push({ x: bx, y: by + bh - wp, w: dx0 - bx, h: wp, o: 'h' }, { x: dx1, y: by + bh - wp, w: (bx + bw) - dx1, h: wp, o: 'h' }); }
-    else rects.push({ x: bx, y: by + bh - wp, w: bw, h: wp, o: 'h' });
+    if (d.side === 'S') { rects.push({ x: bx, y: by + bh - wp, w: dx0 - bx, h: wp, edge: 'B' }, { x: dx1, y: by + bh - wp, w: (bx + bw) - dx1, h: wp, edge: 'B' }); }
+    else rects.push({ x: bx, y: by + bh - wp, w: bw, h: wp, edge: 'B' });
     // LEFT edge band (skip door span when door is on the W side)
-    if (d.side === 'W') { rects.push({ x: bx, y: by, w: wp, h: dy0 - by, o: 'v' }, { x: bx, y: dy1, w: wp, h: (by + bh) - dy1, o: 'v' }); }
-    else rects.push({ x: bx, y: by, w: wp, h: bh, o: 'v' });
+    if (d.side === 'W') { rects.push({ x: bx, y: by, w: wp, h: dy0 - by, edge: 'L' }, { x: bx, y: dy1, w: wp, h: (by + bh) - dy1, edge: 'L' }); }
+    else rects.push({ x: bx, y: by, w: wp, h: bh, edge: 'L' });
     // RIGHT edge band (skip door span when door is on the E side)
-    if (d.side === 'E') { rects.push({ x: bx + bw - wp, y: by, w: wp, h: dy0 - by, o: 'v' }, { x: bx + bw - wp, y: dy1, w: wp, h: (by + bh) - dy1, o: 'v' }); }
-    else rects.push({ x: bx + bw - wp, y: by, w: wp, h: bh, o: 'v' });
-    for (const s of rects) {
+    if (d.side === 'E') { rects.push({ x: bx + bw - wp, y: by, w: wp, h: dy0 - by, edge: 'R' }, { x: bx + bw - wp, y: dy1, w: wp, h: (by + bh) - dy1, edge: 'R' }); }
+    else rects.push({ x: bx + bw - wp, y: by, w: wp, h: bh, edge: 'R' });
+    return rects;
+  }
+  // Paint the themed wall band so it reads UNMISTAKABLY as a wall standing proud of the
+  // floor/terrain: a solid wall face (deeper than the floor tone) + a crisp dark keyline
+  // on the OUTER pixel (separates the building from the ground) + a lit highlight just
+  // inside it + a shadow on the INNER pixel (where the wall meets the interior floor).
+  function _paintShell(x, b) {
+    const theme = b.theme || _themeForKind(b.kind);
+    const wall = _shade(theme, -0.10);                      // wall face — a touch deeper than the theme so it's never floor-coloured
+    const lite = _shade(theme, 0.40), dark = _shade(theme, -0.34);
+    const key = _shade(theme, -0.62);                       // crisp outer keyline against the terrain
+    for (const s of _shellRects(b)) {
       if (s.w <= 0 || s.h <= 0) continue;
-      x.fillStyle = theme; x.fillRect(s.x, s.y, s.w, s.h);
-      if (s.o === 'h') {                                   // top-lit / base-shadow (reads as a wall, not a flat line)
-        x.fillStyle = lite; x.fillRect(s.x, s.y, s.w, 2);
-        x.fillStyle = dark; x.fillRect(s.x, s.y + s.h - 2, s.w, 2);
-      } else {
-        x.fillStyle = lite; x.fillRect(s.x, s.y, 2, s.h);
-        x.fillStyle = dark; x.fillRect(s.x + s.w - 2, s.y, 2, s.h);
+      x.fillStyle = wall; x.fillRect(s.x, s.y, s.w, s.h);
+      if (s.edge === 'T') {                                 // outer=top, inner=bottom
+        x.fillStyle = lite; x.fillRect(s.x, s.y + 1, s.w, 2);
+        x.fillStyle = dark; x.fillRect(s.x, s.y + s.h - 1, s.w, 1);
+        x.fillStyle = key; x.fillRect(s.x, s.y, s.w, 1);
+      } else if (s.edge === 'B') {                          // outer=bottom, inner=top
+        x.fillStyle = lite; x.fillRect(s.x, s.y, s.w, 1);
+        x.fillStyle = dark; x.fillRect(s.x, s.y + s.h - 3, s.w, 2);
+        x.fillStyle = key; x.fillRect(s.x, s.y + s.h - 1, s.w, 1);
+      } else if (s.edge === 'L') {                          // outer=left, inner=right
+        x.fillStyle = lite; x.fillRect(s.x + 1, s.y, 2, s.h);
+        x.fillStyle = dark; x.fillRect(s.x + s.w - 1, s.y, 1, s.h);
+        x.fillStyle = key; x.fillRect(s.x, s.y, 1, s.h);
+      } else {                                              // R: outer=right, inner=left
+        x.fillStyle = lite; x.fillRect(s.x, s.y, 1, s.h);
+        x.fillStyle = dark; x.fillRect(s.x + s.w - 3, s.y, 2, s.h);
+        x.fillStyle = key; x.fillRect(s.x + s.w - 1, s.y, 1, s.h);
       }
+    }
+  }
+  const _drawBuildingShell = _paintShell;                   // painted per-region into the overview + chunks by _paintRegion()
+  // Per-frame legibility pass: as the roofs fade away (zoom in) the walls fade IN on top of
+  // everything, so the wall footprint is always crisp regardless of terrain/floor/lighting.
+  // alpha is driven by the render layer (1 - roofAlpha); no-op when the roofs are solid.
+  function drawWallBands(x, alpha) {
+    if (!(alpha > 0.02)) return;
+    x.save(); x.globalAlpha = Math.min(1, alpha);
+    for (const b of buildings) _paintShell(x, b);
+    x.restore();
+  }
+
+  // ── Layer-3: per-tile INTERIOR edits (doors / windows / objects) drawn in the zoomed-in
+  // reveal layer (called from the render loop with 1-roofAlpha, i.e. as the roofs fade), ON
+  // TOP of the per-frame wall bands so a wall-edge door punches through the wall as a real
+  // opening. Procedural furniture (_homeFurnish/_hqRooms) stays the default look; these ADD. ─
+  function drawInterior(x, alpha) {
+    if (!(alpha > 0.02)) return;
+    x.save(); x.globalAlpha = Math.min(1, alpha);
+    for (const b of buildings) {
+      const items = b.interior; if (!items || !items.length) continue;
+      for (const it of items) {
+        const px = (b.c + it.lc) * TILE, py = (b.r + it.lr) * TILE;
+        if (it.kind === 'door') _interiorDoor(x, px, py);
+        else if (it.kind === 'window') _interiorWindow(x, px, py);
+        else _interiorObject(x, px, py, it.kind, b);
+      }
+    }
+    x.restore();
+  }
+  function _interiorDoor(x, px, py) {
+    const T = TILE;
+    x.fillStyle = '#7a5230'; x.fillRect(px + 1, py + 1, T - 2, T - 2);          // floor opening under the leaf
+    x.fillStyle = '#5b3a22'; x.fillRect(px + 4, py + 3, T - 8, T - 4);          // door leaf
+    x.fillStyle = '#734a2c'; x.fillRect(px + 4, py + 3, T - 8, 2);              // top rail highlight
+    x.fillStyle = 'rgba(0,0,0,.3)'; x.fillRect(px + 4, py + T - 2, T - 8, 1);   // threshold shadow
+    x.fillStyle = '#e8c14a'; x.fillRect(px + T - 7, py + (T / 2 | 0), 2, 2);    // knob
+  }
+  function _interiorWindow(x, px, py) {
+    const T = TILE;
+    x.fillStyle = '#26303f'; x.fillRect(px + 3, py + 5, T - 6, T - 10);                          // frame
+    x.fillStyle = '#3a5170'; x.fillRect(px + 4, py + 6, T - 8, T - 12);                          // glass
+    x.fillStyle = 'rgba(190,220,255,.55)'; x.fillRect(px + 5, py + 7, (T - 10) / 2 - 1, T - 14); // sky reflection
+    x.fillStyle = '#3a2a1a'; x.fillRect(px + (T / 2 | 0) - 0.5, py + 5, 1, T - 10);              // mullion
+    x.fillStyle = '#efe6d2'; x.fillRect(px + 2, py + T - 5, T - 4, 1.5);                         // sill
+  }
+  function _interiorObject(x, px, py, kind, b) {
+    const T = TILE, cx = px + T / 2, cy = py + T / 2;
+    x.fillStyle = 'rgba(0,0,0,.22)'; x.beginPath(); x.ellipse(cx, py + T - 3, T * 0.32, T * 0.13, 0, 0, 6.283); x.fill();
+    if (kind === 'plant') {
+      x.fillStyle = '#8a5a2b'; x.fillRect(cx - 3, cy + 2, 6, 5);                // pot
+      x.fillStyle = '#a9763f'; x.fillRect(cx - 3, cy + 2, 6, 1.5);
+      x.fillStyle = '#2f8542'; x.beginPath(); x.arc(cx, cy - 1, 5, 0, 6.283); x.fill();
+      x.fillStyle = '#3ea355'; x.beginPath(); x.arc(cx - 2, cy - 3, 2.6, 0, 6.283); x.fill();
+    } else if (kind === 'crate') {
+      x.fillStyle = '#8a6238'; x.fillRect(cx - 6, cy - 5, 12, 11);             // crate body
+      x.fillStyle = '#a9763f'; x.fillRect(cx - 6, cy - 5, 12, 2);             // lit top edge
+      x.strokeStyle = '#5a3d24'; x.lineWidth = 1; x.strokeRect(cx - 6, cy - 5, 12, 11);
+      x.beginPath(); x.moveTo(cx - 6, cy - 5); x.lineTo(cx + 6, cy + 6); x.moveTo(cx + 6, cy - 5); x.lineTo(cx - 6, cy + 6); x.stroke();  // banding
+    } else {                                                                   // generic furniture — tinted to the building's colour
+      x.fillStyle = '#5d4328'; x.fillRect(cx - 6, cy - 3, 12, 8);             // table / chest body
+      x.fillStyle = _hex(b.color, 0.9); x.fillRect(cx - 6, cy - 3, 12, 2.5);  // coloured top
+      x.fillStyle = 'rgba(255,255,255,.15)'; x.fillRect(cx - 6, cy - 3, 12, 1);
+      x.fillStyle = 'rgba(0,0,0,.3)'; x.fillRect(cx - 5, cy + 4, 2, 2); x.fillRect(cx + 3, cy + 4, 2, 2);  // legs
     }
   }
 
   // per-building detail: floor tint, roof/awning trim, door, sign, interior furniture
   function _building(x, b) {
     const bx = b.c * TILE, by = b.r * TILE, bw = b.w * TILE, bh = b.h * TILE;
+    // Layer-2b: ONE shared generated interior-floor texture (warm planks/tiles) as
+    // the base under every interior, then the per-kind FLOOR_TINT washed OVER it at
+    // low alpha so buildings still read distinct. No floor image → the classic
+    // per-kind tint fill only (exact prior behavior).
+    const iw = bw - 2 * TILE, ih = bh - 2 * TILE;
+    const useFloor = _floorImg && _floorImg.complete && _floorImg.naturalWidth && iw > 0 && ih > 0;
+    if (useFloor) x.drawImage(_floorImg, bx + TILE, by + TILE, iw, ih);   // baked in _bake()
     const tint = FLOOR_TINT[b.kind]; if (tint) { x.fillStyle = tint; x.fillRect(bx + TILE, by + TILE, bw - 2 * TILE, bh - 2 * TILE); }
     if (b.kind === 'hq') _hqRooms(x, b);               // divide HQ into furnished department rooms
     // roof / awning trim in the building colour (makes each type distinct) — skip when
@@ -891,7 +1187,40 @@ window.WM = (function () {
     }
   }
 
-  function drawTerrain(ctx) { if (terrainCanvas) ctx.drawImage(terrainCanvas, 0, 0); }
+  // Draw the ground under the live camera transform. Zoomed OUT → the cheap whole-map
+  // overview. Zoomed IN → the overview as an instant fallback, then full-res chunks for
+  // just the visible viewport (baked on a per-frame budget, evicted once off-screen), so
+  // memory stays flat no matter how big the map is. `canvas` gives the viewport size used
+  // to pick visible chunks (falls back to overview-only if it's missing).
+  function drawTerrain(ctx, canvas) {
+    if (!_overview) return;
+    ctx.drawImage(_overview, 0, 0, W, H);                       // base LOD (also the fallback under baking chunks)
+    if (camera.scale < CHUNK_LOD || !canvas) return;            // zoomed out → overview is enough
+
+    const vw = canvas._cssW || canvas.clientWidth || 0, vh = canvas._cssH || canvas.clientHeight || 0;
+    if (!vw || !vh) return;
+    // visible world rect → chunk index span (+1 chunk margin so panning stays ahead)
+    const wx0 = (0 - camera.x) / camera.scale, wy0 = (0 - camera.y) / camera.scale;
+    const wx1 = (vw - camera.x) / camera.scale, wy1 = (vh - camera.y) / camera.scale;
+    const cwPx = CHUNK_CW * TILE, chPx = CHUNK_CH * TILE;
+    const nX = Math.ceil(COLS / CHUNK_CW), nY = Math.ceil(ROWS / CHUNK_CH);
+    const cx0 = Math.max(0, Math.floor(wx0 / cwPx) - 1), cx1 = Math.min(nX - 1, Math.floor(wx1 / cwPx) + 1);
+    const cy0 = Math.max(0, Math.floor(wy0 / chPx) - 1), cy1 = Math.min(nY - 1, Math.floor(wy1 / chPx) + 1);
+    const now = performance.now();
+    let budget = CHUNK_BUDGET;
+    for (let cy = cy0; cy <= cy1; cy++) for (let cx = cx0; cx <= cx1; cx++) {
+      const k = cx + ',' + cy;
+      let ch = _chunks.get(k);
+      if (!ch) {
+        if (budget <= 0) continue;                              // over budget this frame → overview shows through until baked
+        budget--; ch = _bakeChunk(cx, cy); _chunks.set(k, ch);
+      }
+      ch.seen = now;
+      ctx.drawImage(ch.cv, ch.wx, ch.wy);
+    }
+    if (_chunks.size > 16) for (const [k, ch] of _chunks)       // evict off-screen chunks (bounded memory)
+      if (now - ch.seen > CHUNK_EVICT_MS) _chunks.delete(k);
+  }
   const BLD_ICON = { hq: '🏢', townhall: '🏛️', exec: '💼', library: '📚', church: '⛪',
                      bar: '🍺', arcade: '🕹️', tv: '📺', cafe: '☕', park: '🌳',
                      gas: '⛽', lounge: '🛋️', shop: '🏪', house: '🏠' };
@@ -913,7 +1242,12 @@ window.WM = (function () {
       const big = b.kind === 'hq';
       ctx.font = `${big ? 'bold 11' : b.small ? '8' : 'bold 9'}px sans-serif`;
       const txt = name ? `${icon} ${name}` : icon;
-      const tw = ctx.measureText(txt).width, padX = 4, h = big ? 16 : 13;
+      // measureText was called for every labelled building EVERY frame though the
+      // text + font never change — cache the width on the building (invalidate if
+      // the label/font ever changes).
+      const twKey = ctx.font + '|' + txt;
+      if (b._twKey !== twKey) { b._tw = ctx.measureText(txt).width; b._twKey = twKey; }
+      const tw = b._tw, padX = 4, h = big ? 16 : 13;
       const cx = (b.c + b.w / 2) * TILE, bx = Math.round(cx - tw / 2 - padX), by = b.r * TILE - h - 2;
       ctx.fillStyle = 'rgba(10,14,22,.82)';           // pill background
       ctx.fillRect(bx, by, tw + padX * 2, h);
@@ -963,7 +1297,7 @@ window.WM = (function () {
 
   // ── camera ──
   const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
-  function fit(vpW, vpH) { camera.scale = Math.min(vpW / W, vpH / H) * 0.98; camera.x = (vpW - W * camera.scale) / 2; camera.y = (vpH - H * camera.scale) / 2; }
+  function fit(vpW, vpH) { camera.scale = Math.min(vpW / W, vpH / H) * 0.98; _fitScale = camera.scale; camera.x = (vpW - W * camera.scale) / 2; camera.y = (vpH - H * camera.scale) / 2; }
   const screenToWorld = (sx, sy) => ({ x: (sx - camera.x) / camera.scale, y: (sy - camera.y) / camera.scale });
   const worldToTile = (wx, wy) => ({ col: Math.floor(wx / TILE), row: Math.floor(wy / TILE) });
 
@@ -997,7 +1331,9 @@ window.WM = (function () {
       e.preventDefault();
       const rect = canvas.getBoundingClientRect(), mx = e.clientX - rect.left, my = e.clientY - rect.top;
       const wx = (mx - camera.x) / camera.scale, wy = (my - camera.y) / camera.scale;
-      camera.scale = clamp(camera.scale * (e.deltaY < 0 ? 1.12 : 0.89), 0.3, 4);
+      // min extended far below fit so you can pull ALL the way back into orbit (the
+      // town shrinks to a lit patch in space — world-sky.js fades stars in down there).
+      camera.scale = clamp(camera.scale * (e.deltaY < 0 ? 1.12 : 0.89), 0.06, 4);
       camera.x = mx - wx * camera.scale; camera.y = my - wy * camera.scale;
     }, { passive: false });
   }
@@ -1008,10 +1344,11 @@ window.WM = (function () {
     walkable, nearestWalkable, tileToPx, findPath,
     bumpWear, wearStage, loadWear, takeWearDirty, get wear() { return wear; },
     tileAt: (c, r) => (inb(c, r) ? grid[r][c] : -1),
-    drawTerrain, drawBuildingLabels, fit, screenToWorld, worldToTile, attachControls, detachControls,
-    setTerrainImage,
+    drawTerrain, drawBuildingLabels, drawWallBands, drawInterior, fit, get fitScale() { return _fitScale; }, screenToWorld, worldToTile, attachControls, detachControls,
+    setTerrainImage, setTerrainImageEl, exportLayoutBase,
+    setFloorImage, setFloorImageEl, terrainAlive, reheal,
     // edit API
-    moveBuilding, resizeBuilding, addBuilding, deleteBuilding, setBuilding, buildingAtTile, exportLayout,
+    moveBuilding, resizeBuilding, addBuilding, deleteBuilding, setBuilding, buildingAtTile, addInterior, removeInteriorAt, exportLayout, scheduleSave,
     addDecor, removeDecorNear, decorIndexNear, pickDecor, previewDecor,
     nodeIndexNear, addNode, pickNode, removeNodeAt,
     landmarkIndexNear, addLandmark, pickLandmark, removeLandmarkAt,

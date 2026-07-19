@@ -44,6 +44,7 @@ function _drawWorld(ctx, canvas) {
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   ctx.fillStyle = '#070b12'; ctx.fillRect(0, 0, canvas.width, canvas.height);
+  if (window.WSKY) WSKY.drawSpace(ctx, canvas, cam.scale);   // starfield behind the world when zoomed out to orbit
   ctx.setTransform(dpr * cam.scale, 0, 0, dpr * cam.scale, dpr * cam.x, dpr * cam.y);  // camera
   ctx.imageSmoothingEnabled = false;
 
@@ -54,8 +55,9 @@ function _drawWorld(ctx, canvas) {
   }
   _actionSfx();                          // per-action foley at each agent's spot
 
-  WM.drawTerrain(ctx);
+  WM.drawTerrain(ctx, canvas);
   _drawWear(ctx);                        // desire lines — trampled grass → dirt → cobbled road
+  if (window.WSKY) WSKY.drawGroundShadow(ctx);   // moon's shadow sweeps the ground (world space → scales with zoom)
   _drawWater(ctx);                       // live shimmer on ponds + fountains
   _drawBuildingDepth(ctx);               // drop shadows + eaves trim so lots read 3-D
   _drawBuildingSprites(ctx);             // real Kenney building sprites over the procedural lots
@@ -78,6 +80,8 @@ function _drawWorld(ctx, canvas) {
   _drawThreats(ctx);                     // raid monsters (on top of the melee)
   _drawDefeatFx(ctx);                    // ⚔️ poof + label when a threat is slain
   _drawRoofs(ctx);                       // pseudo-3D roofs — solid when zoomed out, fade away close-up
+  if (WM.drawWallBands) WM.drawWallBands(ctx, 1 - _roofAlpha());   // crisp per-building walls fade IN as the roofs fade OUT
+  if (WM.drawInterior) WM.drawInterior(ctx, 1 - _roofAlpha());     // Layer-3 per-tile interior edits (doors/windows/objects) reveal with the walls
   WM.drawBuildingLabels(ctx);            // name pills stay readable on top of the roofs
   _drawShieldDome(ctx);                  // HQ energy shield — strength = the REAL defenses online
 
@@ -87,6 +91,8 @@ function _drawWorld(ctx, canvas) {
   }
   _drawSeason(ctx, canvas);
   _drawLights(ctx, canvas);
+  if (window.WSKY) WSKY.drawMoon(ctx, canvas, cam.scale);   // the moon drifts across the sky at night (screen space, zoomed-out)
+  if (window.WSKY) WSKY.drawClouds(ctx, canvas, cam.scale); // clouds you pass through between orbit and town (over the moon)
   if (_edit.on) _drawEditOverlay(ctx);
   // subtle vignette (screen space) to frame the scene — cached, rebuilt only when the
   // canvas or its backing-store size changes (was reallocated every frame).
@@ -126,8 +132,12 @@ function _drawSeason(ctx, canvas) {
 /* Time-of-day lighting driven by the sim clock: the town darkens toward night with
    a colour shift, and lamps / lit windows glow. */
 function _daylight(h) {
-  if (h >= 9 && h < 18) return { dark: 0, tint: [18, 26, 64] };          // day
-  if (h >= 6 && h < 9) return { dark: (9 - h) / 3 * 0.35, tint: [95, 60, 38] };   // dawn (warm)
-  if (h >= 18 && h < 21) return { dark: (h - 18 + 1) / 3 * 0.55, tint: [70, 38, 58] }; // dusk (purple)
-  return { dark: 0.55, tint: [16, 24, 60] };                             // night (blue, still readable)
+  // Night darkening lightened so the ground/terrain, walls and agents stay clearly
+  // readable at night (was dark 0.55 → near-black; dusk 0.55). Tunable via the
+  // `world_night_brightness` setting (0..1, default 1 = these values; lower = darker).
+  const nb = (window._wmNightBright != null ? window._wmNightBright : 1);
+  if (h >= 9 && h < 18) return { dark: 0, tint: [18, 26, 64] };                    // day
+  if (h >= 6 && h < 9) return { dark: (9 - h) / 3 * 0.22 * nb, tint: [95, 60, 38] };   // dawn (warm)
+  if (h >= 18 && h < 21) return { dark: (h - 18 + 1) / 3 * 0.34 * nb, tint: [70, 38, 58] }; // dusk (purple)
+  return { dark: 0.34 * nb, tint: [22, 30, 66] };                                 // night (readable)
 }

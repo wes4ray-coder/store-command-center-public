@@ -130,15 +130,23 @@ def active_bills(c):
 
 
 def job_for(c, agent):
-    """The first active bill this agent qualifies for (RimWorld min-skill
-    routing via agent level; own-department bills first)."""
+    """The first active bill this agent's OWN department can fill (RimWorld
+    min-skill routing via agent level).
+
+    Only own-department bills — no cross-department fallback. Produce work in
+    this sim doesn't actually advance a bill by an agent standing at the desk
+    (real output comes from world_bills.maybe_drive → world_auto, on its own
+    throttle); so routing a *foreign*-dept agent to a bill was pure animation
+    with no payoff. With a single active bill (e.g. the audio Music bill) the
+    old `(mine or bills)[0]` fallback herded the ENTIRE town onto that one desk
+    (desk:audio), where they'd stand and oscillate in/out on need-cycling
+    without ever doing productive work. Agents with no own-dept bill now fall
+    through to real work (operate/research/build/gather) or relax instead."""
     lvl = int(agent.get("level") or 1)
-    bills = [b for b in active_bills(c) if lvl >= b["min_level"]]
-    if not bills:
-        return None
     dept = agent.get("dept") or ""
-    mine = [b for b in bills if KINDS[b["kind"]]["dept"] == dept]
-    return (mine or bills)[0]
+    mine = [b for b in active_bills(c)
+            if lvl >= b["min_level"] and KINDS[b["kind"]]["dept"] == dept]
+    return mine[0] if mine else None
 
 
 def snapshot(c):

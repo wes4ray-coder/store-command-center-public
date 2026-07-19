@@ -60,6 +60,12 @@ def _ensure(c):
         material_have TEXT DEFAULT '{}',
         work_done REAL DEFAULT 0, work_total REAL DEFAULT 1,
         quality TEXT, built_by TEXT)""")
+    # play-god editor: an exact world-pixel override (NULL = the computed slot pos)
+    for col in ("ox REAL", "oy REAL"):
+        try:
+            c.execute(f"ALTER TABLE world_structures ADD COLUMN {col}")
+        except Exception:
+            pass
     _migrate(c)
 
 
@@ -128,6 +134,19 @@ def place_blueprint(c, kind, slot=None):
         (kind, spec["name"], slot, json.dumps(spec["cost"]), spec["work"]))
     _event(c, "build", f"📐 A {spec['name']} is planned — hauling materials.")
     return c.lastrowid
+
+
+# ── play-god placement: drag a finished/in-flight structure to an exact spot ──
+def move_structure(c, sid, x, y):
+    """Persist a world-pixel override (ox/oy) for one structure so it renders at
+    the dragged spot instead of its computed slot. Returns True if a row moved."""
+    _ensure(c)
+    if x is None or y is None:
+        c.execute("UPDATE world_structures SET ox=NULL, oy=NULL WHERE id=?", (int(sid),))
+    else:
+        c.execute("UPDATE world_structures SET ox=?, oy=? WHERE id=?",
+                  (float(x), float(y), int(sid)))
+    return c.rowcount > 0
 
 
 # ── production orders (RimWorld "Bills"): user says WHAT to build ──────────────
@@ -358,13 +377,14 @@ def snapshot(c):
         have_total = sum(min(int(have.get(k, 0)), int(v)) for k, v in cost.items())
         wp = int(r["work_done"] / max(1.0, r["work_total"]) * 100)
         if r["status"] == "built":
-            built.append({"kind": r["kind"], "name": r["name"], "slot": r["slot"], "quality": r["quality"]})
+            built.append({"id": r["id"], "kind": r["kind"], "name": r["name"], "slot": r["slot"],
+                          "quality": r["quality"], "ox": r.get("ox"), "oy": r.get("oy")})
         else:
             projects.append({
                 "id": r["id"], "kind": r["kind"], "name": r["name"], "slot": r["slot"],
                 "status": r["status"], "pct": wp,
                 "mat_pct": int(have_total / need_total * 100),
-                "cost": cost, "have": have})
+                "cost": cost, "have": have, "ox": r.get("ox"), "oy": r.get("oy")})
     # legacy 'current' = the in-flight project furthest along (frames first)
     cur = None
     if projects:

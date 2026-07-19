@@ -234,6 +234,7 @@ window.WAU = (function () {
     farm:  () => { _noiseHit(0.09, 1100, 0.16); _noiseHit(0.06, 1400, 0.10, 0.10); },                    // hoe rustle
     fish:  () => { _blip(950, 300, 0.10, 'sine', 0.22); _blip(600, 250, 0.07, 'sine', 0.14, 0.13); },    // bobber plop
     build: () => { _blip(210, 150, 0.05, 'square', 0.26); _noiseHit(0.03, 2500, 0.14, 0.012); },         // hammer tap
+    hunt:  () => { _blip(320, 180, 0.05, 'triangle', 0.20); _noiseHit(0.05, 1400, 0.12, 0.03); },        // bowstring twang + arrow whoosh
     study: () => { _noiseHit(0.05, 5200, 0.10); _noiseHit(0.04, 4200, 0.07, 0.07); },                    // page flip
     pray:  () => { _blip(880, 880, 0.5, 'sine', 0.16); _blip(1320, 1320, 0.4, 'sine', 0.08, 0.12); },    // soft bell
     swing: () => { _noiseHit(0.07, 900, 0.16); _blip(2400, 1500, 0.05, 'square', 0.20, 0.05); },         // whoosh + clash

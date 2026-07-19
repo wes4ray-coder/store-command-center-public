@@ -14,6 +14,7 @@ terrain shows until you both enable the setting AND generate an image.
 Mirrors world_tileset.py's lock / status / orch-hold structure. Import-safe:
 no heavy work (PIL / subprocess) runs at import time.
 """
+import base64
 import json
 import logging
 import random
@@ -42,6 +43,17 @@ GEN_SIZE = "1024"                   # one large square render (generate.sh W/H)
 GEN_STEPS = "24"
 MAP_W, MAP_H = 132 * 20, 104 * 20   # world-map.js TILE*COLS x TILE*ROWS = 2640x2080
                                     # (the render is downscaled to this to skin the ground)
+# img2img (layout-guided) render size — matches the map's 2640x2080 = 1.269:1 aspect
+# (1216x960 = 1.267:1) so the client-rendered roads/water/plaza stay aligned. Used
+# only when a base_png layout image is supplied; text-only renders stay square.
+I2I_W, I2I_H = 1216, 960
+
+# layout-guided (img2img) prompt: preserve the supplied layout, only add texture.
+LAYOUT_PROMPT = (
+    "top-down orthographic pixel-art town ground, keep the existing road, water, "
+    "plaza and field layout exactly, add rich grass, dirt, cobblestone and water "
+    "texture, no buildings, no characters, no text, no grid lines"
+)
 
 _lock = threading.Lock()
 
@@ -126,6 +138,7 @@ def status():
         "url": f"world_assets/terrain/{OUT_FILE}?v={v}" if has_image else None,
         "v": v,
         "prompt": meta.get("prompt") or "",
+        "mode": meta.get("mode") or "",
         "state": st.get("state") or ("done" if has_image else "none"),
         "note": st.get("note") or "",
     }
@@ -165,30 +178,75 @@ def _image_ok(path):
 
 
 # ── generation ───────────────────────────────────────────────────────────────
-def _generate(theme):
+def _prep_base(base_png):
+    """Decode a base_png (dataURL string or a saved path) → an init PNG under
+    TERRAIN_DIR resized to the map aspect (I2I_W×I2I_H) so roads align. Returns the
+    init path (str) on success, or None if nothing usable was supplied / decode
+    failed (caller then falls back to text-only generic terrain)."""
+    if not base_png:
+        return None
+    try:
+        from PIL import Image
+        import io
+        raw_bytes = None
+        s = base_png.strip() if isinstance(base_png, str) else base_png
+        if isinstance(s, str) and s.startswith("data:"):
+            # data:image/png;base64,....  → strip the header, decode the payload
+            _, _, b64 = s.partition(",")
+            raw_bytes = base64.b64decode(b64)
+        elif isinstance(s, str):
+            # treat as a filesystem path to an existing PNG
+            with open(s, "rb") as fh:
+                raw_bytes = fh.read()
+        if not raw_bytes:
+            return None
+        im = Image.open(io.BytesIO(raw_bytes)).convert("RGB").resize((I2I_W, I2I_H))
+        init_path = TERRAIN_DIR / "_init_layout.png"
+        im.save(init_path)
+        return str(init_path)
+    except Exception as e:
+        log.warning("terrain base_png decode failed, falling back to generic: %s", e)
+        return None
+
+
+def _generate(theme, base_png=None, denoise=0.55):
     """Worker body. Renders ONE large terrain image, QA-gates it, installs it.
-    Never raises out of the thread — logs + sets a failed status instead."""
+    When base_png is supplied, runs layout-guided img2img (the init image's
+    roads/water/plaza are preserved, only texture is added); otherwise the classic
+    text-only generic terrain. Never raises out of the thread — logs + sets a
+    failed status instead."""
     try:
         theme = (theme or ws.s("world_theme") or "cozy fantasy").strip()
-        _set_status("generating", "rendering whole-world terrain image")
         TERRAIN_DIR.mkdir(parents=True, exist_ok=True)
+        init_path = _prep_base(base_png)
+        layout_mode = bool(init_path)
+        _set_status("generating",
+                    "rendering layout-guided terrain image" if layout_mode
+                    else "rendering whole-world terrain image")
         model = ws.s("world_prop_model") or DEFAULT_IMAGE_MODEL
         lora = ws.s("world_prop_lora")
-        prompt = _prompt(theme)
+        # layout-guided: preserve the client-rendered layout, only add texture.
+        prompt = _prompt(LAYOUT_PROMPT) if layout_mode else _prompt(theme)
+        # img2img takes its W/H from the init image → use the map-aspect size so the
+        # roads align; text-only stays the square GEN_SIZE.
+        gen_w = str(I2I_W) if layout_mode else GEN_SIZE
+        gen_h = str(I2I_H) if layout_mode else GEN_SIZE
         raw = TERRAIN_DIR / "_raw_terrain.png"
         ok = False
         orch.image_acquire()
         try:
             try:
-                res = subprocess.run(
-                    [str(GENERATE_SCRIPT), prompt, str(raw), GEN_SIZE, GEN_SIZE, GEN_STEPS,
-                     str(random.randint(1, 2**31 - 1)), model, lora],
-                    capture_output=True, text=True, timeout=600)
+                cmd = [str(GENERATE_SCRIPT), prompt, str(raw), gen_w, gen_h, GEN_STEPS,
+                       str(random.randint(1, 2**31 - 1)), model, lora]
+                if layout_mode:
+                    # args 9 (upscale) + 10 (matte) stay empty; 11 = init, 12 = denoise
+                    cmd += ["", "", init_path, str(denoise)]
+                res = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
             except subprocess.TimeoutExpired:
                 log.error("terrain render timed out after 600s (model=%s %sx%s)",
-                          model, GEN_SIZE, GEN_SIZE)
+                          model, gen_w, gen_h)
                 _set_status("failed",
-                            f"render timed out after 600s (model={model}, {GEN_SIZE}x{GEN_SIZE})")
+                            f"render timed out after 600s (model={model}, {gen_w}x{gen_h})")
                 return
             ok = res.returncode == 0 and raw.exists()
             if not ok:
@@ -223,8 +281,10 @@ def _generate(theme):
             except Exception:
                 pass
         v = int((_meta_get() or {}).get("v") or 0) + 1
-        _meta_set({"path": f"world_assets/terrain/{OUT_FILE}", "v": v, "prompt": prompt})
-        _set_status("done", f"terrain image v{v} installed")
+        mode = "layout" if layout_mode else "generic"
+        _meta_set({"path": f"world_assets/terrain/{OUT_FILE}", "v": v,
+                   "prompt": prompt, "mode": mode})
+        _set_status("done", f"{mode} terrain image v{v} installed")
     except Exception as e:
         log.exception("world terrain generation crashed: %s", e)
         try:
@@ -233,14 +293,23 @@ def _generate(theme):
             pass
 
 
-def start_generate(theme=None):
-    """Kick a background render. Returns False if one is already running."""
+def start_generate(theme=None, base_png=None, denoise=0.55):
+    """Kick a background render. Returns False if one is already running.
+
+    base_png (a dataURL or a saved PNG path) enables layout-guided img2img: the
+    client-rendered town layout is fed to the generator as the init image so the
+    output terrain matches the real roads/water/plaza. No base_png → the classic
+    text-only generic terrain (backward compatible)."""
+    try:
+        denoise = float(denoise)
+    except (TypeError, ValueError):
+        denoise = 0.55
     if not _lock.acquire(blocking=False):
         return False
 
     def _run():
         try:
-            _generate(theme)
+            _generate(theme, base_png=base_png, denoise=denoise)
         finally:
             _lock.release()
     threading.Thread(target=_run, daemon=True).start()

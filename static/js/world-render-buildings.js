@@ -137,16 +137,15 @@ const _ROOF_PAL = {
 };
 const _FACE_PAL = ['#d9c9a8', '#cbb491', '#c2c8ce', '#d1bfae'];
 function _roofAlpha() {
-  // Cutaway only once interiors are actually legible: below ~2.0x a room is a
-  // handful of pixels, so the roof stays solid; the fade finishes by 2.8x where
-  // desks/agents read clearly. (Was 1.6-2.4 — mid-zoom showed half-faded
-  // interiors that looked like a broken dark slab, worst at night.)
+  // Roofs cut away (fade to interiors) MUCH earlier now — you no longer have to
+  // zoom almost all the way in to see inside. The fade START is tunable via the
+  // `world_roof_fade_zoom` setting (God Console → world), surfaced as
+  // window._wmRoofFade; default 1.15x. The reveal spans a 0.4x band above it, so
+  // by ~start+0.4 the roof is fully off and desks/agents read clearly.
   const s = WM.camera.scale;
-  // Hard-ish cut: roofs stay FULLY solid until 2.4x (so houses read as crisp
-  // roofed buildings at normal inspect zoom, not a 50%-faded translucent slab),
-  // then reveal the interior over a narrow 0.2 band. (Was a 0.8-wide linear fade
-  // from 2.0-2.8 that left every house a washed-out tinted quad at mid-zoom.)
-  return s <= 2.4 ? 1 : s >= 2.6 ? 0 : (2.6 - s) / 0.2;
+  const start = (window._wmRoofFade != null && window._wmRoofFade > 0) ? window._wmRoofFade : 1.15;
+  const end = start + 0.4;
+  return s <= start ? 1 : s >= end ? 0 : (end - s) / (end - start);
 }
 function _drawRoofs(ctx) {
   const alpha = _roofAlpha();
@@ -259,6 +258,27 @@ function _flatRoof(ctx, bx, by, bw, bh, winter, nglow) {
   ctx.fillStyle = '#4f93c8'; ctx.fillRect(bx + 6, ry0 + 5, bw * 0.22, 4);
   if (winter) { ctx.fillStyle = 'rgba(235,240,248,.45)'; ctx.fillRect(bx - 2, ry0 - 2, bw + 4, bh + 4); }
 }
+/* Per-frame radial-gradient churn was the night-time perf sink: _drawLights built
+   ~160 createRadialGradient objects EVERY frame (one per lit window / skylight /
+   room / lamp). Their coordinates are WORLD-space and get mapped by the camera CTM
+   at paint time, so the SAME gradient object repaints correctly across pans/zooms —
+   only the slowly-changing night `glow` (hourly) and the zoom-driven roof cutaway
+   actually vary the colour. Memoize by a key of position+radii+colour-stops so a
+   steady camera allocates ZERO gradients/frame (a zoom sweep varies only the ~20
+   roof-cutaway room/skylight gradients); a size cap keeps the cache bounded. Output
+   is byte-identical to the old per-frame gradients. */
+const _gradCache = new Map();
+function _lightGrad(ctx, cx, cy, r0, r1, c0, c1) {
+  const key = cx + '|' + cy + '|' + r0 + '|' + r1 + '|' + c0 + '|' + c1;
+  let g = _gradCache.get(key);
+  if (g === undefined) {
+    if (_gradCache.size > 800) _gradCache.clear();     // zoom sweeps vary the key — stay bounded
+    g = ctx.createRadialGradient(cx, cy, r0, cx, cy, r1);
+    g.addColorStop(0, c0); g.addColorStop(1, c1);
+    _gradCache.set(key, g);
+  }
+  return g;
+}
 function _drawLights(ctx, canvas) {
   const L = _daylight(_worldState?.clock_hour ?? 12);
   if (L.dark <= 0.01) return;
@@ -290,9 +310,21 @@ function _drawLights(ctx, canvas) {
       const a = (0.5 + 0.08 * Math.sin(flick + i + (b.id || 0))) * glow;
       ctx.fillStyle = `rgba(255,214,140,${a})`;
       ctx.fillRect(wx - 2.5, wy - 4, 5, 5);
-      const g = ctx.createRadialGradient(wx, wy, 1, wx, wy, 13);
-      g.addColorStop(0, `rgba(255,214,140,${0.28 * glow})`); g.addColorStop(1, 'rgba(255,214,140,0)');
-      ctx.fillStyle = g; ctx.beginPath(); ctx.arc(wx, wy, 13, 0, 6.283); ctx.fill();
+      ctx.fillStyle = _lightGrad(ctx, wx, wy, 1, 13, `rgba(255,214,140,${0.28 * glow})`, 'rgba(255,214,140,0)');
+      ctx.beginPath(); ctx.arc(wx, wy, 13, 0, 6.283); ctx.fill();
+    }
+  }
+  // Layer-3: hand-placed interior WINDOWS glow at night too (only meaningful once the
+  // roof cuts away, so scale by 1-roofAlpha like the interior wash above).
+  const iw = (1 - _roofAlpha());
+  if (iw > 0.05) for (const b of WM.buildings) {
+    if (!b.interior) continue;
+    for (const it of b.interior) {
+      if (it.kind !== 'window') continue;
+      const wx = (b.c + it.lc + 0.5) * TL, wy = (b.r + it.lr + 0.5) * TL;
+      ctx.fillStyle = `rgba(255,214,140,${0.5 * glow * iw})`; ctx.fillRect(wx - 2.5, wy - 2.5, 5, 5);
+      ctx.fillStyle = _lightGrad(ctx, wx, wy, 1, 12, `rgba(255,214,140,${0.26 * glow * iw})`, 'rgba(255,214,140,0)');
+      ctx.beginPath(); ctx.arc(wx, wy, 12, 0, 6.283); ctx.fill();
     }
   }
   // HQ at night: the flat roof's skylights + face windows glow through the dark
@@ -305,9 +337,8 @@ function _drawLights(ctx, canvas) {
     const bx = hq.c * TL, by = hq.r * TL, bw = hq.w * TL, bh = hq.h * TL;
     for (const s of _hqSkylights(bx, by, bw, bh)) {
       const cx = s.x + s.w / 2, cy = s.y + s.h / 2;
-      const g = ctx.createRadialGradient(cx, cy, 1, cx, cy, s.w);
-      g.addColorStop(0, `rgba(255,205,130,${0.40 * glow * ra})`); g.addColorStop(1, 'rgba(255,205,130,0)');
-      ctx.fillStyle = g; ctx.beginPath(); ctx.arc(cx, cy, s.w, 0, 6.283); ctx.fill();
+      ctx.fillStyle = _lightGrad(ctx, cx, cy, 1, s.w, `rgba(255,205,130,${0.40 * glow * ra})`, 'rgba(255,205,130,0)');
+      ctx.beginPath(); ctx.arc(cx, cy, s.w, 0, 6.283); ctx.fill();
     }
   }
   if (ra < 0.95) {
@@ -318,17 +349,15 @@ function _drawLights(ctx, canvas) {
         if (s.px >= rm.x0 && s.px <= rm.x0 + rm.w && s.py >= rm.y0 && s.py <= rm.y0 + rm.h) { occupied = true; break; }
       }
       const amt = (occupied ? 0.52 : 0.28) * glow * (1 - ra);
-      const g = ctx.createRadialGradient(rm.x, rm.y, 2, rm.x, rm.y, Math.max(rm.w, rm.h) * 0.62);
-      g.addColorStop(0, `rgba(255,205,135,${amt})`); g.addColorStop(1, 'rgba(255,205,135,0)');
-      ctx.fillStyle = g; ctx.fillRect(rm.x0, rm.y0, rm.w, rm.h);
+      ctx.fillStyle = _lightGrad(ctx, rm.x, rm.y, 2, Math.max(rm.w, rm.h) * 0.62, `rgba(255,205,135,${amt})`, 'rgba(255,205,135,0)');
+      ctx.fillRect(rm.x0, rm.y0, rm.w, rm.h);
     }
   }
   for (const d of WM.decor) {                                       // lamps + fountain glow
     if (d.kind !== 'lamp' && d.kind !== 'fountain') continue;
     const cx = d.x, cy = d.kind === 'lamp' ? d.y - 9 : d.y, R = d.kind === 'lamp' ? 26 : 16;
-    const g = ctx.createRadialGradient(cx, cy, 1, cx, cy, R);
-    g.addColorStop(0, `rgba(255,225,150,${(d.kind === 'lamp' ? 0.6 : 0.3) * glow})`); g.addColorStop(1, 'rgba(255,225,150,0)');
-    ctx.fillStyle = g; ctx.beginPath(); ctx.arc(cx, cy, R, 0, 6.283); ctx.fill();
+    ctx.fillStyle = _lightGrad(ctx, cx, cy, 1, R, `rgba(255,225,150,${(d.kind === 'lamp' ? 0.6 : 0.3) * glow})`, 'rgba(255,225,150,0)');
+    ctx.beginPath(); ctx.arc(cx, cy, R, 0, 6.283); ctx.fill();
   }
   ctx.globalCompositeOperation = 'source-over';
 }

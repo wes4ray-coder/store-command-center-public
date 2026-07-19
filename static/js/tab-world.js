@@ -17,7 +17,7 @@ let _selectedId = null;
 let _worldTimers = { raf: null, poll: null, think: null };
 
 /* ── play-god edit mode ── */
-let _edit = { on: false, sel: null, add: null, drag: null, ghost: null };
+let _edit = { on: false, sel: null, add: null, drag: null, ghost: null, addGhost: null };
 
 /* Resolve an agent's current symbolic location → a map tile. */
 function _agentTile(a) {
@@ -65,7 +65,8 @@ function _stopWorld() {
   if (_worldTimers.raf)   cancelAnimationFrame(_worldTimers.raf);
   if (_worldTimers.poll)  clearInterval(_worldTimers.poll);
   if (_worldTimers.think) clearInterval(_worldTimers.think);
-  _worldTimers = { raf: null, poll: null, think: null };
+  if (_worldTimers.heal)  clearInterval(_worldTimers.heal);
+  _worldTimers = { raf: null, poll: null, think: null, heal: null };
 }
 
 /* ── visual-state persistence ─────────────────────────────────────────────────
@@ -105,18 +106,31 @@ function _startWorldLoops() {
     _pollWorld();                                  // immediate catch-up frame
     _worldTimers.poll = setInterval(_pollWorld, 3000);
   }
+  // Terrain self-heal: browsers reclaim the backing store of the large off-DOM terrain
+  // canvas (and decoded ground/floor images) under memory pressure — the textures
+  // silently blank after a while and used to need a full browser restart. Every 5s,
+  // if the baked terrain reads as evicted, re-decode from URL + re-bake automatically.
+  if (!_worldTimers.heal) {
+    _worldTimers.heal = setInterval(() => {
+      try { if (WM.terrainAlive && !WM.terrainAlive() && WM.reheal) WM.reheal(); } catch {}
+    }, 5000);
+  }
   if (_worldTimers.raf) return;
   let last = performance.now();
   const loop = (now) => {
     const cv = document.getElementById('world-canvas');
     if (!cv) { _stopWorld(); return; }          // navigated away → self-clean
-    const dt = Math.min(0.05, (now - last) / 1000); last = now;
-    _stepAgents(dt);
-    if (window.WN) WN.tick(dt);
-    if (window.WW) WW.tick(dt);
-    if (window.WF) WF.tick(dt, (_worldState && _worldState.activity) || {});
-    _drawWorld(ctx, canvas);
-    _worldTimers.raf = requestAnimationFrame(loop);
+    try {
+      const dt = Math.min(0.05, (now - last) / 1000); last = now;
+      _stepAgents(dt);
+      if (window.WN) WN.tick(dt);
+      if (window.WW) WW.tick(dt);
+      if (window.WF) WF.tick(dt, (_worldState && _worldState.activity) || {});
+      _drawWorld(ctx, canvas);
+    } catch (e) {                                 // a single bad frame must not freeze the world
+      if (!loop._warned) { console.error('[world] frame draw error (continuing):', e); loop._warned = true; }
+    }
+    _worldTimers.raf = requestAnimationFrame(loop);   // ALWAYS re-queue, even after a throw
   };
   _worldTimers.raf = requestAnimationFrame(loop);
 }
@@ -124,7 +138,12 @@ function _startWorldLoops() {
 document.addEventListener('visibilitychange', () => {
   if (!document.getElementById('world-canvas')) return;   // not on the world view
   if (document.hidden) _stopWorld();
-  else _startWorldLoops();
+  else {
+    _startWorldLoops();
+    // Coming back from a hidden tab is the #1 moment the browser has discarded the
+    // terrain canvas — re-check + heal right away instead of waiting for the 5s tick.
+    try { if (WM.terrainAlive && !WM.terrainAlive() && WM.reheal) WM.reheal(); } catch {}
+  }
 });
 
 // ── Fullscreen the game: request FS on the canvas WRAPPER (excludes the stats
@@ -205,6 +224,7 @@ async function renderWorld() {
     <button class="btn" style="padding:4px 6px" onclick="worldEditAdd('node:farm')" title="Farming node">🌾</button>
     <button class="btn" style="padding:4px 6px" onclick="worldEditAdd('node:fish')" title="Fishing spot">🎣</button>
     <button class="btn" style="padding:4px 6px" onclick="worldEditAdd('node:build')" title="Build site">🔨</button>
+    <button class="btn" style="padding:4px 6px" onclick="worldEditAdd('node:hunt')" title="Hunting grounds">🏹</button>
     <span style="width:1px;height:16px;background:#33456b;margin:0 2px"></span>
     <span style="color:#7a86a0;font-size:.7rem">Nature:</span>
     <button class="btn" style="padding:4px 6px" onclick="worldEditAdd('landmark:tree_green')" title="Green tree">🌲</button>
@@ -212,10 +232,20 @@ async function renderWorld() {
     <button class="btn" style="padding:4px 6px" onclick="worldEditAdd('landmark:tree_yellow')" title="Yellow tree">🌳</button>
     <button class="btn" style="padding:4px 6px" onclick="worldEditAdd('landmark:well')" title="Well">💧</button>
     <span style="width:1px;height:16px;background:#33456b;margin:0 2px"></span>
+    <span style="color:#7a86a0;font-size:.7rem" title="Place on a building's interior tiles (zoom in to see). Doors may sit on the wall as openings.">Interior:</span>
+    <button class="btn" style="padding:4px 6px" onclick="worldEditAdd('interior:door')" title="Interior door / wall opening (walkable)">🚪</button>
+    <button class="btn" style="padding:4px 6px" onclick="worldEditAdd('interior:window')" title="Window">🪟</button>
+    <button class="btn" style="padding:4px 6px" onclick="worldEditAdd('interior:object')" title="Furniture piece">🪑</button>
+    <button class="btn" style="padding:4px 6px" onclick="worldEditAdd('interior:plant')" title="Potted plant">🪴</button>
+    <button class="btn" style="padding:4px 6px" onclick="worldEditAdd('interior:crate')" title="Crate">📦</button>
+    <span style="width:1px;height:16px;background:#33456b;margin:0 2px"></span>
     <button class="btn" style="padding:4px 8px;border-color:#7c3a3a" onclick="worldEditAdd('erase')" title="Click any object to remove it">🧹 Erase anything</button>
     <span style="width:1px;height:16px;background:#33456b;margin:0 2px"></span>
     <button class="btn" style="padding:4px 8px;border-color:#7c3a3a" onclick="worldEditDelete()">🗑️ Delete</button>
     <button class="btn" style="padding:4px 8px;background:#2a5a3a" onclick="worldEditSave()">💾 Save</button>
+    <label style="display:inline-flex;align-items:center;gap:4px;cursor:pointer;color:#9fb0cc;font-size:.72rem" title="Automatically persist map edits a moment after each change (debounced)">
+      <input type="checkbox" id="world-autosave-cb" onchange="worldToggleAutosave(this.checked)" checked> Auto-save</label>
+    <span id="world-autosave-note" style="color:#5db07a;font-size:.68rem;min-width:44px"></span>
     <button class="btn" style="padding:4px 8px" onclick="worldEditReset()">↺ Reset map</button>
   </div>
   <div style="display:flex;gap:16px;flex-wrap:wrap;align-items:flex-start">
@@ -259,16 +289,51 @@ async function renderWorld() {
   if (window.WN) { try { await WN.init(); } catch {} }   // ambient townsfolk sprites
   if (window.WMob) { try { await WMob.init(); } catch {} } // raid monster sprites (system D)
   let _lay = null, _wearSaved = null;
-  try { const lr = await api('/api/world/layout'); _lay = lr?.layout; _wearSaved = lr?.wear; } catch {}
-  WM.build(_lay);
-  if (_wearSaved && WM.loadWear) WM.loadWear(_wearSaved);  // resume the town's worn trails
-  // Layer 2: swap in a generated whole-world terrain image ONLY when the feature
-  // is enabled (world_terrain_image_enabled) AND an image exists — else procedural.
+  // Flicker fix: kick BOTH the layout + generated-terrain-image fetches together, then
+  // (if a terrain image is enabled + present) PRELOAD + decode it and hand it to WM
+  // BEFORE build(). That way the single build()→_bake() paints the image directly — no
+  // visible procedural→image second bake on load. (Post-generation live swaps still use
+  // the async setTerrainImage(url) path, where a swap is expected.)
+  const layP = api('/api/world/layout');
+  const terrP = api('/api/world/terrain').catch(() => null);
+  const floorP = api('/api/world/floor').catch(() => null);   // Layer-2b: shared interior-floor texture
+  const moonP = api('/api/world/moon').catch(() => null);     // sky: moon texture + enable/daytime flags
   try {
-    const tr = await api('/api/world/terrain');
-    if (tr && tr.enabled && tr.has_image && tr.url && WM.setTerrainImage)
-      WM.setTerrainImage('/store/static/' + tr.url);
+    const mn = await moonP;
+    if (mn) {
+      window._wskyMoonOn = mn.enabled !== false;
+      window._wskyMoonDay = !!mn.daytime;
+      if (window.WSKY && WSKY.setMoonImage) WSKY.setMoonImage(mn.has_image && mn.url ? '/store/static/' + mn.url : null);
+    }
   } catch {}
+  try { const lr = await layP; _lay = lr?.layout; _wearSaved = lr?.wear; } catch {}
+  try {
+    const tr = await terrP;
+    if (tr && tr.enabled && tr.has_image && tr.url) {
+      const url = '/store/static/' + tr.url;
+      const img = new Image(); img.src = url;
+      await img.decode();
+      if (WM.setTerrainImageEl) WM.setTerrainImageEl(img, url);   // remember url → self-heal can re-decode after eviction
+    } else if (WM.setTerrainImageEl) { WM.setTerrainImageEl(null, null); }
+  } catch {}
+  try {
+    const fr = await floorP;
+    if (fr && fr.enabled && fr.has_image && fr.url) {
+      const url = '/store/static/' + fr.url;
+      const img = new Image(); img.src = url;
+      await img.decode();
+      if (WM.setFloorImageEl) WM.setFloorImageEl(img, url);     // preloaded → single bake paints it directly
+    } else if (WM.setFloorImageEl) { WM.setFloorImageEl(null, null); }
+  } catch {}
+  WM.build(_lay);                                         // ONE bake — already sees _terrainImg/_floorImg when preloaded
+  if (_wearSaved && WM.loadWear) WM.loadWear(_wearSaved);  // resume the town's worn trails
+  // play-god auto-save toggle: default ON; reflect the saved world_layout_autosave
+  try { const cfg = await api('/api/world/settings'); const s = cfg?.settings || {};
+        const on = (s.world_layout_autosave ?? '1') !== '0';
+        window._wmLayoutAutosave = on; const cb = document.getElementById('world-autosave-cb'); if (cb) cb.checked = on;
+        const rf = parseFloat(s.world_roof_fade_zoom); window._wmRoofFade = (isFinite(rf) && rf > 0) ? rf : 1.15;
+        const nb = parseFloat(s.world_night_brightness); window._wmNightBright = (isFinite(nb) && nb >= 0) ? nb : 1; }
+  catch { window._wmLayoutAutosave = true; window._wmRoofFade = 1.15; }
   if (window.WN && WN.ready) WN.spawn(12);               // populate the town with wanderers
   if (window.WW) WW.spawn(() => {                        // wildlife + who scares it
     const w = Object.values(_sprites).map(s => ({ x: s.px, y: s.py }));
@@ -306,6 +371,9 @@ async function renderWorld() {
       // agents' bought furniture (world_placements) grabs like any small item
       const plc = (typeof _placementNear === 'function') && _placementNear(w.x, w.y);
       if (plc) { _edit.pdrag = { type: 'placement', p: plc.p }; _edit.pghost = { type: 'placement', p: plc.p, x: w.x, y: w.y }; return true; }
+      // agent-built structures (world_structures) grab like any small item
+      const str = (typeof _structureNear === 'function') && _structureNear(w.x, w.y);
+      if (str) { _edit.pdrag = { type: 'structure', s: str.s }; _edit.pghost = { type: 'structure', s: str.s, x: w.x, y: w.y }; return true; }
       if ((i = WM.decorIndexNear(w.x, w.y)) >= 0) { const h = WM.pickDecor(i); _edit.pdrag = { type: 'decor', kind: h.kind }; _edit.pghost = { type: 'decor', kind: h.kind, x: w.x, y: w.y }; return true; }
       if ((i = WM.nodeIndexNear(w.x, w.y)) >= 0) { const h = WM.pickNode(i); _edit.pdrag = { type: 'node', kind: h.kind }; _edit.pghost = { type: 'node', kind: h.kind, x: w.x, y: w.y }; return true; }
       if ((i = WM.landmarkIndexNear(w.x, w.y)) >= 0) { const h = WM.pickLandmark(i); _edit.pdrag = { type: 'landmark', kind: h.kind, scale: h.scale }; _edit.pghost = { type: 'landmark', kind: h.kind, x: w.x, y: w.y }; return true; }
@@ -324,6 +392,10 @@ async function renderWorld() {
     onEditMove: ev => {
       if (_edit.agentDrag) { const w = _wpt(ev); _edit.agentGhost = { ..._edit.agentGhost, x: w.x, y: w.y }; return true; }
       if (_edit.pdrag) { const w = _wpt(ev); _edit.pghost = { ..._edit.pghost, x: w.x, y: w.y }; return true; }
+      if (_edit.add && _edit.add.indexOf('interior:') === 0) {           // Layer-3: tile-snap ghost so you see where the item lands
+        const w = _wpt(ev), t = WM.worldToTile(w.x, w.y);
+        _edit.addGhost = { col: t.col, row: t.row, add: _edit.add };     // (no return — add mode never pans)
+      }
       if (!_edit.drag || _edit.sel == null) return false;
       const w = _wpt(ev), tile = WM.worldToTile(w.x, w.y);
       const b = WM.buildings.find(x => x.id === _edit.sel); if (!b) return false;
@@ -342,12 +414,13 @@ async function renderWorld() {
       }
       if (_edit.pdrag && _edit.pghost) {                    // drop the held point-entity at the ghost
         const g = _edit.pghost, t = WM.worldToTile(g.x, g.y);
-        if (g.type === 'placement') worldMovePlacement(g.p, g.x, g.y);
-        else if (g.type === 'decor') WM.addDecor(g.x, g.y, g.kind);
-        else if (g.type === 'node') WM.addNode(g.kind, t.col, t.row);
-        else if (g.type === 'landmark') WM.addLandmark(g.kind, t.col, t.row, _edit.pdrag.scale);
+        if (g.type === 'placement') worldMovePlacement(g.p, g.x, g.y);   // placements auto-save via their own endpoint
+        else if (g.type === 'structure') worldMoveStructure(g.s, g.x, g.y);  // structures auto-save via /structure/move
+        else if (g.type === 'decor') { WM.addDecor(g.x, g.y, g.kind); WM.scheduleSave(); }
+        else if (g.type === 'node') { WM.addNode(g.kind, t.col, t.row); WM.scheduleSave(); }
+        else if (g.type === 'landmark') { WM.addLandmark(g.kind, t.col, t.row, _edit.pdrag.scale); WM.scheduleSave(); }
       }
-      if (_edit.drag && _edit.ghost && _edit.sel != null) { WM.moveBuilding(_edit.sel, _edit.ghost.c, _edit.ghost.r); }
+      if (_edit.drag && _edit.ghost && _edit.sel != null) { WM.moveBuilding(_edit.sel, _edit.ghost.c, _edit.ghost.r); WM.scheduleSave(); }
       _edit.drag = null; _edit.ghost = null; _edit.pdrag = null; _edit.pghost = null; _edit.agentDrag = null; _edit.agentGhost = null;
     },
   });

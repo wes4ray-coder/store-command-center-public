@@ -110,6 +110,7 @@ def rpc_wallet(request: Request):
             "address": w["address"], "balance_jly": w["balance"] / jellycoin.UNIT,
             "billing": jellycoin.peer_billing_enabled(),
             "price_per_llm_job_jly": jellycoin.peer_job_price("llm") / jellycoin.UNIT,
+            "price_per_review_jly": jellycoin.peer_job_price("review") / jellycoin.UNIT,
             "recent_txs": txs}
 
 
@@ -147,6 +148,14 @@ def rpc_review(body: RpcReviewIn, request: Request):
             comments = (data.get("comments") if isinstance(data, dict) else None) or out
             _set_review(rid, status="done", llm_vote=vote, llm_comments=str(comments)[:4000],
                         llm_model=getattr(orch, "_current_llm_model", None))
+            # buddy economy: our LLM read their diff → charge their wallet like any
+            # AI job (comped if broke). Billed only on a delivered verdict — an
+            # errored review costs them nothing.
+            try:
+                import jellycoin
+                jellycoin.peer_job_charge(peer["name"], "review")
+            except Exception:
+                pass
             return {"vote": vote}
         except Exception as e:  # a review must never wedge in 'reviewing'
             _set_review(rid, status="error", llm_comments=f"review failed: {e}"[:500])

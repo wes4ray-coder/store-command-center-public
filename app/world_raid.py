@@ -355,6 +355,18 @@ def raid_tick(c, dt):
             pass
         return
     _ensure(c)
+    # SELF-HEAL: a threat whose hp was persisted as 0 (legacy int() truncation of a
+    # sub-1 hp) while status stayed 'active' can never be re-targeted — the fighter/
+    # tower loops only hit hp>0 — so it lingers as a phantom "active" enemy and holds
+    # the raid open until the 3× timeout backstop. Reap any dead-but-active threat so
+    # the field can actually clear and the raid resolves normally.
+    try:
+        reaped = c.execute("UPDATE world_threats SET status='defeated' "
+                           "WHERE status='active' AND hp<=0").rowcount
+        if reaped:
+            _event(c, "raid", f"⚰️ {reaped} fallen attacker(s) cleared from the field.")
+    except Exception:
+        pass
     raid_id = int(float(mget(c, "raid_counter", 0) or 0))
     wave = int(float(mget(c, "raid_wave", 1) or 1))
     last_wave = float(mget(c, "last_wave_t", 0) or 0)
@@ -549,7 +561,10 @@ def raid_tick(c, dt):
             _tally(c, "🏹 Watchtower")
             alive.pop(0)
         else:
-            c.execute("UPDATE world_threats SET hp=? WHERE id=?", (int(t["hp"]), t["id"]))
+            # floor of 1: a still-living threat (this branch is hp>0) must never persist
+            # as hp=0, or it drops out of the hp>0 target list yet stays status='active'
+            # and wedges the raid open forever (never re-hit → never _defeat).
+            c.execute("UPDATE world_threats SET hp=? WHERE id=?", (max(1, round(t["hp"])), t["id"]))
 
     # FIGHTERS (v3): individual DUELS — each fighter locks a target and lands
     # their OWN damage (skill + blessing + drilled readiness + organised-line
@@ -580,7 +595,10 @@ def raid_tick(c, dt):
                 pass
             alive = [x for x in alive if x["id"] != t["id"]]
         else:
-            c.execute("UPDATE world_threats SET hp=? WHERE id=?", (int(t["hp"]), t["id"]))
+            # floor of 1: a still-living threat (this branch is hp>0) must never persist
+            # as hp=0, or it drops out of the hp>0 target list yet stays status='active'
+            # and wedges the raid open forever (never re-hit → never _defeat).
+            c.execute("UPDATE world_threats SET hp=? WHERE id=?", (max(1, round(t["hp"])), t["id"]))
 
 
 # ── readiness (drills matter) + kill tally + turret helpers ──────────────────

@@ -92,9 +92,15 @@ function _stateBadge(ctx, a, x, y, top) {
    their tool overlay carries the action instead. */
 function _actionOf(a) {
   if (a.state === 'skilling') {
+    // Map EVERY gatherable location to its own tool. `hunt` was added to the
+    // backend skills but was missing here — hunters fell through to the pickaxe
+    // default and swung a pick over the (art-less) hunt node = "swinging at
+    // nothing". Unknown locations no longer swing (swing:0) so a stray skilling
+    // spot never phantom-pickaxes.
     return { woodcut: { key: 'chop', swing: 1 }, mine: { key: 'mine', swing: 1 },
              build: { key: 'build', swing: 1 }, farm: { key: 'farm', swing: 0 },
-             fish: { key: 'fish', swing: 0 } }[a.location] || { key: 'mine', swing: 1 };
+             fish: { key: 'fish', swing: 0 }, hunt: { key: 'hunt', swing: 0 } }[a.location]
+           || { key: 'build', swing: 0 };
   }
   if (a.state === 'defending')
     return a.role === 'build' ? { key: 'build', swing: 1 }
@@ -140,6 +146,17 @@ function _heldTool(ctx, key, x, y) {
       ctx.strokeStyle = `rgba(160,210,250,${0.5 * (1 - k)})`; ctx.lineWidth = 0.8;
       ctx.beginPath(); ctx.arc(x + 15, y + 6, 2 + k * 6, 0, 6.283); ctx.stroke();
     }
+  } else if (key === 'hunt') {                                              // bow, drawn + released
+    const draw = (Math.sin(t / 700) + 1) / 2;                              // 0..1 nock→loose cycle
+    ctx.strokeStyle = '#7a5230'; ctx.lineWidth = 1.4;
+    ctx.beginPath(); ctx.arc(x + 7, y - 8, 6, -1.1, 1.1); ctx.stroke();    // bow limb
+    ctx.strokeStyle = 'rgba(230,235,245,.7)'; ctx.lineWidth = 0.8;         // string, pulled back when drawing
+    const sx = x + 7 + Math.cos(-1.1) * 6, sy = y - 8 + Math.sin(-1.1) * 6;
+    const ex = x + 7 + Math.cos(1.1) * 6, ey = y - 8 + Math.sin(1.1) * 6;
+    const nk = x + 2 - draw * 3;                                           // nock point
+    ctx.beginPath(); ctx.moveTo(sx, sy); ctx.lineTo(nk, y - 8); ctx.lineTo(ex, ey); ctx.stroke();
+    ctx.strokeStyle = '#caa06a'; ctx.lineWidth = 1;                        // arrow shaft
+    ctx.beginPath(); ctx.moveTo(nk, y - 8); ctx.lineTo(x + 13, y - 8); ctx.stroke();
   } else if (key === 'farm') {                                              // slow hoe sweep
     const ang = 0.5 + Math.sin(t / 520) * 0.45;
     ctx.translate(x + 5, y - 9); ctx.rotate(ang);
@@ -214,7 +231,11 @@ function _character(ctx, s, moving) {
   // animation — no more pickaxing at fish, deskwork or books. Each action also
   // gets a matching held TOOL drawn in-hand.
   const ACT = _actionOf(a);
-  const mode = ACT && ACT.swing ? 'work' : (moving ? 'walk' : 'idle');
+  // Only STRIKE when planted at the task. A skilling agent keeps its state the
+  // whole walk over to its node, so gating the swing on !moving stops agents
+  // from "walking around swinging a pickaxe" en route — they walk, then strike
+  // once they arrive on the node.
+  const mode = ACT && ACT.swing && !moving ? 'work' : (moving ? 'walk' : 'idle');
   const facing = ACT ? 'down' : dir;                     // face the task while acting
   // fighters lunge forward at the enemy; builders hold at the wall
   let lx = 0, ly = 0;

@@ -42,10 +42,20 @@ async def login_page(request: Request, error: str = ""):
     # another machine the browser silently drops it and login "does nothing".
     # Warn up front instead of letting the user fail mysteriously.
     try:
+        # Detect real HTTPS through the whole proxy chain, not just X-Forwarded-Proto
+        # (nginx-proxy-manager / Cloudflare don't always forward it). Cloudflare sends
+        # `CF-Visitor: {"scheme":"https"}`; also honour Forwarded and the direct scheme.
         fwd_proto = (request.headers.get("x-forwarded-proto") or "").lower()
-        scheme = fwd_proto or request.url.scheme
+        cf_visitor = (request.headers.get("cf-visitor") or "").replace(" ", "").lower()
+        forwarded = (request.headers.get("forwarded") or "").lower()
+        is_https = (
+            fwd_proto == "https"
+            or request.url.scheme == "https"
+            or '"scheme":"https"' in cf_visitor
+            or "proto=https" in forwarded
+        )
         host = (request.url.hostname or "").lower()
-        if scheme == "http" and host not in ("localhost", "127.0.0.1", "::1"):
+        if (not is_https) and host not in ("localhost", "127.0.0.1", "::1"):
             block += ('<div class="err" style="background:#3a2f14;border-color:#6a5a2a;color:#e8d49a">'
                       '⚠️ <b>Plain HTTP from another machine</b> — the secure session cookie can\'t be set, '
                       'so signing in will silently fail.<br>Use HTTPS (see <code>deploy/caddy/</code> for a '

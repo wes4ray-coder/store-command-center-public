@@ -72,7 +72,9 @@ def transfer_nft(token_id: str, frm: str, dst: str) -> dict:
 # JLY is the working coin of the peer network: when a buddy's box does AI work
 # for us (client.delegate_llm), our treasury PAYS their peer:<name> wallet; when
 # a buddy runs a job on OUR AI helper (rpc_job), their wallet is CHARGED into the
-# company wallet. A broke buddy is never blocked — the job runs comped (amount-0
+# company wallet. Code reviews bill the same way (rpc_review charges, the
+# requester's refresh credits) — a review is our LLM's time spent on their diff.
+# A broke buddy is never blocked — the job runs comped (amount-0
 # tx keeps the tab) because compute sharing must not break over play money.
 PEER_BILLING_KEY = "jelly_peer_billing"            # settings toggle, default on
 PEER_PRICE_KEY = "jelly_peer_job_price_jly"        # JLY per llm job, default 1
@@ -84,7 +86,8 @@ def peer_billing_enabled() -> bool:
 
 
 def peer_job_price(kind: str = "llm") -> int:
-    """Price in ujly. Embeddings are 1/10th of an llm job (they borrow, never swap)."""
+    """Price in ujly. Embeddings are 1/10th of an llm job (they borrow, never swap);
+    a code review ("review") bills like a full llm job — their diff, our model's time."""
     import jellycoin
     try:
         jly = float(get_setting(PEER_PRICE_KEY) or PEER_PRICE_DEFAULT)

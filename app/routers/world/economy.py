@@ -35,6 +35,30 @@ def world_move_placement(body: dict = Body(...)):
         conn.close()
 
 
+@router.post("/api/world/structure/move")
+def world_move_structure(body: dict = Body(...)):
+    """Play-god editor: drag an agent-built structure to an exact spot.
+    {id, x, y} — x/y null resets it to its computed slot position."""
+    sid = body.get("id")
+    if sid is None:
+        raise HTTPException(400, "id required")
+    x, y = body.get("x"), body.get("y")
+    if (x is None) != (y is None):
+        raise HTTPException(400, "x and y go together")
+    conn = get_conn()
+    try:
+        c = conn.cursor()
+        moved = world_construct.move_structure(c, int(sid),
+                                               None if x is None else float(x),
+                                               None if y is None else float(y))
+        if not moved:
+            raise HTTPException(404, "no such structure")
+        conn.commit()
+        return {"ok": True}
+    finally:
+        conn.close()
+
+
 @router.post("/api/world/stock/target")
 def world_set_stock_target(body: dict = Body(...)):
     """Set keep floor..ceil for a resource. Agents auto-gather it when below floor, stop at ceil."""

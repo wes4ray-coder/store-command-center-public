@@ -275,6 +275,15 @@ def refresh_review_request(rid: int):
     # the friend's HUMAN vote can land after their LLM verdict — record it when it appears
     new_human_vote = bool(remote.get("human_vote")) and remote.get("human_vote") != req["human_vote"]
     _set_row("peer_review_requests", rid, **fields)
+    if first_verdict:
+        # buddy economy: their box reviewed our diff → treasury pays their wallet,
+        # same as a delegated llm job. Once, when the verdict first lands; a later
+        # human vote on the same review is not billed again.
+        try:
+            import jellycoin
+            jellycoin.peer_job_credit(peer["name"], "review")
+        except Exception:
+            pass
     if first_verdict or new_human_vote:
         import swarm
         vote = remote.get("human_vote") or remote.get("llm_vote")

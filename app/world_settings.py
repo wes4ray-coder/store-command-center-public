@@ -47,6 +47,10 @@ DEFAULTS = {
     "world_leader_upgrade_hours": "12",
     # world
     "world_theme":            "futuristic",
+    # play-god MAP EDITS: auto-persist hand edits (move/resize/add/delete buildings,
+    # decor, work nodes, landmarks) shortly after each change so they survive a
+    # tab-flip/reload/restart. ON by default; off → only the 💾 Save button persists.
+    "world_layout_autosave":  "1",
     # progressive tileset painting: agents slowly replace ONE procedural terrain
     # tile at a time (QA + style-gated; world_tileset.auto_tick). Off by default.
     "world_tileset_auto":     "0",
@@ -55,11 +59,34 @@ DEFAULTS = {
     # (terrain LOGIC stays on the grid). OFF by default — procedural terrain
     # shows until this is on AND an image has been generated (world_terrain.py).
     "world_terrain_image_enabled": "0",
+    # Layer 2b: ONE shared generated interior-floor texture blitted under every
+    # building interior (tinted per kind so buildings still read distinct). OFF by
+    # default — the procedural per-kind tint floor shows until this is on AND a
+    # floor image has been generated (world_floors.py).
+    "world_floor_image_enabled": "0",
     # pixel-art sprite generation — the model+LoRA the world-builder renders with.
     # empty model = the store's default image model. LoRA format "file:strength"
     # (must exist in the ComfyUI loras dir on the GPU box).
     "world_prop_model":       "",
     "world_prop_lora":        "pixel-art-xl.safetensors:0.9",
+    # background-removal (matte) model that cuts world props/sprites out to a
+    # transparent PNG in the ComfyUI workflow (generate.sh arg 10). Empty =
+    # auto-detect whatever bg-removal model is installed on the box (e.g.
+    # birefnet.safetensors); "off" = disable and rely on the flood-fill knockout.
+    "world_prop_matte":       "",
+    # ROOF CUTAWAY: camera-zoom scale at which roofs START fading to reveal interiors
+    # (fade completes ~0.4x above it). Lower = interiors reveal sooner / further out.
+    # Default 1.15 (was a hard-coded 2.4 that forced you to zoom almost fully in).
+    "world_roof_fade_zoom":   "1.15",
+    # night darkness of the world view: 1 = default readable night, lower = darker,
+    # 0 = brightest (surfaced as window._wmNightBright in the renderer).
+    "world_night_brightness": "1",
+    # MOON: the drifting moon + its ground shadow (world-sky.js). On by default (a sky
+    # object, night-gated). world_moon_daytime shows it in daylight too (a preview so you
+    # don't have to wait for sim-night). A generated texture (world_moon.py) swaps into
+    # the procedural cratered disc when present.
+    "world_moon_enabled":     "1",
+    "world_moon_daytime":     "0",
 }
 
 INT_KEYS = {"world_llm_interval_min", "world_active_start", "world_active_end",
@@ -70,7 +97,9 @@ INT_KEYS = {"world_llm_interval_min", "world_active_start", "world_active_end",
 BOOL_KEYS = {"world_llm_enabled", "world_meetings_enabled", "world_incidents_enabled",
              "world_allow_free", "world_require_review", "world_vision_enabled",
              "world_crypto_mining_enabled", "world_bills_drive", "world_music_lyrics",
-             "world_leader_upgrades", "world_tileset_auto", "world_terrain_image_enabled"}
+             "world_leader_upgrades", "world_tileset_auto", "world_terrain_image_enabled",
+             "world_floor_image_enabled", "world_layout_autosave",
+             "world_moon_enabled", "world_moon_daytime"}
 
 
 def get_all(conn=None):

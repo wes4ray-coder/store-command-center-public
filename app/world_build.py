@@ -55,24 +55,76 @@ def _knockout_bg(im, tol=26):
 
 def _pixelate(src, dst, cells=64, colors=24):
     """Turn a soft SDXL render into a crisp pixel-art sprite: centre-crop square,
-    nearest-neighbour downscale to `cells`px, quantise the palette, then knock the
-    flat background out to transparency. The canvas upscales it with
-    image-rendering:pixelated."""
+    nearest-neighbour downscale to `cells`px, quantise the palette, then make the
+    background transparent. The canvas upscales it with image-rendering:pixelated.
+
+    If the render already carries a real alpha channel — the BiRefNet matte cut the
+    subject out IN the ComfyUI workflow (generate.sh arg 10) — we carry that mask
+    through the downscale instead of guessing the background with a flood-fill. Only
+    when there's no matte (busy/non-flat background survives) do we fall back to the
+    border flood-fill knockout."""
     from PIL import Image
-    im = Image.open(src).convert("RGB")
+    src_im = Image.open(src)
+    alpha = None
+    if src_im.mode in ("RGBA", "LA") or (src_im.mode == "P" and "transparency" in src_im.info):
+        rgba = src_im.convert("RGBA")
+        a = rgba.getchannel("A")
+        lo, hi = a.getextrema()
+        # a genuine matte cutout has transparent pixels (lo≈0) AND an opaque subject
+        # (hi≈255); a fully-opaque render (lo==hi==255) means no matte was applied.
+        if lo < 16 and hi > 200:
+            alpha, src_im = a, rgba
+
+    im = src_im.convert("RGB")
     w, h = im.size
     s = min(w, h)
-    im = im.crop(((w - s) // 2, (h - s) // 2, (w - s) // 2 + s, (h - s) // 2 + s))
-    im = im.resize((cells, cells), Image.NEAREST)
+    box = ((w - s) // 2, (h - s) // 2, (w - s) // 2 + s, (h - s) // 2 + s)
+    im = im.crop(box).resize((cells, cells), Image.NEAREST)
     im = im.quantize(colors=colors, method=Image.MEDIANCUT).convert("RGB")
-    cut = _knockout_bg(im)
-    # safety net: if the sprite's own colours matched the background, the flood
-    # fill eats the object — in that case ship it opaque rather than shredded.
-    opaque = sum(1 for p in cut.getdata() if p[3] > 0)
-    if opaque < cells * cells * 0.22:
+
+    if alpha is not None:
+        # matte path: crop+downscale the existing mask the same way, hard-threshold it
+        # to keep pixel-art edges crisp, and stamp it onto the quantised sprite.
+        a = alpha.crop(box).resize((cells, cells), Image.NEAREST).point(lambda v: 255 if v >= 128 else 0)
         cut = im.convert("RGBA")
+        cut.putalpha(a)
+    else:
+        cut = _knockout_bg(im)
+        # safety net: if the sprite's own colours matched the background, the flood
+        # fill eats the object — in that case ship it opaque rather than shredded.
+        opaque = sum(1 for p in cut.getdata() if p[3] > 0)
+        if opaque < cells * cells * 0.22:
+            cut = im.convert("RGBA")
     dst.parent.mkdir(parents=True, exist_ok=True)
     cut.save(dst)
+
+
+_matte_cache = {"name": None, "t": 0.0}
+
+def _matte_model():
+    """The background-removal model that cuts props out to a transparent PNG in the
+    ComfyUI workflow (generate.sh arg 10). Setting `world_prop_matte`: a model name
+    to force, "off"/"none" to disable, or empty to auto-detect whatever bg-removal
+    model is installed on the box (prefers BiRefNet). Cached 2 min — it's an HTTP
+    round-trip to the box. Returns "" when nothing is installed (→ flood-fill fallback)."""
+    val = ws.s("world_prop_matte").strip()
+    if val.lower() in ("off", "none", "disabled", "0"):
+        return ""
+    if val:
+        return val
+    now = time.time()
+    if _matte_cache["name"] is not None and now - _matte_cache["t"] < 120:
+        return _matte_cache["name"]
+    name = ""
+    try:
+        import gen_models
+        inst = gen_models._installed().get("matte") or set()
+        pref = sorted(inst, key=lambda m: (0 if "biref" in m.lower() else 1, m))
+        name = pref[0] if pref else ""
+    except Exception:
+        logger.exception("matte model auto-detect failed — using flood-fill knockout")
+    _matte_cache.update(name=name, t=now)
+    return name
 
 
 def _make_sheet(final, frames=4):
@@ -99,6 +151,7 @@ def _render_candidates(prop_id, prompt, n):
     out = []
     model = ws.s("world_prop_model") or DEFAULT_IMAGE_MODEL
     lora = ws.s("world_prop_lora")            # "" disables; needs the file on the GPU box
+    matte = _matte_model()                    # BiRefNet cutout → transparent sprite (else flood-fill)
     orch.image_acquire()
     try:
         for k in range(n):
@@ -106,7 +159,7 @@ def _render_candidates(prop_id, prompt, n):
             seed = str(random.randint(1, 2**31 - 1))
             try:
                 res = subprocess.run(
-                    [str(GENERATE_SCRIPT), prompt, str(raw), "768", "768", "8", seed, model, lora],
+                    [str(GENERATE_SCRIPT), prompt, str(raw), "768", "768", "8", seed, model, lora, "", matte],
                     capture_output=True, text=True, timeout=300)
                 if res.returncode == 0 and raw.exists():
                     cand = WORLD_ASSETS / f"prop_{prop_id}_c{len(out)}.png"
@@ -310,7 +363,7 @@ def _generate_agent_sprite(agent_id: int):
         import random as _r
         res = subprocess.run([str(GENERATE_SCRIPT), prompt, str(raw), "768", "768", "8",
                               str(_r.randint(1, 2**31 - 1)), DEFAULT_IMAGE_MODEL,
-                              ws.s("world_prop_lora")],
+                              ws.s("world_prop_lora"), "", _matte_model()],
                              capture_output=True, text=True, timeout=300)
         if res.returncode != 0 or not raw.exists():
             logger.error("agent sprite %s failed: %s", a["key"], (res.stderr or "")[:160])
