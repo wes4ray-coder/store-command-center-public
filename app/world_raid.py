@@ -284,6 +284,7 @@ def trigger_raid(c, reason="security alert", drill=False):
         c.execute("INSERT INTO world_walls(side,hp,max_hp) VALUES(?,?,?) "
                   "ON CONFLICT(side) DO UPDATE SET hp=?, max_hp=?", (side, wstart, wmax, wstart, wmax))
     _reset_combat(c)                         # everyone at full HP, nobody downed
+    mset(c, "last_raid_t", time.time())      # stamp the cooldown clock (keeps raids occasional)
     WO.set_phase(c, "raid", reason)
     _event(c, "raid", "🚨 RAID — the perimeter is under attack! Fighters to the front, builders to the walls.")
     if shield is not None:
@@ -460,6 +461,7 @@ def raid_tick(c, dt):
     cover_frac = (sum(w["hp"] for w in wl.values()) /
                   (sum(w["max_hp"] for w in wl.values()) or 1))
     breach_dps = 0.0
+    smash_waves = 0                              # boss shockwaves this tick (cover-piercing, flat chip)
     weakest = min(wl, key=lambda s: wl[s]["hp"]) if wl else "S"
     wounded_mobs = sorted((t for t in threats if t["hp"] < t["max_hp"]), key=lambda t: t["hp"])
     for t in threats:
@@ -488,21 +490,30 @@ def raid_tick(c, dt):
             last_sm = float(mget(c, "boss_smash_t", 0) or 0)
             if now - last_sm >= BOSS_SMASH_EVERY:
                 mset(c, "boss_smash_t", now)
-                breach_dps += BOSS_SMASH_CHIP * len([k for k in keys if not down[k]]) / max(m, 1e-6) * (1 / 60.0)
+                smash_waves += 1
                 _event(c, "raid", f"💥 The {t['label']} slams the ground — the whole line staggers!")
 
-    # damage that lands on the defenders, reduced by remaining cover, spread over the living
-    incoming = breach_dps * BASE_ENEMY_MELEE * (1.0 - COVER_MAX * cover_frac) * m
     # the FRONT LINE (who the breach can maul) is fight/build by role — medics stay back
     # tending the wounded, so they're not pulled into the damage line by the offense fallback.
     front = [k for k in keys if roles.get(k) in ("fight", "build") and not down[k]]
+    # damage that lands on the defenders, reduced by remaining cover, spread over the living
+    incoming = breach_dps * BASE_ENEMY_MELEE * (1.0 - COVER_MAX * cover_frac) * m
+    # BOSS SHOCKWAVE (through cover, per the design): a flat CHIP on EVERY front-liner
+    # per slam. The old form routed it through breach_dps with a stray 1/60 factor AND
+    # the cover multiplier — the m's cancelled to ~0.008 HP/agent, i.e. the shockwave
+    # visually fired but never actually hurt anyone. Now it lands as designed.
+    chip = BOSS_SMASH_CHIP * smash_waves
     # FOCUS FIRE: enemies concentrate on the most-exposed (lowest-HP) defender, dropping
     # them one at a time — so medics can revive individuals while the rest hold the line.
     for k in sorted(front, key=lambda k: hp[k]):
-        if incoming <= 0:
+        if incoming <= 0 and chip <= 0:
             break
-        dealt = min(hp[k], incoming)
-        incoming -= dealt
+        dealt = chip                              # the slam staggers everyone equally
+        take = min(hp[k], incoming)
+        incoming -= take
+        dealt += take
+        if dealt <= 0:
+            continue
         hp[k] = max(0.0, hp[k] - dealt)
         if hp[k] <= 0 and not down[k]:
             down[k] = True
@@ -666,8 +677,21 @@ def maybe_trigger(c):
             "AND created_at > datetime('now','-2 hours')").fetchone()[0] or 0)
     except Exception:
         pass
-    if issues >= 2 or alerts:
-        trigger_raid(c, reason="audit regression alert" if alerts else "subsystem failures detected")
+    # Keep raids OCCASIONAL. A real COOLDOWN between raids was missing — only the 5-min
+    # SCAN was throttled, so routine job flakiness re-raided every ~5 min (raid→recovery→
+    # peace→raid). Tunable via world_raid_min_gap_min (default 60 min).
+    try:
+        gap_min = int(ws.i("world_raid_min_gap_min") or 60)
+    except Exception:
+        gap_min = 60
+    last_raid = float(mget(c, "last_raid_t", 0) or 0)
+    in_cooldown = bool(last_raid) and (now - last_raid) < gap_min * 60
+    # Only a genuine SPIKE or a high/critical alert becomes a raid — NOT 2-3 steady-state
+    # failed generation jobs (normal GPU contention). Sub-threshold trouble is amber "watch"
+    # (unease, no combat), which is the honest signal without a full assault every few minutes.
+    real_attack = bool(alerts) or issues >= 4
+    if real_attack and not in_cooldown:
+        trigger_raid(c, reason="audit regression alert" if alerts else "attack detected")
     elif issues:
         WO.set_phase(c, "watch", "a subsystem is failing")
     elif ph == "watch":

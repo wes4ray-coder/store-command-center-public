@@ -82,6 +82,13 @@ PEER_PRICE_DEFAULT = 1.0
 
 
 def peer_billing_enabled() -> bool:
+    # A JOINED node runs no chain of its own, so it has no ledger to bill on — the
+    # economy it takes part in is the home node's, and that node does the billing.
+    # Without this the transfers would just fail into "comped"/"treasury empty" on
+    # every job, which reads like a broken wallet rather than a deliberate mode.
+    import jellycoin
+    if jellycoin.jelly_mode() == "joined":
+        return False
     return str(get_setting(PEER_BILLING_KEY) or "1") in ("1", "true", "on")
 
 

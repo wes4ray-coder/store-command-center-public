@@ -231,6 +231,24 @@ def jelly_peer_billing_set(payload: dict = Body(...)):
 
 
 # ── buddy-share mining pool (proportional reward splitting; toggle default OFF) ─
+@router.get("/api/jelly/mode")
+def jelly_mode_get():
+    """Are we hosting our own chain, or participating on a buddy's network?"""
+    return {"mode": jellycoin.jelly_mode(), "home_peer": jellycoin.jelly_home_peer(),
+            "chain_is_used": jellycoin.chain_is_used()}
+
+
+@router.post("/api/jelly/mode")
+def jelly_mode_set(payload: dict = Body(...)):
+    """Found our own chain, or join a buddy's. Joining is refused once our own
+    chain has been used — see set_jelly_mode."""
+    try:
+        return jellycoin.set_jelly_mode(str(payload.get("mode", "")),
+                                        str(payload.get("home_peer", "")))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
 @router.get("/api/jelly/pool")
 def jelly_pool():
     return jellycoin.pool_state()

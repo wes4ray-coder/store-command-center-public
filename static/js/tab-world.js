@@ -61,6 +61,7 @@ function _assignHouses(agents) {
 function _stopWorld() {
   _saveWorldVisuals();
   document.getElementById('world-snd-pop')?.remove();   // mixer popover dies with the view
+  if (_worldView.ro) { try { _worldView.ro.disconnect(); } catch {} _worldView.ro = null; }  // canvas ResizeObserver
   if (window.WM && WM.detachControls) WM.detachControls();   // release window drag listeners (canvas-memory leak)
   if (_worldTimers.raf)   cancelAnimationFrame(_worldTimers.raf);
   if (_worldTimers.poll)  clearInterval(_worldTimers.poll);
@@ -127,6 +128,7 @@ function _startWorldLoops() {
       if (window.WW) WW.tick(dt);
       if (window.WF) WF.tick(dt, (_worldState && _worldState.activity) || {});
       _drawWorld(ctx, canvas);
+      if (!loop._shown) { loop._shown = true; _hideWorldLoading(); }   // fade the loader out on the first real frame
     } catch (e) {                                 // a single bad frame must not freeze the world
       if (!loop._warned) { console.error('[world] frame draw error (continuing):', e); loop._warned = true; }
     }
@@ -146,58 +148,105 @@ document.addEventListener('visibilitychange', () => {
   }
 });
 
-// ── Fullscreen the game: request FS on the canvas WRAPPER (excludes the stats
-// panel) so the town fills the screen; the canvas keeps width:100% so it spans
-// the wrapper, and we grow its height to 100vh while fullscreen. ─────────────
+// ── Browser-fullscreen: the game already owns the whole tab (#8 game-first
+// layout); this takes it the last step to the whole SCREEN. FS on the STAGE so
+// the HUD overlays ride along; the canvas is width/height:100% either way. ───
 function worldFullscreen() {
-  const wrap = document.getElementById('world-canvas-wrap');
-  if (!wrap) return;
+  const stage = document.getElementById('world-stage');
+  if (!stage) return;
   if (document.fullscreenElement) { try { document.exitFullscreen(); } catch {} }
-  else { try { const p = wrap.requestFullscreen(); if (p && p.catch) p.catch(() => {}); } catch (e) { toast?.('Fullscreen not available'); } }
+  else { try { const p = stage.requestFullscreen(); if (p && p.catch) p.catch(() => {}); } catch (e) { toast?.('Fullscreen not available'); } }
 }
 window.worldFullscreen = worldFullscreen;
 
 // The canvas backing store is sized from clientWidth/clientHeight in _resize()
-// (not per-frame), so on enter/exit we grow/shrink the canvas, re-run _resize,
-// then WM.fit() to recompute the camera to the new dimensions. Esc (native FS
-// exit) fires fullscreenchange too, so the same handler restores the size.
+// (not per-frame), so on enter/exit we re-run _resize, then WM.fit() to
+// recompute the camera to the new dimensions. Esc (native FS exit) fires
+// fullscreenchange too, so the same handler covers both directions.
 document.addEventListener('fullscreenchange', () => {
-  const wrap = document.getElementById('world-canvas-wrap');
+  const stage = document.getElementById('world-stage');
   const cv = document.getElementById('world-canvas');
-  if (!wrap || !cv) return;
-  const fs = document.fullscreenElement === wrap;
-  cv.style.height = fs ? '100vh' : '600px';
-  wrap.style.borderRadius = fs ? '0' : '12px';
+  if (!stage || !cv) return;
+  const fs = document.fullscreenElement === stage;
   const btn = document.getElementById('world-fs-btn');
-  if (btn) btn.innerHTML = fs ? '⛶ Exit fullscreen' : '⛶ Fullscreen';
+  if (btn) btn.classList.toggle('on', fs);
   requestAnimationFrame(() => {                          // let layout settle first
     if (window._worldResize) window._worldResize();
     if (window.WM && WM.fit) WM.fit(cv._cssW || cv.clientWidth, cv._cssH || cv.clientHeight);
   });
 });
 
+/* world-hud.js is loaded on demand as a classic script (index.html untouched).
+   Reuse the ?v= cache-bust stamp THIS script was served with, so the HUD file
+   updates in lock-step with the rest of the app (never hand-write a ?v=). */
+let _hudLoadP = null;
+function _loadWorldHud() {
+  if (window.WHUD) return Promise.resolve();
+  if (_hudLoadP) return _hudLoadP;
+  _hudLoadP = new Promise((resolve, reject) => {
+    const own = document.querySelector('script[src*="js/tab-world.js"]');
+    const q = own && own.src.indexOf('?') > 0 ? own.src.slice(own.src.indexOf('?')) : '';
+    const s = document.createElement('script');
+    s.src = (typeof API !== 'undefined' ? API : '/store') + '/static/js/world-hud.js' + q;
+    s.onload = resolve;
+    s.onerror = () => { _hudLoadP = null; reject(new Error('world-hud.js unreachable')); };
+    document.head.appendChild(s);
+  });
+  return _hudLoadP;
+}
+
+/* ── loading screen ───────────────────────────────────────────────────────────
+   The world does real async work on open (sprite packs, tileset/building atlases,
+   layout + generated terrain/floor/moon fetch & decode, the bake) — a bare black
+   canvas for a second reads as "broken". A themed overlay (an orbiting-moon loader,
+   nodding to the space layers) covers it, updates through the stages, and fades out
+   on the FIRST painted frame so there's never a black flash. */
+function _ensureWorldLoadingCSS() {
+  if (document.getElementById('world-loading-css')) return;
+  const st = document.createElement('style'); st.id = 'world-loading-css';
+  st.textContent =
+    '@keyframes wl-spin{to{transform:rotate(360deg)}}' +
+    '@keyframes wl-bob{0%,100%{opacity:.5}50%{opacity:1}}' +
+    '#world-loading .wl-orbit{position:relative;width:72px;height:72px;animation:wl-spin 2.8s linear infinite}' +
+    '#world-loading .wl-planet{position:absolute;top:50%;left:50%;width:38px;height:38px;margin:-19px 0 0 -19px;border-radius:50%;background:radial-gradient(circle at 32% 28%,#4a90e0,#2f6bb0 60%,#173a66);box-shadow:0 0 22px rgba(74,144,224,.45)}' +
+    '#world-loading .wl-moon{position:absolute;top:-2px;left:50%;width:13px;height:13px;margin-left:-6px;border-radius:50%;background:radial-gradient(circle at 35% 30%,#f2f0e6,#b9b6a4);box-shadow:0 0 8px rgba(240,238,225,.4)}' +
+    '#world-loading .wl-dots{animation:wl-bob 1.5s ease-in-out infinite}';
+  document.head.appendChild(st);
+}
+function _worldLoad(msg) {
+  const el = document.getElementById('world-loading-msg');
+  if (el) el.textContent = msg;
+}
+function _hideWorldLoading() {
+  const ov = document.getElementById('world-loading');
+  if (!ov) return;
+  ov.style.opacity = '0';
+  setTimeout(() => { ov.remove(); }, 600);
+}
+
 async function renderWorld() {
   _stopWorld();                  // clean any prior instance
+  _ensureWorldLoadingCSS();
   // keep _sprites/_selectedId — agents resume from where they stood and the
   // inspector stays on the same character across tab switches
 
+  /* GAME-FIRST LAYOUT (#8): the canvas fills the ENTIRE tab (the old
+     view-header/boxed-wrap/side-panels are gone); everything else is a floating
+     HUD overlay built by world-hud.js (toolbar of toggles + draggable panels).
+     The -24px margins cancel .main-scroll's padding so the stage is edge-to-edge;
+     height:calc(100% + 48px) resolves against the scroller's content box, i.e.
+     exactly the visible tab height. */
   const h = `
-  <div class="view-header">
-    <div class="view-title">🏙️ The Company</div>
-    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-      <span id="world-clock" class="pill">—</span>
-      <span id="world-season" class="pill" title="Season & town phase">—</span>
-      <span id="world-activity" style="font-size:.8rem;color:var(--muted)"></span>
-      <button class="btn" id="world-think-btn" style="padding:6px 12px">💭 Provoke a thought</button>
-      <button class="btn" id="world-snd-btn" style="padding:6px 10px" title="Sound mixer — ambient + effects react to the live world" onclick="worldSndPanel()">🔊</button>
-      <button class="btn" id="world-god-btn" style="padding:6px 12px" onclick="worldToggleEdit()">🛠️ Play God</button>
-      <button class="btn" id="world-fs-btn" style="padding:6px 12px" title="Fullscreen the game canvas (Esc to exit)" onclick="worldFullscreen()">⛶ Fullscreen</button>
-      <button class="btn" style="padding:6px 14px;position:relative;background:#2a1f4a;border-color:#6d5aff;color:#c4b5fd;font-weight:600"
-        title="Prayers · Workboard · Control · Republic · Finances · Settings — everything in one console" onclick="worldConsole('god')">🏛️ God Console
-        <span id="world-god-badge" style="display:none;position:absolute;top:-6px;right:-6px;background:#ef4444;color:#fff;border-radius:10px;font-size:.62rem;font-weight:700;padding:1px 6px;min-width:16px;text-align:center"></span></button>
+  <div id="world-stage" style="position:relative;margin:-24px;height:calc(100% + 48px);min-height:420px;overflow:hidden;background:#0a0f1a">
+    <div id="world-canvas-wrap" style="position:absolute;inset:0;background:#0a0f1a">
+      <canvas id="world-canvas" style="width:100%;height:100%;display:block;image-rendering:pixelated;cursor:grab"></canvas>
     </div>
-  </div>
-  <div id="world-editbar" style="display:none;gap:6px;align-items:center;flex-wrap:wrap;padding:8px 16px;background:#131a28;border-bottom:1px solid #26324a;font-size:.76rem;color:#c7d2e5">
+    <div id="world-loading" style="position:absolute;inset:0;z-index:60;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:15px;background:radial-gradient(ellipse at center,#101a2e,#070b12);transition:opacity .55s ease">
+      <div class="wl-orbit"><div class="wl-planet"></div><div class="wl-moon"></div></div>
+      <div style="font-weight:750;font-size:1.05rem;color:#e8eefc;letter-spacing:.02em">🏙️ The Company</div>
+      <div id="world-loading-msg" class="wl-dots" style="font-size:.8rem;color:#8aa2c4;font-family:ui-monospace,monospace">Waking the town…</div>
+    </div>
+  <div id="world-editbar" style="display:none;position:absolute;top:42px;left:0;right:0;z-index:25;gap:6px;align-items:center;flex-wrap:wrap;padding:8px 16px;background:rgba(19,26,40,.94);border-bottom:1px solid #26324a;font-size:.76rem;color:#c7d2e5">
     <b style="color:#a78bfa">🛠️ God Mode</b>
     <span id="world-editsel" style="color:#7a86a0">— click a building to select</span>
     <span style="margin-left:auto"></span>
@@ -248,27 +297,6 @@ async function renderWorld() {
     <span id="world-autosave-note" style="color:#5db07a;font-size:.68rem;min-width:44px"></span>
     <button class="btn" style="padding:4px 8px" onclick="worldEditReset()">↺ Reset map</button>
   </div>
-  <div style="display:flex;gap:16px;flex-wrap:wrap;align-items:flex-start">
-    <div style="flex:1 1 620px;min-width:320px">
-      <div id="world-canvas-wrap" style="background:#0a0f1a;border:1px solid var(--border,#233);border-radius:12px;padding:0;overflow:hidden">
-        <canvas id="world-canvas" style="width:100%;height:600px;display:block;image-rendering:pixelated;cursor:grab"></canvas>
-      </div>
-      <div style="font-size:.72rem;color:var(--muted);margin-top:6px">
-        🖱️ Drag to pan · scroll to zoom · click a character to inspect. Workers path to their desk when a job runs, then walk home or to town.
-        <button class="btn" style="padding:2px 8px;font-size:.7rem;margin-left:6px" onclick="worldRecenter()">⤢ Recenter</button>
-      </div>
-    </div>
-    <div style="flex:0 1 300px;min-width:260px;display:flex;flex-direction:column;gap:12px">
-      <div id="world-detail" style="background:#131a28;border:1px solid var(--border,#233);border-radius:12px;padding:14px;font-size:.85rem;color:var(--muted)">
-        Select a character to see their stats.
-      </div>
-      <div id="world-townhall" style="background:#131a28;border:1px solid var(--border,#233);border-radius:12px;padding:14px"></div>
-      <div style="background:#131a28;border:1px solid var(--border,#233);border-radius:12px;padding:14px">
-        <div style="font-weight:600;margin-bottom:8px;font-size:.85rem">📜 Town feed</div>
-        <div id="world-feed" style="font-size:.76rem;color:var(--muted);display:flex;flex-direction:column;gap:4px;max-height:280px;overflow:auto"></div>
-      </div>
-    </div>
-  </div>
   <div id="world-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:900;align-items:center;justify-content:center" onclick="if(event.target===this)worldCloseModal()">
     <div style="background:#0f1626;border:1px solid #2a3752;border-radius:12px;max-width:780px;width:92%;max-height:82vh;overflow:auto;padding:18px">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
@@ -278,12 +306,19 @@ async function renderWorld() {
       <div id="world-modal-tabs" style="display:none;gap:4px;flex-wrap:wrap;margin:-2px 0 10px;padding-bottom:8px;border-bottom:1px solid #1b2740"></div>
       <div id="world-modal-body" style="white-space:pre-wrap;font-size:.78rem;color:#c7d2e5;font-family:ui-monospace,monospace;margin:0"></div>
     </div>
+  </div>
   </div>`;
   document.getElementById('main-content').innerHTML = h;
+  // The HUD overlay (toolbar + panels) comes from world-hud.js, loaded on demand
+  // (index.html is untouched). It hosts every control the old view-header had —
+  // same element ids — plus the panel toggles; failure degrades to a bare canvas.
+  try { await _loadWorldHud(); } catch (e) { console.error('[world] HUD failed to load:', e); }
+  if (window.WHUD) { try { WHUD.init(document.getElementById('world-stage')); } catch (e) { console.error('[world] HUD init:', e); } }
   if (window.worldGodRefreshBadge) worldGodRefreshBadge();   // God Console pending-prayer badge
   { const sb = document.getElementById('world-snd-btn');
     if (sb && window.WAU && !WAU.on) sb.textContent = '🔇'; }
 
+  _worldLoad('Loading sprites & tiles…');
   if (window.WA) { try { await WA.init(); } catch {} }   // downloaded tilesets (fallback if absent)
   if (window.WB) { try { await WB.init(); } catch {} }   // Kenney building wall tiles (autotiled ring)
   if (window.WN) { try { await WN.init(); } catch {} }   // ambient townsfolk sprites
@@ -327,6 +362,7 @@ async function renderWorld() {
       if (WM.setFloorImageEl) WM.setFloorImageEl(img, url);     // preloaded → single bake paints it directly
     } else if (WM.setFloorImageEl) { WM.setFloorImageEl(null, null); }
   } catch {}
+  _worldLoad('Building the town…');
   WM.build(_lay);                                         // ONE bake — already sees _terrainImg/_floorImg when preloaded
   if (_wearSaved && WM.loadWear) WM.loadWear(_wearSaved);  // resume the town's worn trails
   // play-god auto-save toggle: default ON; reflect the saved world_layout_autosave
@@ -352,6 +388,16 @@ async function renderWorld() {
     canvas._cssW = cssW; canvas._cssH = cssH;
   }
   _resize();
+  // The canvas is now 100%×100% of the tab (no fixed 600px), so window/layout
+  // resizes must re-sync the backing store. Debounced; the RAF loop repaints
+  // the very next frame. Camera framing is intentionally left alone.
+  { let t = null;
+    const ro = new ResizeObserver(() => {
+      clearTimeout(t);
+      t = setTimeout(() => { if (document.getElementById('world-canvas')) _resize(); }, 120);
+    });
+    ro.observe(canvas);
+    _worldView.ro = ro; }   // parked on the OLD view object; carried into the new one below
   if (!_restoreCamera(canvas)) _worldZoomHome(canvas);   // resume framing, else zoom on HQ
   ctx.imageSmoothingEnabled = false;
   if (window.WMOON) WMOON.init(canvas);                  // moon-map: click-the-moon travel + Return-to-Earth button
@@ -440,20 +486,22 @@ async function renderWorld() {
       if (d < bestD) { bestD = d; best = id; }
     }
     _selectedId = best ? +best : null;
+    if (best != null && window.WHUD) WHUD.open('agent');   // clicking a citizen surfaces their card
     _renderDetail();
+    if (window.WHUD) WHUD.onState(_worldState);            // refresh portrait/skills for the new selection
   });
 
-  document.getElementById('world-think-btn').onclick = async () => {
-    const btn = document.getElementById('world-think-btn');
-    btn.disabled = true; btn.textContent = '💭 thinking…';
+  const thinkBtn = document.getElementById('world-think-btn');
+  if (thinkBtn) thinkBtn.onclick = async () => {
+    thinkBtn.disabled = true; thinkBtn.textContent = '💭…';
     try { await api('/api/world/think', { method: 'POST', body: JSON.stringify(_selectedId ? { agent_id: _selectedId } : {}) }); await _pollWorld(); }
     catch (e) { toast?.(e.message); }
-    btn.disabled = false; btn.textContent = '💭 Provoke a thought';
+    thinkBtn.disabled = false; thinkBtn.textContent = '💭';
   };
 
   // No automatic LLM polling — thoughts/opinions come from the backend's scheduled
   // cognition batch (settable, hourly). The 💭/💡 buttons remain for on-demand use.
-  _worldView = { canvas, ctx };
+  _worldView = { canvas, ctx, ro: _worldView.ro };
   _startWorldLoops();            // poll + RAF; visibilitychange pauses/resumes them
 }
 window.renderWorld = renderWorld;
@@ -575,6 +623,7 @@ async function _pollWorld() {
     _renderFeed(st.events || []);
     _renderTownHall(st);
     _renderDetail();
+    if (window.WHUD) WHUD.onState(st);   // HUD panels (skills/quests/company/portrait)
   } catch (e) { /* keep last frame */ }
 }
 

@@ -94,12 +94,95 @@ function _jlyBars(perRig) {
     </div>`).join('');
 }
 
+// ── JOINED mode: we founded no chain, we're a participant on a buddy's ───────
+// Everything worth showing lives on THEIR ledger, so this view reads our wallet
+// there (via the peer RPC) instead of pretending we have a chain.
+async function _jlyRenderJoined(pane, st) {
+  const home = st.home_peer || '';
+  let mine = null, buddies = null;
+  try {
+    [mine, buddies] = await Promise.all([
+      api('/api/peers/my-wallets').catch(() => null),
+      api('/api/peers').catch(() => null),
+    ]);
+  } catch (e) { /* the panel still renders without them */ }
+  const row = ((mine || {}).wallets || []).find(w => w.peer === home);
+  const peer = (((buddies || {}).peers) || []).find(p => p.name === home) || {};
+  _JLY.paired = (((buddies || {}).peers) || []).filter(p => p.status === 'approved');
+
+  pane.innerHTML = `
+    <div class="section-header"><div><div class="section-title">🪼 JellyCoin — joined ${esc(home)}'s network</div>
+      <div class="section-sub">This store founded <b>no chain of its own</b>: no genesis, no premine, no local mining.
+      ${esc(home)}'s node is the ledger, and your JLY lives in your wallet there.</div></div>
+      <button class="btn-sm" onclick="_cryptoLoaded.jelly=false;cryptoSub('jelly')">&#8635; Refresh</button>
+    </div>
+
+    <div class="settings-group" style="margin-bottom:16px;">
+      <div class="settings-group-title">👛 My wallet on ${esc(home)}'s chain</div>
+      ${row && row.ok ? `
+        <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:8px;">
+          ${_jlyStat('Balance', Number(row.balance_jly).toLocaleString(undefined, { maximumFractionDigits: 4 }) + ' ' + esc(row.symbol || 'JLY'))}
+          ${_jlyStat('Wallet', esc(row.wallet || '—'))}
+        </div>
+        ${(row.recent_txs || []).length ? `<table class="mini-table" style="width:100%;font-size:.76rem;">
+          <tr><th style="text-align:left;">From</th><th style="text-align:left;">To</th><th style="text-align:right;">JLY</th><th style="text-align:left;">Why</th></tr>
+          ${(row.recent_txs || []).slice(0, 8).map(t => `<tr><td>${esc(t.frm || '—')}</td><td>${esc(t.dst || '—')}</td>
+            <td style="text-align:right;font-weight:600;">${_jlyFmt(t.amount)}</td>
+            <td style="color:var(--muted);">${esc(t.memo || t.kind || '')}</td></tr>`).join('')}
+        </table>` : `<div style="font-size:.78rem;color:var(--muted);">No transactions yet — mine for them, review their code, or lend them AI.</div>`}`
+      : `<div style="font-size:.78rem;color:var(--muted);">
+           Couldn't reach ${esc(home)}'s node${row && row.error ? ` — ${esc(row.error)}` : ''}.
+           Your balance is safe on their ledger; this panel just needs them online.</div>`}
+    </div>
+
+    <div class="settings-group" style="margin-bottom:16px;">
+      <div class="settings-group-title">⛏️ Mine for ${esc(home)} ${hlp('Your rigs point at THEIR node, so the blocks you find grow their chain — the one your wallet is on. If they have the buddy-share pool on, you earn a proportional cut of every block your shares helped find.')}</div>
+      <div style="font-size:.78rem;color:var(--muted);line-height:1.7;">
+        Mining is disabled on this node by design — a rig here would found the island you chose not to make.
+        Point it at ${esc(home)}'s node with the rig token they gave you:
+      </div>
+      <div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;margin-top:10px;">
+        <div class="field" style="margin:0;flex:1;min-width:170px;"><label>${esc(home)}'s node URL</label>
+          <input id="jly-join-url" oninput="jellyJoinCmd()" value="${esc(peer.base_url || '')}" placeholder="http://their-host:8787"></div>
+        <div class="field" style="margin:0;"><label>Their rig token</label>
+          <input id="jly-join-token" oninput="jellyJoinCmd()" placeholder="paste their token" style="width:150px;"></div>
+        <div class="field" style="margin:0;"><label>My rig name</label>
+          <input id="jly-join-rig" oninput="jellyJoinCmd()" value="rig1" style="width:110px;"></div>
+      </div>
+      <div style="font-size:.76rem;color:var(--muted);line-height:1.8;margin-top:10px;">
+        <code id="jly-join-cmd" style="word-break:break-all;"></code>
+        <button class="btn-sm" style="margin-left:6px;" onclick="jellyJoinCopy()">📋 Copy</button>
+      </div>
+    </div>
+
+    <div class="settings-group" style="margin-bottom:16px;">
+      <div class="settings-group-title">🏠 Leave and found my own chain</div>
+      <div style="font-size:.78rem;color:var(--muted);line-height:1.7;">
+        Founding your own chain writes a fresh genesis here and makes this store its own network — a
+        <b>separate coin</b> from ${esc(home)}'s. What you've earned on their chain stays on their chain.
+      </div>
+      <button class="btn-sm" style="margin-top:8px;" onclick="jellySetMode('host')">🏠 Found my own chain</button>
+    </div>`;
+
+  jellyJoinCmd();
+}
+
 async function cryptoLoadJelly() {
   const pane = document.getElementById('pane-crypto-jelly');
   let st, wal, tok, nfts, missions, blocks, ws, pb, stats, pool, buddies, mine;
+  // Mode first: a JOINED node founded no chain, so the chain endpoints below have
+  // nothing to answer with. Render the participant view and skip them entirely.
   try {
-    [st, wal, tok, nfts, missions, blocks, ws, pb, stats, pool, buddies, mine] = await Promise.all([
-      api('/api/jelly/status'), api('/api/jelly/wallets'), api('/api/jelly/miner-token'),
+    st = await api('/api/jelly/status');
+  } catch (e) {
+    pane.innerHTML = `<div class="empty"><div class="empty-icon">&#10060;</div>${esc(e.message)}</div>`;
+    return;
+  }
+  if (st.mode === 'joined') return _jlyRenderJoined(pane, st);
+
+  try {
+    [wal, tok, nfts, missions, blocks, ws, pb, stats, pool, buddies, mine] = await Promise.all([
+      api('/api/jelly/wallets'), api('/api/jelly/miner-token'),
       api('/api/jelly/nft/list'), api('/api/jelly/missions'), api('/api/jelly/blocks?limit=8'),
       api('/api/world/settings').catch(() => ({ settings: {} })),
       api('/api/jelly/peer-billing').catch(() => null),
@@ -247,8 +330,24 @@ async function cryptoLoadJelly() {
       </div>
       <div style="font-size:.72rem;color:var(--muted);line-height:1.7;margin-top:8px;">
         Same <a href="/api/jelly/mining/miner.py" style="color:var(--accent,#7aa2ff);">jellyminer.py</a> either way — only
-        <code>--url</code> changes. Ask your buddy to map <code>${esc((paired[0] || {}).name ? 'your rig' : 'your rig')}</code>
-        to your <code>peer:&lt;name&gt;</code> wallet on their side, or your shares pay their default rig wallet instead of you.
+        <code>--url</code> changes. Ask your buddy to map your rig to your <code>peer:&lt;name&gt;</code> wallet on their
+        side, or your shares pay their default rig wallet instead of you.
+      </div>
+
+      <div style="border-top:1px solid var(--border,rgba(148,163,184,.2));margin-top:14px;padding-top:12px;">
+        <div style="font-size:.78rem;color:var(--muted);line-height:1.7;">
+          <b>Or make their network your home.</b> Right now this store runs its own chain — your JLY and theirs are
+          <b>separate coins</b> that can never add up. Joining retires this chain and makes you a participant on
+          theirs, so there's one growing network instead of one per install.
+        </div>
+        <div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;margin-top:10px;">
+          <div class="field" style="margin:0;"><label>Home network ${hlp('The paired buddy whose chain becomes your ledger. Only offered while your own chain is unused — once you have mined or moved coins, joining would strand them.')}</label>
+            <select id="jly-mode-home" style="min-width:150px;">
+              ${paired.map(p => `<option value="${esc(p.name)}">${esc(p.name)}</option>`).join('')}
+            </select></div>
+          <button class="btn-sm" onclick="jellySetMode('joined')" ${paired.length ? '' : 'disabled'}>🔗 Join this network</button>
+        </div>
+        ${paired.length ? '' : `<div style="font-size:.72rem;color:var(--muted);margin-top:6px;">Pair a buddy in <b>Settings → Peers</b> first.</div>`}
       </div>
     </div>
 
@@ -469,6 +568,25 @@ function jellyJoinCopy() {
   toast?.('Copied ✓ — run it on the GPU box');
 }
 window.jellyJoinCopy = jellyJoinCopy;
+
+// Switch between hosting our own chain and participating on a buddy's. The
+// backend refuses to join once our chain has been used, so surface that plainly.
+async function jellySetMode(mode) {
+  const home = mode === 'joined' ? (document.getElementById('jly-mode-home')?.value || '') : '';
+  if (mode === 'joined' && !home) { toast?.('Pick which buddy\'s network to join'); return; }
+  const msg = mode === 'joined'
+    ? `Join ${home}'s network?\n\nThis store's own chain is retired — its genesis and premine go away, `
+      + `and mining here is disabled. Your JLY will live in your wallet on ${home}'s ledger.`
+    : 'Found your own chain?\n\nThis store becomes its own network with a fresh genesis — a separate coin '
+      + 'from the one you were on. Anything you earned there stays there.';
+  if (!confirm(msg)) return;
+  try {
+    const r = await api('/api/jelly/mode', { method: 'POST', body: JSON.stringify({ mode, home_peer: home }) });
+    toast?.(r.mode === 'joined' ? `Joined ${r.home_peer}'s network ✓` : 'Now hosting your own chain ✓');
+    _jlyReload();
+  } catch (e) { toast?.(e.message); }
+}
+window.jellySetMode = jellySetMode;
 
 async function jellyTransfer(fromOverride) {
   const from = fromOverride || document.getElementById('jly-tx-from').value.trim();

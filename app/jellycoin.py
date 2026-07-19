@@ -67,6 +67,36 @@ _MAX_HASH = (1 << 256) - 1                 # keep share_target within 64-hex
 TREASURY, COMPANY, ASSISTANT = "treasury", "company", "assistant"
 ASSISTANT_GRANT = 500 * UNIT          # one-time treasury grant so the friend can tip
 
+# ── host vs joined: found your own chain, or join a buddy's network ──────────
+# Every store used to write its own genesis on first touch, so ten friends
+# installing the store made TEN unrelated coins — the opposite of a network.
+# In "joined" mode this node founds NO chain at all: no genesis, no premine, no
+# local mining. The buddy's node IS the ledger; we participate on it (our wallet
+# there is read over the peer RPC, our rigs point at their URL). Default stays
+# "host" so every existing install and its chain are untouched.
+JELLY_MODE_KEY = "jelly_mode"          # "host" (default) | "joined"
+JELLY_HOME_KEY = "jelly_home_peer"     # paired peer name whose network we joined
+
+
+def jelly_mode() -> str:
+    """'joined' only when explicitly set — anything else (or unreadable) is 'host'.
+    Read defensively: this gates genesis, and it runs during schema bootstrap when
+    the settings table may not be readable yet. Failing closed to 'host' preserves
+    the historical behavior exactly."""
+    try:
+        return "joined" if str(get_setting(JELLY_MODE_KEY) or "host").strip().lower() == "joined" else "host"
+    except Exception:
+        return "host"
+
+
+def jelly_home_peer() -> str:
+    """Name of the paired peer whose chain we joined ('' when hosting)."""
+    try:
+        return str(get_setting(JELLY_HOME_KEY) or "").strip()
+    except Exception:
+        return ""
+
+
 _GENESIS_PREV = "0" * 64
 _lock = threading.Lock()
 _works: dict = {}                     # work_id → dict (issued PoW jobs, in-memory)
@@ -163,7 +193,11 @@ def ensure_schema(conn=None):
             conn.execute("ALTER TABLE jelly_miners ADD COLUMN owner TEXT")
         except Exception:
             pass
-        if not conn.execute("SELECT 1 FROM jelly_blocks WHERE height=0").fetchone():
+        # Found a chain ONLY when hosting. A joined node is a participant on a
+        # buddy's ledger, so minting it a genesis + premine here would be exactly
+        # the island-per-install problem. Tables still exist (peer wallets, txs).
+        if (jelly_mode() == "host"
+                and not conn.execute("SELECT 1 FROM jelly_blocks WHERE height=0").fetchone()):
             _write_genesis(conn)
         conn.commit()
         _schema_done = True
@@ -319,6 +353,14 @@ def get_work(miner: str, gpu: str = "", hashrate: float = 0.0) -> dict:
     miner = (miner or "").strip()[:40]
     if not miner:
         raise ValueError("miner name required")
+    if jelly_mode() == "joined":
+        # Refuse rather than quietly founding an island chain under a rig that
+        # thinks it is mining the network. Point it at the home node instead.
+        home = jelly_home_peer()
+        raise ValueError(
+            "This node is a participant on " + (f"{home}'s network" if home else "another node's network")
+            + ", not a chain of its own — point this rig at the home node's URL "
+              "(Crypto → JellyCoin → Join a buddy's network).")
     conn = get_conn()
     try:
         _ensure(conn)
@@ -544,6 +586,66 @@ def pool_state() -> dict:
         conn.close()
 
 
+def chain_is_used(conn=None) -> bool:
+    """Has this node's own chain done anything beyond its genesis premine?
+
+    Guards the switch to joined mode: leaving a chain that has mined blocks (or
+    moved coins) behind would orphan real value — nobody else has that ledger."""
+    own = conn is None
+    conn = conn or get_conn()
+    try:
+        if _tip_height(conn) > 0:
+            return True
+        return bool(conn.execute(
+            "SELECT 1 FROM jelly_txs WHERE kind NOT IN ('premine','grant') LIMIT 1").fetchone())
+    except Exception:
+        return True                       # unreadable → assume used, refuse to switch
+    finally:
+        if own:
+            conn.close()
+
+
+def set_jelly_mode(mode: str, home_peer: str = "") -> dict:
+    """Found our own chain ('host') or join a buddy's network ('joined').
+
+    Switching to joined is refused once our chain has been used — those coins
+    exist only on this ledger. Switching back to host writes the genesis that
+    joined mode skipped (via ensure_schema, whose cache we clear first)."""
+    global _schema_done
+    mode = (mode or "").strip().lower()
+    if mode not in ("host", "joined"):
+        raise ValueError("mode must be 'host' or 'joined'")
+    if mode == "joined":
+        if not (home_peer or "").strip():
+            raise ValueError("joining a network needs the buddy's peer name")
+        if chain_is_used():
+            raise ValueError(
+                "This node's own chain already has mined blocks or transfers — joining "
+                "another network would strand them. Keep hosting, or start from a fresh "
+                "store install to join.")
+    conn = get_conn()
+    try:
+        _ensure(conn)
+        conn.execute("INSERT OR REPLACE INTO settings (key,value) VALUES (?,?)",
+                     (JELLY_MODE_KEY, mode))
+        conn.execute("INSERT OR REPLACE INTO settings (key,value) VALUES (?,?)",
+                     (JELLY_HOME_KEY, (home_peer or "").strip() if mode == "joined" else ""))
+        if mode == "joined":
+            # A fresh install founds its chain on first touch, so by the time the
+            # user picks "join" a genesis + premine usually already exists. We
+            # verified above that nothing has USED it, so clear it out — otherwise
+            # a stale tip would keep reporting a local chain we no longer have.
+            conn.execute("DELETE FROM jelly_blocks")
+            conn.execute("DELETE FROM jelly_txs WHERE kind IN ('premine','grant')")
+            conn.execute("UPDATE jelly_wallets SET balance=0")
+        conn.commit()
+    finally:
+        conn.close()
+    _schema_done = False                  # re-run bootstrap: host mode must get its genesis
+    ensure_schema()
+    return {"mode": jelly_mode(), "home_peer": jelly_home_peer()}
+
+
 def set_pool_enabled(on: bool):
     conn = get_conn()
     try:
@@ -601,6 +703,15 @@ def status() -> dict:
     try:
         _ensure(conn)
         tip = _tip(conn)
+        if tip is None:
+            # Joined mode: we founded no chain, so there is nothing local to report.
+            # The caller (UI) switches to the participant view and reads our balance
+            # on the home node over the peer RPC instead.
+            return {"symbol": SYMBOL, "name": "JellyCoin", "unit": UNIT,
+                    "mode": jelly_mode(), "home_peer": jelly_home_peer(),
+                    "chain": False, "height": 0, "supply": 0, "miners": [],
+                    "miners_online": 0, "boosts_pending": 0, "boosts_paid_jly": 0,
+                    "nft_count": 0}
         now = int(time.time())
         supply = conn.execute("SELECT COALESCE(SUM(reward+boost),0) s FROM jelly_blocks").fetchone()["s"]
         miners = [dict(r) for r in conn.execute(
@@ -613,6 +724,7 @@ def status() -> dict:
         target = current_target(conn)
         return {
             "symbol": SYMBOL, "name": "JellyCoin", "unit": UNIT,
+            "mode": jelly_mode(), "home_peer": jelly_home_peer(), "chain": True,
             "height": int(tip["height"]), "tip_hash": tip["hash"], "tip_time": int(tip["time"]),
             "difficulty": round(difficulty(target), 3), "target": f"{target:064x}",
             "supply": supply / UNIT, "block_reward": block_reward(int(tip["height"]) + 1) / UNIT,

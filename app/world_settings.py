@@ -100,6 +100,12 @@ DEFAULTS = {
     # town roster is untouched. ON by default; interval is the launch cadence.
     "world_space_enabled":    "1",
     "world_space_interval_min": "8",
+    # RAIDS (world_raid): security signals become monster raids. world_raid_disabled turns
+    # combat off entirely; world_raid_min_gap_min is the MINIMUM minutes between auto-raids
+    # (was effectively ~5 → constant; 60 keeps them occasional). A raid only fires on a real
+    # spike/high-severity alert, not routine failed-job flakiness (which shows as amber watch).
+    "world_raid_disabled":    "0",
+    "world_raid_min_gap_min": "60",
 }
 
 INT_KEYS = {"world_llm_interval_min", "world_active_start", "world_active_end",
@@ -107,14 +113,15 @@ INT_KEYS = {"world_llm_interval_min", "world_active_start", "world_active_end",
             "world_max_discount_pct", "world_vision_candidates", "world_vision_retries",
             "world_vision_min_score", "world_bills_drive_interval_min",
             "world_leader_upgrade_hours", "world_tileset_auto_min",
-            "world_space_interval_min", "world_sprites_max_hour", "world_sprites_auto_min"}
+            "world_space_interval_min", "world_sprites_max_hour", "world_sprites_auto_min",
+            "world_raid_min_gap_min"}
 BOOL_KEYS = {"world_llm_enabled", "world_meetings_enabled", "world_incidents_enabled",
              "world_allow_free", "world_require_review", "world_vision_enabled",
              "world_crypto_mining_enabled", "world_bills_drive", "world_music_lyrics",
              "world_leader_upgrades", "world_tileset_auto", "world_terrain_image_enabled",
              "world_floor_image_enabled", "world_layout_autosave",
              "world_moon_enabled", "world_moon_daytime", "world_space_enabled",
-             "world_sprites_enabled", "world_sprites_auto"}
+             "world_sprites_enabled", "world_sprites_auto", "world_raid_disabled"}
 
 
 def get_all(conn=None):
