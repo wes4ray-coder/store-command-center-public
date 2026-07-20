@@ -13,17 +13,23 @@ same box or another machine on your LAN.
 
 ![The Company — the pixel-art town that runs the store](docs/screenshots/the-company.png)
 
+📖 **[Full documentation is in the wiki](../../wiki)** — per-system deep dives, the
+complete [gates and toggles reference](../../wiki/Gates-and-toggles), install
+walkthroughs and troubleshooting.
+
 - [Screenshots](#screenshots)
 - [Systems](#systems)
 - [The Company — the game that runs the store](#the-company--the-game-that-runs-the-store)
 - [The buddy system](#the-buddy-system)
 - [JellyCoin (JLY) — the project's own coin](#jellycoin-jly--the-projects-own-coin)
+- [**What's gated**](#whats-gated)
 - [Requirements](#requirements)
 - [Quick start](#quick-start-run-it-anywhere)
 - [Configuration](#configuration)
 - [Architecture](#architecture)
 - [Running as a service](#running-as-a-service)
 - [Reverse proxy](#reverse-proxy)
+- [License](#license)
 
 ---
 
@@ -39,68 +45,91 @@ same box or another machine on your LAN.
 ## Systems
 
 Everything is a tab in one single-page app, one router module per feature
-(`app/routers/*.py`, one JS module per tab in `static/js/`). See `INDEX.md` for the
-full per-system map (endpoints, DB tables, files).
+(`app/routers/`, one JS module per tab in `static/js/`). The sections below mirror the
+sidebar groups you actually see. See `INDEX.md` for the full per-system map (endpoints,
+DB tables, files), and the [wiki](../../wiki) for per-system deep dives.
 
-### Commerce & money
-
-| System | What it does |
-|---|---|
-| **Dashboard** | Landing overview: pipeline stats, running generations, dev-swarm rollup, services up/down, plus the universal GPU queue controls (also pinned bottom-left everywhere). |
-| **Etsy / Printify** | The print-on-demand pipeline: trend scan (Google Trends / Reddit / RSS → LLM-filtered proposals) → generate design → review → approve → publish to Printify/Etsy. Live product management and store stats included. Nothing publishes without a click. |
-| **Cults3D** | The 3D-printables pipeline: scan a backlog of STL files → CPU turntable renders + SDXL hero images → AI-proposed listings → approve → publish via Cults3D's API. |
-| **Resell** | Physical-item flipping: photograph an item → vision-model analysis → AI listing content → post to marketplaces through a **real Chrome browser** (CDP automation with your logged-in profile), plus an offers inbox with AI-drafted haggling replies. |
-| **Portal → WordPress** | Pushes curated affiliate/external products and a media portfolio to your own WooCommerce/WordPress site. Curate-then-push — you pick what goes live. |
-| **Social** | Drafts social posts from store media with the local LLM; manual copy-and-post workflow (no platform APIs post on your behalf). |
-| **Money** | The real-money mission engine: shop-search demand signals → LLM-drafted missions → owner approve/reject/done, plus lead hunting. Includes a **Cash App** receive-only rail (cashtag payment links + Square-hosted checkout), approval-gated like every other money flow. |
-| **Mail & Quotes** | Reads a self-hosted mailbox (IMAP), drafts labor/service quotes with the local LLM under your business terms, and sends replies — each one reviewed first. |
-| **Treasury** | The Company's real-money books: budget summary, operations ledger, and PayPal config/verify/withdraw. Money math is test-covered (`tests/test_ledger.py`). |
-
-### Media — the Studio
+### 🏠 Home
 
 | System | What it does |
 |---|---|
-| **Image** | ComfyUI / SDXL generation with per-product-type LoRA + upscaler selection, prompt enhancement, sticker background knockout, and the design review pipeline. |
-| **Video** | Local diffusers generation (Wan / LTX / CogVideoX …) with live progress, cancel/retry, multi-clip **chains**, and a **video→audio bridge** that scores a clip with music and optional narration. |
-| **Audio** | Music and voice: MusicGen, MMS-TTS, Stable Audio, and **ACE-Step** full songs with vocals + lyrics. |
-| **3D** | Text/image → mesh (TripoSR / TripoSG / Hunyuan / SF3D / TRELLIS), rendered and reviewed before it enters the Cults3D pipeline. |
-| **Models** | In-app model catalogs and one-click downloads for every engine, with install/test buttons and idle-unload TTLs. |
-| **Private Studio** | An opt-in, hidden workspace that reuses the exact same pipelines for content you keep out of every public surface. Layered toggles (master switch makes it 404-invisible) and a **non-toggleable safety floor** that screens every prompt. |
+| **📊 Dashboard** | Landing overview: pipeline stats, running generations, dev-swarm rollup, services up/down, plus the universal GPU queue controls (also pinned bottom-left everywhere). |
+| **🌅 The Company** | The pixel-art town that *is* the operations layer — see [its section below](#the-company--the-game-that-runs-the-store). |
+| **💰 Finance** | One roof for all money, with seven panes: **Overview** (net worth across every rail), **P&L**, **Bills** (real recurring household bills and due dates), **Treasury** (the company books, operations ledger and PayPal), **Missions & Earn**, **Wallets**, and **Markets**. |
+| **🔮 Oracle** | A forecasting **tournament** between local LLM models: each "analyst" researches real-world catalysts, predicts direction/target/horizon, gets auto-scored when the horizon arrives, and learns from its hits and misses. Leaderboard included; **no money moves.** |
 
-### Crypto & markets
+**Finance → Markets** is itself the markets desk: 📊 Stats · 🪼 **JellyCoin** ([below](#jellycoin-jly--the-projects-own-coin)) · 🦪 **Pearl (PRL)**, a supported *external* proof-of-useful-work L1 · ⛓ **Nodes** (local regtest `bitcoind`) · ⛏ **Mining** · 🤖 **Trading** (freqtrade: LLM proposes → backtest → you approve; dry-run by default) · 📈 **Stocks** · 🔑 encrypted **key backups**.
 
-| System | What it does |
-|---|---|
-| **Crypto** | The markets desk: a local regtest `bitcoind`, mining controls, a freqtrade dry-run strategy pipeline (LLM proposes → backtest → you approve), Kraken sync, a stocks watchlist, and encrypted key backups. |
-| **Wallets** | Real mainnet **light wallets**: deterministic BIP39 derivation, balances via public block explorers (no full node), a guarded two-step send flow (prepare → broadcast), and Monero via `monerod` + wallet-RPC. |
-| **Oracle** | A forecasting **tournament** between local LLM models: each "analyst" researches real-world catalysts, predicts price direction/target/horizon, gets auto-scored when the horizon arrives, and learns from its own hits and misses. Leaderboard included; no money moves. |
-| **JellyCoin** | The project's own GPU-mined token — see [its section below](#jellycoin-jly--the-projects-own-coin). |
-| **Pearl (PRL)** | Supported *external* coin: read-only status/settings for Pearl, a proof-of-useful-work L1. Miner control is hard-gated behind a toggle and never runs automatically; you install the official software yourself — the tab only talks to it. |
+**Wallets** are real mainnet **light wallets**: deterministic BIP39 derivation, balances via public block explorers (no full node), a guarded two-step send flow, and Monero via `monerod` + wallet-RPC.
 
-### Development & automation
+### 🎭 Studio
 
 | System | What it does |
 |---|---|
-| **GitHub / Dev Swarm** | Repo management via the `gh` CLI plus a **local-model coding swarm**: file a job, a local LLM plans and edits code in a workspace, you review the diff, and promotion flows dev → master → **retail** (the public branch, produced by an automated identifier scrub with a leak-gate that blocks the push if anything private remains). |
-| **Agent Watcher** | A background doctor for the automation: detects failed / paused / stalled swarm and media jobs, diagnoses them (optionally with the LLM), and feeds the diagnosis back into the coder's context on re-run. |
-| **AI Assistant** | A genuinely **tooled agent** in the UI: its tools are generated straight from the app's own API route table, so it can plan → call endpoints → observe → continue. Non-read calls are categorized (money / delete / publish / …) and pause for your approval in-chat; every gate has an auto-approve toggle. Persistent conversations and reusable "skills" included. |
-| **Research Lab** | "Research Geniuses" — agents that run multi-step research projects (with optional image gathering/generation) and file the results into the Library. |
-| **Knowledge Graph** | A queryable knowledge graph of the whole repo (built with graphify): stats, natural-language queries, path/affected analysis, and a native force-directed explorer. Build yours with `setup.sh --with-graphify`. |
-| **Library** | Curated links + a full **web archive**: saving a page auto-escalates HTTP fetch → `wget` → your logged-in Store browser (clears walls a headless grab can't), or upload a saved `.html`. Re-saving builds a version history — a personal time machine. AI guides/summaries on top. |
+| **🎨 Image** | ComfyUI / SDXL generation with per-product-type LoRA + upscaler selection, prompt enhancement, sticker background knockout, and the design review pipeline. |
+| **🎬 Video** | Local diffusers generation (Wan / LTX / CogVideoX …) with live progress, cancel/retry, multi-clip **chains**, and a **video→audio bridge** that scores a clip with music and optional narration. |
+| **🎵 Audio** | Music and voice: MusicGen, MMS-TTS, Stable Audio, and **ACE-Step** full songs with vocals + lyrics. |
+| **🧩 3D** | Text/image → mesh (TripoSR / TripoSG / Hunyuan / SF3D / TRELLIS), rendered and reviewed before it enters the Cults3D pipeline. |
+| **⚡ Queue** | The unified GPU queue in full-page form. Each engine pane also carries its own model catalog with one-click downloads, install/test buttons and idle-unload TTLs. |
+| **🔒 Private Studio** | An opt-in, hidden workspace reusing the exact same pipelines for content you keep off every public surface. Three layered toggles (the master switch makes it **404-invisible**) and a **non-toggleable safety floor** that screens every prompt — see [What's gated](#whats-gated). |
 
-### Infrastructure & safety
+### 🛍 Storefront
 
 | System | What it does |
 |---|---|
-| **Unified GPU queue** | One orchestrator (`app/orchestrator.py` + a pure scheduling core with priority, model affinity and anti-starvation aging) serializes **everything** — LLM, image, video, audio, 3D, swarm, world — through the single GPU. Pause/resume/clear from any tab. |
-| **gpu-guard** | The GPU box heartbeats "a human is using me" (game, Blender, OBS, VM…) and the queue auto-pauses; auto-resumes when idle, and can never wedge shut if the guard dies. |
-| **Services** | A unified homelab hub: every Docker container and \*arr service grouped and controllable, with manual entries and overrides. |
-| **Network Security** | A security command center: one Command view driving 14 background defenses with toggles, plus engines for connection intel, threats, audits, web traffic, per-device control (Guardian), an AI Shield for the model stack, and a Pi-hole DNS firewall integration. |
-| **Model registry** | Settings → Models: pick which local model powers *each feature* (listings, haggling, security, swarm coder, …); the queue shows which model each job wants. |
-| **Prompt registry** | Every LLM system prompt in the app (29 of them) lives in one registry, editable in a Settings workbench with search and a live ▶ Test button. |
-| **MCP server** | The whole API is mounted as an MCP server at `/api/mcp` (fastapi-mcp) — every endpoint becomes a tool, so an external agent framework on the same box can drive the entire store. An OpenAI-compatible LLM proxy (`/api/llm/v1/*`) routes outside callers through the same GPU queue. |
-| **Peers** | Federation between Store installs — see [The buddy system](#the-buddy-system). |
-| **Hardening** | Secrets encrypted at rest (Fernet), consistent online DB snapshots (local + off-box), money-math tests, a rotating log with an in-app viewer, and a global exception handler. See `HARDENING.md`. |
+| **🛍 Etsy / Printify** | The print-on-demand pipeline: trend scan (Google Trends / Reddit / RSS → LLM-filtered proposals) → generate design → review → approve → publish. Live product management and store stats included. **Nothing publishes without a click.** |
+| **🖨️ Cults3D** | The 3D-printables pipeline: scan a backlog of STL files → CPU turntable renders + SDXL hero images → AI-proposed listings → approve → publish via Cults3D's API. |
+| **📷 Resell** | Physical-item flipping: photograph an item → vision-model analysis → AI listing content → post to marketplaces through a **real Chrome browser** (CDP automation with your logged-in profile), plus an offers inbox with AI-drafted haggling replies. |
+| **🌐 Portal → WordPress** | Curates affiliate/external products, software and generated media from nine sources and pushes the picks to your own WooCommerce/WordPress site. Curate-then-push — you pick what goes live. |
+| **📱 Social** | Drafts posts and captions from store media with the local LLM. |
+| **✉️ Mail & Quotes** | Reads a self-hosted mailbox (IMAP), drafts labor/service quotes with the local LLM under your business terms, and sends replies — each one reviewed first. |
+
+### 🐙 Dev
+
+| System | What it does |
+|---|---|
+| **🐙 GitHub / Dev Swarm** | Repo management via the `gh` CLI plus a **local-model coding swarm**: file a job, a local LLM plans and edits code in a workspace, you review the diff, and promotion flows dev → master → **retail** (the public branch, produced by an automated identifier scrub whose leak gate blocks the push if anything private survives). Includes the workboard, cron and reviewer config. |
+| **🩺 Agent Watcher** | A background doctor for the automation: detects failed / paused / stalled swarm and media jobs, diagnoses them (optionally with the LLM), and feeds the diagnosis back into the coder's context on re-run. |
+| **🎮 Games** | A game-engine workbench on the GPU node: Godot / Unity / Unreal install state, project management, asset wiring, headless builds, and editor control over MCP. |
+
+### 🔌 Infrastructure
+
+| System | What it does |
+|---|---|
+| **⚡ Unified GPU queue** | One orchestrator (`app/orchestrator.py` + a pure scheduling core with priority, model affinity and anti-starvation aging) serializes **everything** — LLM, image, video, audio, 3D, swarm, world — through the single GPU. Pause/resume/clear from any tab. |
+| **🛡 gpu-guard** | The GPU box heartbeats "a human is using me" (game, Blender, OBS, VM…) and the queue auto-pauses; auto-resumes when idle, and can never wedge shut if the guard dies. |
+| **🔌 Services** | A unified homelab hub: every Docker container and \*arr service grouped and controllable, with manual entries and overrides. |
+| **🛡️ Network Security** | A security command center across nine views (Command, Connections, Threats, Audit, Web Traffic, Guardian, AI Shield, Pi-hole DNS, System & LLM). The Command view drives **seven scheduled background defenses**, each with its own toggle and interval — all default **off** except backups. |
+| **🔗 MCP server** | The whole API is mounted as an MCP server at `/api/mcp` (fastapi-mcp) — every endpoint becomes a tool, so an external agent framework on the same box can drive the entire store. An OpenAI-compatible LLM proxy (`/api/llm/v1/*`) routes outside callers through the same GPU queue. |
+| **🤝 Peers** | Federation between Store installs — see [The buddy system](#the-buddy-system). |
+
+### 🤖 Assist & Config
+
+| System | What it does |
+|---|---|
+| **🤖 AI Assistant** | A genuinely **tooled agent** in the UI: its tools are generated straight from the app's own API route table, so it can plan → call endpoints → observe → continue. Non-read calls are categorized (money / delete / publish / …) and pause for your approval in-chat; each category has an auto-approve toggle. Persistent conversations and reusable "skills" included. |
+| **🔬 Research Lab** | "Research Geniuses" — agents that run multi-step research projects (with optional image gathering/generation) and file the results into the Library. |
+| **📚 Library** | An offline knowledge base plus a full **web archive**: saving a page auto-escalates HTTP fetch → `wget` → your logged-in Store browser (clears walls a headless grab can't), or upload a saved `.html`. Re-saving builds a version history — a personal time machine. AI guides/summaries on top. |
+| **🕸 Knowledge Graph** | A queryable knowledge graph of the whole repo (built with graphify): stats, natural-language queries, path/affected analysis, and a native force-directed explorer. Build yours with `setup.sh --with-graphify`. |
+| **⚙️ Settings** | Eight panes: **System** (host/GPU-node admin, logs, restart), **Models**, **Integrations**, **Store & Content**, **Account**, **Prompts**, **Systems**, **Plugins**. |
+
+Three registries live under Settings and are worth calling out:
+
+- **Model registry** — pick which local model powers *each feature* (listings, haggling,
+  security, swarm coder, …); the queue shows which model each job wants.
+- **Prompt registry** — every LLM system prompt in the app (50 of them) in one place,
+  editable in a workbench with search and a live ▶ Test button.
+- **Systems registry** — `app/systems_registry.py` catalogues every background system and
+  the exact setting that controls it, including which ones have **no** toggle. It is the
+  source of truth behind [What's gated](#whats-gated).
+
+**Plugins** are drop-in: put a folder in `plugins/`, and its backend routes and frontend
+views register themselves. A failed plugin is isolated (it flags itself in the nav rather
+than breaking it). See `plugins/README.md` for the contract.
+
+**Hardening** — secrets encrypted at rest (Fernet), consistent online DB snapshots (local
+and off-box), money-math tests, a rotating log with an in-app viewer, and a global
+exception handler. See `HARDENING.md`.
 
 ---
 
@@ -223,6 +252,80 @@ monitor and (behind a hard gate) mine — supported, but not ours. JLY is the na
 coin of this project's economy.
 
 ---
+
+## What's gated
+
+The whole point of this project is that agents do real work while **you** stay the one
+who says yes. This section documents exactly where that line is drawn — including the
+places it *isn't*, because a safety claim you can't verify is worse than none.
+
+The full per-setting reference lives in the [wiki](../../wiki/Gates-and-toggles).
+
+**The posture.** `world_ops_automation_mode` defaults to **`review`** — everything real
+is queued to the God Console's prayer queue and nothing runs until you bless it. Switching
+it to `budget` lets free and within-budget actions run on their own; gated kinds still
+always wait. The design rule is that **every gate ships with a toggle**, with the
+deliberate exceptions listed below.
+
+### Hard floors — these cannot be turned off
+
+| Floor | What it protects |
+|---|---|
+| `paypal_payout`, `wallet_send`, `secret_export` | The three irreversible money-out paths. The API **refuses** to disable these gates, and refuses to let them be filed through the generic prayer API — they only come from their own validating endpoints. A wallet send is signed and broadcast *only* after a human blessing, so even a localhost caller cannot move real crypto on its own. |
+| NSFW safety floor | Screens **every** prompt — yours, the model's own, and the world's — for minors (keyword *and* numeric-age parsing), real-person likenesses/deepfakes, and non-consensual themes. Applies to every modality, before anything is stored or run. There is no setting, no prompt-registry entry and no API that can weaken it, and the "every gate gets a toggle" rule explicitly does **not** apply here. |
+| Retail scrub leak gate | Blocks the public push outright if any real identifier survives the scrub. |
+| Public snapshot gates | The outbound world snapshot is off by default, refuses to run if *any* NSFW toggle is on (failing closed if it can't tell), and runs a regex leak sweep over the exact outbound bytes. |
+| Swarm final approval | `user_final_approval` is forced on — a safety invariant, not a user setting. Promotion also refuses until you approve. |
+| Peer boundary | Peers must be invited, approved, and can be revoked. Their RPC surface opens *only* the peer endpoints — never settings, money, git or anything else — and their code-review votes are **advisory**; your click still decides. |
+| Live trading | Syncing exchange keys force-sets `dry_run = True`. Going live is a manual config change, never an API action. |
+
+### Toggleable gates
+
+All default **on** (`world_ops_gate_*`), and all flip from the God Console:
+
+| Gate | Protects |
+|---|---|
+| `post_etsy`, `post_printify` | Paid listings (~$0.20 each) |
+| `cashapp_request`, `cashapp_checkout` | Cash App payment links (money *in*) |
+| `add_software` | Code changes reaching your repo |
+
+`world_ops_gate_creations` (default **off**) additionally forces a 👍/👎 on every creative
+publish even in budget mode.
+
+### Spend limits
+
+`world_ops_cap_cents` is a **$20/month** postpaid ceiling and `world_taste_min` (0.35)
+sets how confident the taste model must be before anything auto-runs. Note that approving
+with `force=true` deliberately overrides the monthly cap — it is a ceiling on *automation*,
+not a hard spend limit.
+
+### Defaults that matter
+
+Everything genuinely autonomous ships **off**: autonomous creation (`world_auto_enabled`),
+autonomous listing (`world_sell_auto`), the dev-swarm cron, all three miners
+(JellyCoin, Pearl, world mining) *and* their separate agent-control gates, every security
+defense except backups, the public snapshot, and all three Private Studio toggles.
+
+### Known gaps — not currently gated
+
+Honest disclosure, since this is a self-hosted app you are trusting with real credentials:
+
+- **XMR mining** starts the miner directly, with no toggle and no agent gate — unlike
+  JellyCoin and Pearl, which each have both. This is an inconsistency, not a decision.
+- **Social posting**, the **WooCommerce/Portal push** and **outbound mail** publish without
+  a prayer gate (the AI Assistant still asks, since it classifies them as publish/money —
+  but a direct API call does not).
+- **Docker control** (start/stop containers) and **SSH command execution on the GPU node**
+  are ungated.
+- **Free publishes** (WordPress, Cults3D) auto-run in budget mode unless you turn on the
+  creations gate.
+- **Plugins** run in-process with no sandbox, and an unknown plugin defaults to enabled.
+  Only install plugins you trust.
+- **Any request from `127.0.0.1` skips session auth**, by design — it is how the MCP mount
+  and the in-app assistant work. There is no toggle. It is the single largest blast-radius
+  decision in the app, and the irreversible-money floors above exist specifically to
+  compensate for it. **Do not expose this app directly to the internet.** Put it behind a
+  reverse proxy with real auth, or keep it on your LAN/VPN.
 
 ## Requirements
 
@@ -399,3 +502,17 @@ API resolve correctly under whatever prefix you choose.
 
 > Note: the session cookie is `Secure`, so sign-in requires **HTTPS** (or
 > `http://localhost`, which browsers treat as secure).
+
+---
+
+## License
+
+[MIT](LICENSE) — use it, change it, sell it, fork it. No warranty of any kind.
+
+Please read [What's gated](#whats-gated) before pointing this at real money, real
+credentials or a real storefront. It ships with the cautious defaults on, and it is
+built to be run on your own hardware behind your own network — not exposed to the
+open internet.
+
+Bundled third-party reference documentation is **not** redistributed in this public
+tree; the Library ships only with content written for this project.
