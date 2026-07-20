@@ -14,6 +14,7 @@ SKIP_SUBSTRINGS = (
     "/github", "/homelab", "/security/connections", "/system/gpu-status",
     "/system/update-status", "/system/logs", "/system/backups",
     "/world", "/llm/", "/mail",
+    "/health",                           # GET /api/health/pulse SSHes the node + probes LM Studio/ComfyUI (slow, real I/O)
     # These DRIVE the real headed Chrome (launch it, navigate to a live marketplace).
     # A smoke GET must never do that — /api/resell/browser/inspect used to open
     # facebook.com/marketplace on every test run.

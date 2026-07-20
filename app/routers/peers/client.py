@@ -44,17 +44,51 @@ def peer_has_model(peer, model: str) -> bool:
     return model in (remote.get("models") or [])
 
 
+def peer_quote(peer) -> dict:
+    """Fetch the peer's ADVERTISED price BEFORE we send it work. A peer running an
+    older build has no rpc/price route — we then fall back to per-job mode, which is
+    exactly what that build will charge, so pairing across versions keeps working."""
+    try:
+        q = _call_peer(peer, "GET", "/api/peers/rpc/price", timeout=20)
+        if q.get("mode") in ("job", "token"):
+            return q
+    except HTTPException:
+        pass
+    return {"mode": "job", "billing": True, "price_per_1k_completion_jly": 0.0,
+            "price_per_1k_prompt_jly": 0.0, "legacy": True}
+
+
 def delegate_llm(peer_id: int, system: str, user: str, model: str = None,
                  max_tokens: int = 1500, wait: int = 120):
     """Submit an llm job to an approved peer's queue and block for the result.
     Returns the output text, or raises. Raises 409 when the peer lacks the required
     model — callers treat that as 'keep the job in the local queue'. (Used by future
-    'borrow a friend's GPU' features; also the Settings → Peers test button.)"""
+    'borrow a friend's GPU' features; also the Settings → Peers test button.)
+
+    Billing (consumer side). We quote FIRST, then send. When the peer advertises
+    token mode we pay for the ANSWER only, at the quoted rate, and never more than
+    our OWN count of the answer times the tolerance — a peer that inflates its
+    completion_tokens gets billed down and logged. Before the job is even sent we
+    price the WORST case (max_tokens at the quoted rate) against the owner's caps
+    and refuse the whole job if it would breach one — no partial spend, ever.
+    """
     import time
+    import jellycoin_extra as jx
     peer = _get_peer(peer_id)
     if not peer_has_model(peer, model):
         raise HTTPException(409, f"Peer '{peer['name']}' doesn't have model '{model}' — "
                                  "keeping the job in the local queue.")
+    quote = peer_quote(peer)
+    quoted_rates = {"completion": int(float(quote.get("price_per_1k_completion_jly") or 0) * 1_000_000),
+                    "prompt": int(float(quote.get("price_per_1k_prompt_jly") or 0) * 1_000_000)}
+    if jx.peer_billing_enabled():
+        worst = (jx.token_cost(0, int(max_tokens or 0), quoted_rates, "spent")
+                 if quote.get("mode") == "token" else jx.peer_job_price("llm"))
+        cap = jx.peer_cap_check(peer["name"], worst)
+        if not cap["ok"]:
+            raise HTTPException(402, f"Refusing to send this job to '{peer['name']}': {cap['reason']}. "
+                                     "Raise the cap in Settings → Peers → Compute pricing, "
+                                     "or run the job locally.")
     resp = _call_peer(peer, "POST", "/api/peers/rpc/job",
                       {"kind": "llm", "system": system, "user": user,
                        "model": model, "max_tokens": max_tokens})
@@ -63,13 +97,25 @@ def delegate_llm(peer_id: int, system: str, user: str, model: str = None,
     while time.time() < deadline:
         st = _call_peer(peer, "GET", f"/api/peers/rpc/job/{jid}")
         if st.get("status") == "done":
-            # JellyCoin buddy economy: their box worked for us → treasury pays their wallet
+            result = st.get("result") or {}
+            out = result.get("output", "")
+            usage = result.get("usage") or {}
             try:
-                import jellycoin
-                jellycoin.peer_job_credit(peer["name"], "llm")
+                if quote.get("mode") == "token" and usage:
+                    # count the answer OURSELVES — never trust their number alone
+                    jx.peer_settle_tokens(
+                        peer["name"], "spent", kind="llm", model=usage.get("model") or model,
+                        prompt_tokens=0 if not quoted_rates["prompt"] else int(usage.get("prompt_tokens") or 0),
+                        completion_tokens=int(usage.get("completion_tokens") or 0),
+                        reported=bool(usage.get("reported")),
+                        own_estimate=jx.estimate_tokens(out),
+                        quoted_rates=quoted_rates)      # the price they quoted BEFORE the job
+                else:
+                    import jellycoin
+                    jellycoin.peer_job_credit(peer["name"], "llm")
             except Exception:
                 pass
-            return (st.get("result") or {}).get("output", "")
+            return out
         if st.get("status") == "error":
             raise HTTPException(502, f"Peer job failed on {peer['name']}: {st.get('error')}")
         time.sleep(2)

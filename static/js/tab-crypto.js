@@ -13,8 +13,12 @@ let _cryptoLoaded = {};       // pane -> true once its data has been fetched
 let _cryptoDrafts = [];       // strategy drafts cache (for code preview)
 
 async function renderCrypto() {
+  // Lives inside the 💰 Finance tab (fin-pane-crypto). If the pane is gone the
+  // user switched views — bail instead of clobbering whatever is on screen now.
+  const _cyRoot = document.getElementById('fin-pane-crypto');
+  if (!_cyRoot) return;
   _cryptoLoaded = {};
-  document.getElementById('main-content').innerHTML = `
+  _cyRoot.innerHTML = `
     <div class="view-header">
       <div class="view-title">&#8383; Crypto &amp; Markets</div>
       <div class="view-sub">Market data, paper-trading bot, real Monero mining &amp; your stock watchlist.

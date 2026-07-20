@@ -4,13 +4,14 @@
    Crypto/Settings — every pane stays in the DOM, we only switch which one is
    visible, and each pane lazy-loads once):
      🏦 Overview — net-worth strip built from the other panes' APIs
+     📆 Bills    — real household bills, due dates & payments (tab-bills.js renderBills)
      🏛️ Treasury — the national reserve (tab-treasury.js renderTreasury)
      💵 Missions & Earn — money missions + Cash App (tab-money.js renderMoney)
      👛 Wallets  — real mainnet light-wallets (tab-wallets.js renderWallets)
      📈 Markets  — crypto & markets w/ its own nested sub-tabs (tab-crypto.js renderCrypto)
    Old view ids treasury/money/crypto/wallets still deep-link here (app-nav.js). */
 
-const _FIN_PANES = ['overview', 'pnl', 'treasury', 'money', 'wallets', 'crypto'];
+const _FIN_PANES = ['overview', 'pnl', 'bills', 'treasury', 'money', 'wallets', 'crypto'];
 let _finLoaded = {};   // pane -> true once its renderer has run
 
 async function renderFinance(pane) {
@@ -24,6 +25,7 @@ async function renderFinance(pane) {
     <div class="subtab-bar" id="finance-subtabs">
       <div class="subtab" onclick="financeSub('overview')">&#127974; Overview</div>
       <div class="subtab" onclick="financeSub('pnl')">&#128181; Profit &amp; Loss</div>
+      <div class="subtab" onclick="financeSub('bills')">&#128198; Bills</div>
       <div class="subtab" onclick="financeSub('treasury')">&#127963;&#65039; Treasury</div>
       <div class="subtab" onclick="financeSub('money')">&#128181; Missions &amp; Earn</div>
       <div class="subtab" onclick="financeSub('wallets')">&#128092; Wallets</div>
@@ -46,8 +48,8 @@ function financeSub(k) {
   });
   if (!_finLoaded[k]) {
     _finLoaded[k] = true;
-    ({ overview: finLoadOverview, pnl: finLoadPnl, treasury: renderTreasury, money: renderMoney,
-       wallets: renderWallets, crypto: renderCrypto }[k])();
+    ({ overview: finLoadOverview, pnl: finLoadPnl, bills: renderBills, treasury: renderTreasury,
+       money: renderMoney, wallets: renderWallets, crypto: renderCrypto }[k])();
   }
 }
 window.financeSub = financeSub;

@@ -22,13 +22,21 @@ def _agent_stats(agent_id: int) -> dict:
         " COALESCE(SUM(score),0) AS score,"
         " COALESCE(AVG(horizon_days),0) AS avg_h "
         "FROM oracle_predictions WHERE agent_id=?", (agent_id,)).fetchone()
+    # per-rung accuracy on RESOLVED calls (the ladder view: 1d/3d/5d/1w/2w/…)
+    rungs = [{"h": rr["h"], "resolved": rr["n"], "correct": rr["c"] or 0,
+              "accuracy": round(100 * (rr["c"] or 0) / rr["n"], 1) if rr["n"] else None}
+             for rr in conn.execute(
+                 "SELECT horizon_days AS h, COUNT(*) AS n,"
+                 " SUM(CASE WHEN correct=1 THEN 1 ELSE 0 END) AS c "
+                 "FROM oracle_predictions WHERE agent_id=? AND status='resolved' "
+                 "GROUP BY horizon_days ORDER BY horizon_days", (agent_id,)).fetchall()]
     conn.close()
     r = dict(row)
     resolved = r["resolved"] or 0
     return {"score": round(r["score"] or 0, 1), "resolved": resolved, "open": r["open"] or 0,
             "correct": r["correct"] or 0,
             "accuracy": round(100 * (r["correct"] or 0) / resolved, 1) if resolved else None,
-            "avg_horizon": round(r["avg_h"] or 0, 1)}
+            "avg_horizon": round(r["avg_h"] or 0, 1), "rungs": rungs}
 
 
 @router.get("/api/oracle/agents")

@@ -59,6 +59,13 @@ DEFAULTS = {
     "world_sprites_max_hour": "6",      # generated sheets per rolling hour, max
     "world_sprites_auto":     "0",
     "world_sprites_auto_min": "240",
+    # FRAME QA on generated sheets: reject a sheet whose frames are near-identical
+    # (a still dressed up as an animation — the original bug) or whose character
+    # changes between frames. ON by default; off = install whatever renders.
+    "world_sprites_frame_qa": "1",
+    # how strict, as a % of the articulation the reference pack actually achieves
+    # for that action (40 = must show 40% of the pack's movement). Lower = laxer.
+    "world_sprites_qa_strict": "40",
     # progressive tileset painting: agents slowly replace ONE procedural terrain
     # tile at a time (QA + style-gated; world_tileset.auto_tick). Off by default.
     "world_tileset_auto":     "0",
@@ -106,6 +113,20 @@ DEFAULTS = {
     # spike/high-severity alert, not routine failed-job flakiness (which shows as amber watch).
     "world_raid_disabled":    "0",
     "world_raid_min_gap_min": "60",
+    # CIVILIZATION ERAS (world_era): a decoupled cosmetic overlay — each department
+    # building climbs wood→brick→…→moon when its system is USED and rots back down when
+    # neglected (houses/shops follow the town average). NOT the world_tech gather tier.
+    # advance = minutes of real activity to climb a rung; decay = minutes of neglect to
+    # slip one (decay is slower / more forgiving). ON by default.
+    "world_era_enabled":      "1",
+    "world_era_advance_min":  "20",
+    "world_era_decay_min":    "60",
+    # ERA BUILDING SPRITES (world_era_sprites): OPTIONAL generated top-down pixel-art
+    # building images per (building-type, era) that swap in over the procedural era
+    # restyle when present. Rides the world_sprites GPU pipeline + shares its hourly
+    # budget (world_sprites_max_hour). OFF by default — it spends GPU; pre-seed/one
+    # are the owner's buttons. Made once per (type,era), cached forever.
+    "world_era_sprites_enabled": "0",
     # RUN MODE (world_run): normal = real pace; fast = ~5x sim speed to watch it evolve;
     # test = fast + auto-run the FREE loops (dry run — money/code stay gated). String enum.
     "world_run_mode":         "normal",
@@ -117,14 +138,18 @@ INT_KEYS = {"world_llm_interval_min", "world_active_start", "world_active_end",
             "world_vision_min_score", "world_bills_drive_interval_min",
             "world_leader_upgrade_hours", "world_tileset_auto_min",
             "world_space_interval_min", "world_sprites_max_hour", "world_sprites_auto_min",
-            "world_raid_min_gap_min"}
+            "world_sprites_qa_strict",
+            "world_raid_min_gap_min",
+            "world_era_advance_min", "world_era_decay_min"}
 BOOL_KEYS = {"world_llm_enabled", "world_meetings_enabled", "world_incidents_enabled",
              "world_allow_free", "world_require_review", "world_vision_enabled",
              "world_crypto_mining_enabled", "world_bills_drive", "world_music_lyrics",
              "world_leader_upgrades", "world_tileset_auto", "world_terrain_image_enabled",
              "world_floor_image_enabled", "world_layout_autosave",
              "world_moon_enabled", "world_moon_daytime", "world_space_enabled",
-             "world_sprites_enabled", "world_sprites_auto", "world_raid_disabled"}
+             "world_sprites_enabled", "world_sprites_auto", "world_sprites_frame_qa",
+             "world_raid_disabled",
+             "world_era_enabled", "world_era_sprites_enabled"}
 
 
 def get_all(conn=None):

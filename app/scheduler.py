@@ -39,7 +39,8 @@ def _minutes(key, default_min, floor_min=1):
 
 
 class SecurityScheduler:
-    JOBS = ("tick", "scan", "analyze", "audit", "backup", "guardian", "aiwatch", "agentwatch")
+    JOBS = ("tick", "scan", "analyze", "audit", "backup", "guardian", "aiwatch", "agentwatch",
+            "worldsnap")
 
     def __init__(self):
         self.last = {j: 0.0 for j in self.JOBS}
@@ -187,6 +188,20 @@ class SecurityScheduler:
             except Exception as e:
                 log.warning("agent watcher failed: %s", e)
                 self._ran("agentwatch", f"failed: {e}")
+
+        # ── Public world snapshot: render The Company and push the picture out to
+        # the public site. Outbound only, opt-in, defaults OFF. The module owns its
+        # own interval + gated-content + leak checks; we just poke it.
+        if _setting("world_public_snapshot", "") in ("1", "true", "on", "yes"):
+            try:
+                import world_snapshot
+                r = world_snapshot.tick()
+                if not r.get("skipped"):
+                    self._ran("worldsnap", str(r)[:160])
+                    log.info("world snapshot: %s", r)
+            except Exception as e:
+                log.warning("world snapshot tick failed: %s", e)
+                self._ran("worldsnap", f"failed: {e}")
 
         # ── AI Shield: watch agents for rogue behaviour (opt-in) ──
         if _setting("ai_watch_enabled", "0") == "1" and \

@@ -31,8 +31,14 @@ function _drawBuildingSprites(ctx) {
     if (b.kind === 'hq') continue;                         // HQ keeps its furnished interior
     const cx = (b.c + b.w / 2) * TL, baseY = (b.r + b.h) * TL - 2;
     const targetH = Math.min(b.h * TL * 1.02, b.w * TL * 1.1);   // fill the lot, keep aspect
-    // chain: the building's OWN generated sheet (frame 0 — buildings don't bob)
-    // → its shared-kind own sheet → the downloaded pack sprite → procedural lot.
+    // chain: the CURRENT-ERA generated sprite (wood/brick/…/moon — most specific,
+    // reflects the live civilization era) → the building's OWN generated sheet
+    // (frame 0 — buildings don't bob) → its shared-kind own sheet → the downloaded
+    // pack sprite → procedural lot. drawStatic returns false when absent, so a
+    // missing era sprite falls straight through to today's look.
+    const _est = WM.eraStyle && WM.eraStyle(b);
+    if (window.WSP && WSP.ready && _est && _est.key &&
+        WSP.drawStatic(ctx, 'era_' + (b.loc || b.kind) + '_' + _est.key, 'idle', cx, baseY, targetH)) continue;
     if (window.WSP && WSP.ready &&
         (WSP.drawStatic(ctx, 'building_' + b.id, 'idle', cx, baseY, targetH) ||
          WSP.drawStatic(ctx, 'building_' + (b.loc || b.kind), 'idle', cx, baseY, targetH))) continue;
@@ -169,12 +175,14 @@ function _drawRoofs(ctx) {
   ctx.globalAlpha = alpha;
   for (const b of (WM.buildings || [])) {
     const T = WM.TILE, bx = b.c * T, by = b.r * T, bw = b.w * T, bh = b.h * T;
-    if (b.kind === 'hq') { _flatRoof(ctx, bx, by, bw, bh, winter, nglow); continue; }
+    if (b.kind === 'hq') { _flatRoof(ctx, bx, by, bw, bh, winter, nglow, (WM.eraStyle && WM.eraStyle(b)) || null); continue; }
+    // CIVILIZATION ERA: age the roof + face palette (null → today's per-kind palette)
+    const est = (WM.eraStyle && WM.eraStyle(b)) || null;
     const pal = _ROOF_PAL[b.kind] || _ROOF_PAL.house;
-    const [main, dark, light] = pal[(b.id || 0) % pal.length];
+    const [main, dark, light] = est ? est.roof : pal[(b.id || 0) % pal.length];
     const faceTop = by + bh - WALL_H;
     // FRONT WALL FACE (the vertical surface you'd see standing before the building)
-    const face = _FACE_PAL[(b.id || 0) % _FACE_PAL.length];
+    const face = est ? est.face : _FACE_PAL[(b.id || 0) % _FACE_PAL.length];
     ctx.fillStyle = face; ctx.fillRect(bx, faceTop, bw, WALL_H);
     ctx.fillStyle = 'rgba(0,0,0,.25)'; ctx.fillRect(bx, by + bh - 2, bw, 2);          // base shadow
     const nwin = Math.max(1, Math.min(4, b.w - 3));
@@ -195,6 +203,7 @@ function _drawRoofs(ctx) {
     ctx.fillStyle = 'rgba(0,0,0,.14)';                                                 // shingle bands
     for (let y = ridge + 4; y < faceTop; y += 5) ctx.fillRect(bx - ROOF_OV, y, bw + 2 * ROOF_OV, 1);
     ctx.fillStyle = light; ctx.fillRect(bx - ROOF_OV, ridge - 1, bw + 2 * ROOF_OV, 2);  // lit ridge cap
+    if (est && est.accent === 'neon') { ctx.fillStyle = est.neon || '#3af0d8'; ctx.fillRect(bx - ROOF_OV, ridge, bw + 2 * ROOF_OV, 1); }  // futuristic neon ridge trim
     ctx.fillStyle = 'rgba(0,0,0,.30)'; ctx.fillRect(bx - ROOF_OV, faceTop, bw + 2 * ROOF_OV, 2);  // eaves shadow
     ctx.fillStyle = 'rgba(0,0,0,.18)';                                                 // side trim
     ctx.fillRect(bx - ROOF_OV, rTop, 2, rH + 2); ctx.fillRect(bx + bw + ROOF_OV - 2, rTop, 2, rH + 2);
@@ -237,12 +246,12 @@ function _hqSkylights(bx, by, bw, bh) {
                w: bw * 0.13, h: bh * 0.2 });
   return out;
 }
-function _flatRoof(ctx, bx, by, bw, bh, winter, nglow) {
+function _flatRoof(ctx, bx, by, bw, bh, winter, nglow, est) {
   nglow = nglow || 0;
   const faceTop = by + bh - WALL_H, ry0 = by - WALL_H;
-  // slab: readable mid-gray concrete, not a dark void
-  ctx.fillStyle = '#555d6c'; ctx.fillRect(bx - 2, ry0 - 2, bw + 4, bh + 4);   // footprint shifted up by wall height
-  ctx.fillStyle = '#68717f'; ctx.fillRect(bx + 2, ry0 + 2, bw - 4, bh - 4);
+  // slab: readable mid-gray concrete, not a dark void — aged to the HQ's civilization era when present
+  ctx.fillStyle = est ? est.roof[1] : '#555d6c'; ctx.fillRect(bx - 2, ry0 - 2, bw + 4, bh + 4);   // footprint shifted up by wall height
+  ctx.fillStyle = est ? est.roof[0] : '#68717f'; ctx.fillRect(bx + 2, ry0 + 2, bw - 4, bh - 4);
   // concrete panel seams + a central service walkway so the roof reads as a textured surface
   ctx.strokeStyle = 'rgba(20,26,38,.26)'; ctx.lineWidth = 1;
   for (let px = bx + bw / 6; px < bx + bw - 4; px += bw / 6) { ctx.beginPath(); ctx.moveTo(px, ry0 + 3); ctx.lineTo(px, ry0 + bh - 3); ctx.stroke(); }
@@ -252,8 +261,8 @@ function _flatRoof(ctx, bx, by, bw, bh, winter, nglow) {
   // parapet: lit top edge + inner shadow
   ctx.strokeStyle = '#828c9d'; ctx.lineWidth = 2; ctx.strokeRect(bx - 1, ry0 - 1, bw + 2, bh + 2);
   ctx.strokeStyle = 'rgba(0,0,0,.28)'; ctx.lineWidth = 1; ctx.strokeRect(bx + 1.5, ry0 + 1.5, bw - 3, bh - 3);
-  // face: glass-and-steel front — windows go warm-lit after dark
-  ctx.fillStyle = '#39424f'; ctx.fillRect(bx, faceTop, bw, WALL_H);
+  // face: glass-and-steel front — windows go warm-lit after dark (era-toned when present)
+  ctx.fillStyle = est ? est.roof[1] : '#39424f'; ctx.fillRect(bx, faceTop, bw, WALL_H);
   ctx.fillStyle = nglow > 0.15 ? `rgba(255,205,130,${0.28 + 0.34 * nglow})` : 'rgba(140,190,240,.4)';
   for (let i = 0; i < Math.floor(bw / 14); i++) ctx.fillRect(bx + 3 + i * 14, faceTop + 3, 9, 8);
   // skylights over the atrium — sky-mirrors by day, warm office light by night

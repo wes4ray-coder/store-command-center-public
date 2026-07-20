@@ -1,4 +1,5 @@
 """Progressive agent-filled terrain tilesets — app/world_tileset.py (GPU stubbed)."""
+import pytest
 import json
 import sys
 from pathlib import Path
@@ -210,3 +211,129 @@ def test_status_endpoint_and_double_start_guard(monkeypatch, tmp_path, client):
         assert client.post("/api/world/tileset", json={}).status_code == 409
     finally:
         wt._lock.release()
+
+
+# ── REGRESSION: a PARTIAL tileset must never erase a feature ─────────────────
+# The world lost every road for DAYS: a transient generation failure left the
+# installed manifest with `path: null`, and the renderer drew NOTHING for an
+# unmapped terrain key. These pin the durable fix — completeness is first-class
+# state and every key resolves to real art (atlas → terrain image → procedural).
+def _manifest_with(tmp_path, tiles, atlas_size=(384, 64)):
+    """Write a manifest + a real gen atlas of `atlas_size` on disk."""
+    from PIL import Image
+    import world_tileset as wt
+    Image.new("RGB", atlas_size, (80, 120, 80)).save(tmp_path / wt.ATLAS_FILE)
+    (tmp_path / "manifest.json").write_text(json.dumps({
+        "atlases": [{"id": "gen", "src": wt.ATLAS_FILE}], "sprites": {}, "tiles": tiles, "v": 1,
+    }))
+
+
+def _cell(i, wt):
+    return {"atlas": "gen", "x": i * wt.CELL, "y": 0, "w": wt.CELL, "h": wt.CELL}
+
+
+def test_null_path_reports_degraded_and_never_renders_nothing(monkeypatch, tmp_path, client):
+    """THE bug: manifest maps grass/water/plaza, `path` is null → the roads vanished."""
+    wt = _patch_dir(monkeypatch, tmp_path)
+    idx = {k: i for i, (k, _d) in enumerate(wt.KINDS)}
+    _manifest_with(tmp_path, {
+        "grass": _cell(idx["grass"], wt), "path": None, "floor": None, "wall": None,
+        "water": _cell(idx["water"], wt), "plaza": _cell(idx["plaza"], wt),
+    })
+    monkeypatch.setattr(wt, "_terrain_image_live", lambda: False)
+
+    assert wt.missing_keys() == ["path"]
+    st = client.get("/api/world/tileset").json()
+    assert st["installed"] is True
+    assert st["complete"] is False and st["missing"] == ["path"]
+    assert st["degraded"] is True          # installed ≠ healthy
+    # structural keys are unmapped BY DESIGN — never reported as missing
+    assert "floor" not in st["missing"] and "wall" not in st["missing"]
+    assert "floor" not in st["required"] and "wall" not in st["required"]
+    # …and the unmapped key still resolves to REAL art, never to nothing
+    assert wt.resolve_tile("path") == "procedural"
+    src = {t["key"]: t["source"] for t in st["tiles"]}
+    assert src["path"] == "procedural" and src["grass"] == "atlas"
+    assert src["floor"] == "procedural" and src["wall"] == "procedural"
+    assert "" not in src.values() and None not in src.values()
+
+    # the whole-world terrain image (Layer 2) is the FIRST fallback when it's live
+    monkeypatch.setattr(wt, "_terrain_image_live", lambda: True)
+    assert wt.resolve_tile("path") == "terrain_image"
+    assert wt.resolve_tile("grass") == "atlas"          # real art still wins
+    assert wt.resolve_tile("floor") == "procedural"     # structural ignores the image
+    assert client.get("/api/world/tileset").json()["fallback"] == "terrain_image"
+
+
+def test_missing_key_and_bad_atlas_cell_also_fall_back(monkeypatch, tmp_path, client):
+    """A key absent from `tiles` entirely, and a cell pointing outside the atlas,
+    are the same failure as `null` — both must degrade, not erase."""
+    wt = _patch_dir(monkeypatch, tmp_path)
+    idx = {k: i for i, (k, _d) in enumerate(wt.KINDS)}
+    monkeypatch.setattr(wt, "_terrain_image_live", lambda: False)
+    # `path` key missing altogether; `water` points at a cell past the atlas edge
+    _manifest_with(tmp_path, {
+        "grass": _cell(idx["grass"], wt),
+        "water": {"atlas": "gen", "x": 9999, "y": 0, "w": wt.CELL, "h": wt.CELL},
+        "plaza": _cell(idx["plaza"], wt),
+    })
+    st = client.get("/api/world/tileset").json()
+    assert sorted(st["missing"]) == ["path", "water"]
+    assert st["complete"] is False and st["degraded"] is True
+    assert wt.resolve_tile("path") == "procedural" and wt.resolve_tile("water") == "procedural"
+    # an atlas that isn't on disk at all → every gen key falls back
+    (tmp_path / wt.ATLAS_FILE).unlink()
+    assert sorted(wt.missing_keys()) == ["grass", "path", "plaza", "water"]
+
+
+def test_full_manifest_is_complete_and_not_degraded(monkeypatch, tmp_path, client):
+    wt = _patch_dir(monkeypatch, tmp_path)
+    idx = {k: i for i, (k, _d) in enumerate(wt.KINDS)}
+    _manifest_with(tmp_path, {k: _cell(idx[k], wt) for k in wt.required_keys()}
+                   | {"floor": None, "wall": None})
+    st = client.get("/api/world/tileset").json()
+    assert st["complete"] is True and st["missing"] == [] and st["degraded"] is False
+    assert st["required"] == ["grass", "path", "plaza", "water"]   # LOCKED excluded
+    assert all(t["source"] == "atlas" for t in st["tiles"] if not t["locked"])
+
+
+def test_failed_generation_records_the_missing_keys(monkeypatch, tmp_path, client):
+    """A transient failure must not leave a hole and forget about it."""
+    wt = _patch_dir(monkeypatch, tmp_path)
+    idx = {k: i for i, (k, _d) in enumerate(wt.KINDS)}
+    _manifest_with(tmp_path, {"grass": _cell(idx["grass"], wt), "path": None})
+    monkeypatch.setattr(wt.orch, "image_acquire", lambda: None)
+    monkeypatch.setattr(wt.orch, "image_release", lambda: None)
+    monkeypatch.setattr(wt, "_render_tile_checked", lambda *a, **k: (None, False, "render failed"))
+
+    assert wt.generate(theme="cozy") is False           # "no tiles passed"
+    st = client.get("/api/world/tileset").json()
+    assert st["state"] == "failed"
+    assert "path" in st["note"]                         # the hole is named in the note
+    assert "path" in st["missing_at_failure"] and "floor" not in st["missing_at_failure"]
+    assert st["degraded"] is True
+
+
+def test_degraded_watch_logs_and_never_generates(monkeypatch, tmp_path, client, caplog):
+    """The slow watchdog only looks + logs — no GPU work without the toggle."""
+    import logging as _lg
+    from deps import get_conn
+    from world_defs import mget
+    wt = _patch_dir(monkeypatch, tmp_path)
+    idx = {k: i for i, (k, _d) in enumerate(wt.KINDS)}
+    _manifest_with(tmp_path, {"grass": _cell(idx["grass"], wt), "path": None})
+    monkeypatch.setattr(wt, "start_generate", lambda *a, **k: pytest.fail("must not generate"))
+    conn = get_conn()
+    try:
+        c = conn.cursor()
+        from world_defs import mset
+        mset(c, "tileset_degraded_last", 0)
+        with caplog.at_level(_lg.WARNING):
+            miss = wt.degraded_watch(c)
+        assert miss and "path" in miss
+        assert "path" in caplog.text and "DEGRADED" in caplog.text
+        assert "path" in json.loads(mget(c, "tileset_missing", "[]"))
+        # slow cadence: an immediate second call is a no-op
+        assert wt.degraded_watch(c) is None
+    finally:
+        conn.close()

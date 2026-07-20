@@ -15,11 +15,26 @@ the `money_signal_token` setting.
 This module is a package: the shared ``router`` + schema/enums/JSON-parser live in
 ``_base``; the routes are split across ``signals`` (demand-signal ingest/list),
 ``intel`` (LLM review + carpentry lead hunt), ``missions`` (the missions queue +
-stats) and ``auto`` (the autonomous cadence thread). Importing the submodules runs
-their ``@router.*`` decorators, registering every route on the single shared router.
+stats), ``auto`` (the autonomous cadence thread), ``bills`` (the REAL personal
+bills tracker behind the Finance tab's 📆 Bills pane — /api/bills/*, unrelated to
+the game world's world_bills) and ``ledger`` (its sibling — paychecks IN and
+non-bill purchases OUT, /api/ledger/*, sharing the same pane) and ``calendar``
+(the 🗓️ month view over all three — /api/calendar/* — plus the iCalendar export
+and the token-guarded /api/public/calendar.ics subscription feed for Nextcloud)
+and ``budget`` (the 🧮 AI budget + grocery planner on top of them — /api/budget/*:
+item-level purchase lines, the consumption model, pay-period envelopes and
+safe-to-spend, the calendar's budget/restock markers, and the approval-gated LLM
+grocery plan). Importing the submodules runs their ``@router.*``
+decorators, registering every route on the single shared router.
+
+Import order matters in one place: ``ledger`` imports the line-item helpers from
+``budget``, and ``budget`` imports the cycle math from ``bills``, so ``bills``
+must be imported before ``ledger``. ``budget`` reaches ``calendar`` lazily (inside
+a function) and ``calendar`` reaches ``budget`` the same way, which keeps that
+pair free of an import cycle in both directions.
 """
-from ._base import router                       # shared router + one-time _ensure_schema()
-from . import signals, intel, missions, auto    # noqa: F401  (import registers their @router routes)
+from ._base import router                              # shared router + one-time _ensure_schema()
+from . import signals, intel, missions, auto, bills, ledger, calendar, budget   # noqa: F401  (import registers their @router routes)
 
 # Re-exports so external callers keep resolving names against this module exactly
 # as they did against the old single-file module:

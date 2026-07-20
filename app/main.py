@@ -24,7 +24,7 @@ from routers import (
     world, world_ops, llm, homelab, social, mail, graph, money, crypto, wallets,
     cashapp, peers, oracle, jellycoin, pearl, gpu_guard, watcher as watcher_router,
     research, nsfw as nsfw_router, systems as systems_router,
-    health as health_router, pnl as pnl_router,
+    health as health_router, pnl as pnl_router, games as games_router,
 )
 from routers import prompts as prompts_router   # /api/prompts — the prompt editor
 
@@ -197,7 +197,8 @@ for _mod in (auth, dashboard, proposals, designs, generate, tasks, models,
              system, cults3d, models3d, node, audio, resell_browser, portal, github,
              world, world_ops, llm, homelab, social, mail, graph, money, crypto, wallets,
              cashapp, peers, oracle, jellycoin, pearl, gpu_guard, watcher_router, prompts_router,
-             research, nsfw_router, systems_router, health_router, pnl_router):
+             research, nsfw_router, systems_router, health_router, pnl_router,
+             games_router):
     app.include_router(_mod.router)
 
 # ─── PLUGINS (drop-in, auto-discovered) ──────────────────────────────────────

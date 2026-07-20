@@ -19,7 +19,11 @@ function _moKind(k) { return MO_KINDS[k] || MO_KINDS.other; }
 function _moUsd(cents) { return '$' + ((cents || 0) / 100).toLocaleString(undefined, { maximumFractionDigits: 0 }); }
 
 async function renderMoney() {
-  document.getElementById('main-content').innerHTML = `
+  // Lives inside the 💰 Finance tab (fin-pane-money). If the pane is gone the
+  // user switched views — bail instead of clobbering whatever is on screen now.
+  const _moRoot = document.getElementById('fin-pane-money');
+  if (!_moRoot) return;
+  _moRoot.innerHTML = `
     <div class="view-header">
       <div class="view-title">&#128176; Money</div>
       <div class="view-sub">Real-dollar mission control &mdash; shop demand signals reviewed by the company

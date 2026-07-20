@@ -31,8 +31,11 @@ window.WMob = (function () {
     return ready;
   }
 
-  // draw a monster bottom-centred at (x,y); faceLeft mirrors it toward the HQ
+  // draw a monster bottom-centred at (x,y); faceLeft mirrors it toward the HQ.
+  // Chain: the mob's OWN generated sheet → the pack Idle sheet → a drawn glyph.
   function draw(ctx, mobKey, x, y, size, faceLeft) {
+    if (window.WSP && WSP.ready &&
+        WSP.draw(ctx, 'mob_' + mobKey, 'idle', x, y, size, faceLeft ? 'left' : 'right')) return;
     const p = PATH[mobKey] || PATH.skeleton_base, im = img[MOBS + '/' + p + '/Idle/Idle-Sheet.png'];
     if (!im) {                                            // fallback glyph
       ctx.fillStyle = '#c0392b'; ctx.beginPath(); ctx.arc(x, y - size / 2, size / 3, 0, 6.283); ctx.fill();

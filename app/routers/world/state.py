@@ -101,6 +101,16 @@ def world_state():
         space = world_space.snapshot(conn)                   # JASA space program overlay (never raises)
     except Exception:
         space = None
+    try:
+        import world_era
+        eras = world_era.snapshot(conn)                      # per-building civilization-era overlay (never raises)
+    except Exception:
+        eras = None
+    try:
+        import world_run
+        run_mode = world_run.mode()                          # normal|fast|test — the client preview-cycles in test
+    except Exception:
+        run_mode = "normal"
     placements_out = world_items.placements(c)          # furniture/yard pieces agents bought (item economy)
     art = []                                            # real generated images → wall art in houses (chunk 5)
     try:
@@ -127,6 +137,8 @@ def world_state():
         "raid": raid,
         "security": security,
         "space": space,
+        "eras": eras,
+        "run_mode": run_mode,
         "art": art,
         "placements": placements_out,
         "achievements": achievements,

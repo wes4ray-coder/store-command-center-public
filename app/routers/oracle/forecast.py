@@ -5,6 +5,7 @@ import json as _json
 import re as _re
 import threading
 import time
+import uuid as _uuid
 from datetime import datetime, timedelta
 from typing import Optional
 
@@ -14,7 +15,7 @@ from pydantic import BaseModel
 from deps import *          # get_conn, orch, logger, _call_lmstudio
 from services import *      # (kept consistent with sibling routers)
 
-from ._base import router, CRYPTO_IDS, _meta_get, _meta_set, _assets, _price, _searx
+from ._base import router, CRYPTO_IDS, _meta_get, _meta_set, _assets, _price, _searx, ladder_days
 
 
 def _parse_json(raw: str) -> Optional[dict]:
@@ -33,6 +34,15 @@ def _parse_json(raw: str) -> Optional[dict]:
             return _json.loads(candidate)
         except Exception:
             continue
+    # truncated-reply repair (max_tokens cutoffs): cut back to the last complete
+    # object and try closing the open brackets — salvages a ladder cut mid-rung.
+    cut = frag[:frag.rfind("}") + 1]
+    if cut:
+        for suffix in ("", "}", "]}", "]}}"):
+            try:
+                return _json.loads(cut + suffix)
+            except Exception:
+                continue
     return None
 
 
@@ -48,18 +58,24 @@ def _wait_task(tid: int, timeout: float = 600) -> Optional[str]:
     return None
 
 
+# The ladder forecast prompt. {name} = analyst, {rungs} = enabled horizons (e.g.
+# "1, 3, 5, 7, 14"). Registry-editable via Settings → Prompts (key: oracle_forecast).
 ORACLE_SYS = (
     "You are {name}, an elite market forecaster competing in a live tournament against "
-    "other AI analysts. You are scored on THREE things: (1) getting the DIRECTION right, "
-    "(2) how CLOSE your target price is, and (3) how FAR OUT you called it — a correct "
-    "long-horizon call is worth far more than a safe short one, so be bold but calibrated. "
+    "other AI analysts. Each round you publish a LADDER of calls for ONE asset — one "
+    "prediction per horizon: {rungs} days out. Every rung is scored INDEPENDENTLY on "
+    "(1) getting the DIRECTION right and (2) how close your target price lands relative "
+    "to what's a normal move for that horizon — short rungs are judged on tight "
+    "day-trade-scale moves, long rungs on bigger swings, and a correct 2-week call is "
+    "worth modestly more than a correct 1-day call. So make EVERY rung count: the ladder "
+    "may bend (down tomorrow, up by next month) if that's what the catalysts imply. "
     "First reason about real-world CATALYSTS — macroeconomics (rates, inflation, jobs), "
     "government/regulation, world news, corporate/on-chain events, and social/media "
-    "sentiment — using the research provided. Then commit to a number.\n"
+    "sentiment — using the research provided. Then commit to numbers.\n"
     "Respond with STRICT JSON and NOTHING else:\n"
-    '{"direction":"up"|"down","target_price":<number>,"horizon_days":<int 7-90>,'
-    '"confidence":<0..1>,"thesis":"2-3 sentences naming the specific real-world catalysts '
-    'driving your call"}'
+    '{"thesis":"2-3 sentences naming the specific real-world catalysts driving your ladder",'
+    '"rungs":[{"days":<horizon>,"direction":"up"|"down","target_price":<number>,'
+    '"confidence":<0..1>} — one entry for EACH horizon: {rungs}]}'
 )
 
 
@@ -73,16 +89,59 @@ def _agent_lessons(agent_id: int, limit: int = 5) -> str:
     return "\n".join(f"- {r['text']}" for r in reversed(rows))
 
 
+def _clean_rungs(d: dict, price: float, want: list) -> list:
+    """Validate the model's rung entries against the requested ladder. Returns
+    [{days, direction, target_price, confidence}, ...] — only requested horizons,
+    one per horizon. Tolerates an old-style single-call reply (→ one rung)."""
+    raw = d.get("rungs")
+    if not isinstance(raw, list):
+        # legacy single-object shape: {"direction","target_price","horizon_days",...}
+        if "target_price" in d:
+            h = int(d.get("horizon_days", want[-1]) or want[-1])
+            h = min(want, key=lambda w: abs(w - h))          # snap to the nearest rung
+            raw = [{"days": h, "direction": d.get("direction"),
+                    "target_price": d.get("target_price"), "confidence": d.get("confidence", 0.5)}]
+        else:
+            return []
+    out = {}
+    for r in raw:
+        try:
+            days = int(r.get("days", r.get("horizon_days", 0)))
+            if days not in want or days in out:
+                continue
+            tgt = float(r["target_price"])
+            if tgt <= 0:
+                continue
+            direction = str(r.get("direction", "")).lower()
+            if not direction.startswith(("u", "d")):
+                direction = "up" if tgt >= price else "down"  # derive from the target
+            out[days] = {
+                "days": days,
+                "direction": "up" if direction.startswith("u") else "down",
+                "target_price": tgt,
+                "confidence": max(0.0, min(float(r.get("confidence", 0.5) or 0.5), 1.0)),
+            }
+        except Exception:
+            continue
+    return [out[k] for k in sorted(out)]
+
+
 def _forecast(agent: dict, asset: str, price: float, research: list) -> Optional[dict]:
-    """Run ONE model's forecast for one asset (blocking on the orch task)."""
+    """Run ONE model's ladder forecast for one asset (blocking on the orch task).
+    Returns {"thesis": str, "rungs": [{days, direction, target_price, confidence}]}."""
+    want = ladder_days()
     snips = "\n".join(f"- {r['title']}: {r['snippet']}" for r in research) or "(no research returned)"
     lessons = _agent_lessons(agent["id"])
     user = (f"ASSET: {asset}\nCURRENT PRICE: ${price:,.4f}\n\n"
             f"RESEARCH — real-world signals right now:\n{snips}\n\n"
             f"YOUR PAST TOURNAMENT RESULTS (learn from them):\n{lessons}\n\n"
-            f"Make your call for {asset}.")
-    sysmsg = ORACLE_SYS.replace("{name}", agent["name"])   # NOT .format — prompt has literal { } JSON braces
-    d = None
+            f"Publish your ladder for {asset} — one rung for each horizon: "
+            f"{', '.join(str(w) for w in want)} days.")
+    # NOT .format — the prompt contains literal {{ }} JSON braces
+    sysmsg = (get_prompt("oracle_forecast")
+              .replace("{name}", agent["name"])
+              .replace("{rungs}", ", ".join(str(w) for w in want)))
+    rungs, thesis = [], ""
     for attempt in range(2):
         extra = "" if attempt == 0 else (
             "\n\nYour previous reply was NOT valid JSON. Reply with ONLY the JSON object "
@@ -90,29 +149,23 @@ def _forecast(agent: dict, asset: str, price: float, research: list) -> Optional
         um = user + extra
         # priority=2 (background): the tournament is autonomous batch work — it must
         # yield the GPU to user-facing (priority 0) LLM calls, per the queue convention.
-        tid = orch.submit_llm(lambda u=um: _call_lmstudio(sysmsg, u, max_tokens=1200),
+        tid = orch.submit_llm(lambda u=um: _call_lmstudio(sysmsg, u, max_tokens=2800),
                               desc=f"oracle {agent['name']} · {asset}", model=agent["model"], priority=2)
         raw = _wait_task(tid, 300)   # cap so one slow model can't stall the whole round
         if not raw:
             logger.warning("oracle %s · %s: empty response (try %d)", agent["name"], asset, attempt + 1)
             continue
         d = _parse_json(raw)
-        if d and "direction" in d and "target_price" in d:
-            break
+        if d:
+            rungs = _clean_rungs(d, price, want)
+            if rungs:
+                thesis = str(d.get("thesis", ""))[:600]
+                break
         logger.warning("oracle %s · %s: unparseable (try %d): %s", agent["name"], asset,
                        attempt + 1, (raw or "")[:180].replace("\n", " "))
-        d = None
-    if not d:
+    if not rungs:
         return None
-    try:
-        d["direction"] = "up" if str(d["direction"]).lower().startswith("u") else "down"
-        d["target_price"] = float(d["target_price"])
-        d["horizon_days"] = max(7, min(int(d.get("horizon_days", 30)), 90))
-        d["confidence"] = max(0.0, min(float(d.get("confidence", 0.5)), 1.0))
-        d["thesis"] = str(d.get("thesis", ""))[:600]
-    except Exception:
-        return None
-    return d
+    return {"thesis": thesis, "rungs": rungs}
 
 
 # ── the tournament round (background) ─────────────────────────────────────────
@@ -163,22 +216,24 @@ def _run_round(n_assets: int):
                     _round["done"] += 1
                     _rlog(f"{ag['name']} · {a}: no valid forecast")
                     continue
-                resolve_at = (datetime.now() + timedelta(days=d["horizon_days"])).isoformat(timespec="seconds")
                 market = "crypto" if a in CRYPTO_IDS else "stock"
+                batch = _uuid.uuid4().hex[:12]     # groups this ladder's rungs
                 c = get_conn()
-                c.execute(
-                    "INSERT INTO oracle_predictions (agent_id,agent_name,market,asset,current_value,"
-                    "direction,target_value,horizon_days,resolve_at,confidence,thesis,sources,status) "
-                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,'open')",
-                    (ag["id"], ag["name"], market, a, prices[a], d["direction"], d["target_price"],
-                     d["horizon_days"], resolve_at, d["confidence"], d["thesis"],
-                     _json.dumps(research[a][:3])))
+                for r in d["rungs"]:
+                    resolve_at = (datetime.now() + timedelta(days=r["days"])).isoformat(timespec="seconds")
+                    c.execute(
+                        "INSERT INTO oracle_predictions (agent_id,agent_name,market,asset,current_value,"
+                        "direction,target_value,horizon_days,resolve_at,confidence,thesis,sources,status,batch_id) "
+                        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,'open',?)",
+                        (ag["id"], ag["name"], market, a, prices[a], r["direction"], r["target_price"],
+                         r["days"], resolve_at, r["confidence"], d["thesis"],
+                         _json.dumps(research[a][:3]), batch))
                 c.commit(); c.close()
-                _round["made"] += 1
+                _round["made"] += len(d["rungs"])
                 _round["done"] += 1
-                arrow = "▲" if d["direction"] == "up" else "▼"
-                _rlog(f"{ag['name']} · {a}: {arrow} ${d['target_price']:,.2f} in {d['horizon_days']}d "
-                      f"(conf {d['confidence']:.0%})")
+                chips = " ".join(f"{r['days']}d{'▲' if r['direction'] == 'up' else '▼'}${r['target_price']:,.2f}"
+                                 for r in d["rungs"])
+                _rlog(f"{ag['name']} · {a}: ladder {chips}")
         _rlog(f"round complete — {_round['made']} predictions logged")
     except Exception as e:
         _rlog(f"round aborted: {str(e)[:120]}")

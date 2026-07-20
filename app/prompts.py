@@ -200,6 +200,13 @@ Return ONLY valid JSON with keys:
               help="The Agent Watcher's diagnosis turn: reads a stuck/failed job's timeline "
                    "and returns JSON {summary, cause, fix, resumable} that is fed back to "
                    "the agents on re-run."),
+    # ── Crypto (Oracle tournament) ──
+    PromptDef("oracle_forecast", "Oracle: ladder forecast", "Crypto",
+              ref=("routers.oracle.forecast", "ORACLE_SYS"), templated=True,
+              help="The analyst's tournament turn: research in, a LADDER of price calls out — "
+                   "one STRICT-JSON rung per enabled horizon (1d/3d/5d/1w/2w by default). "
+                   "{name} = the analyst, {rungs} = the enabled horizons; keep both and keep "
+                   "the JSON contract intact."),
     # ── Crypto (JellyCoin) ──
     PromptDef("jelly_mission", "JellyCoin push/sell mission", "Crypto",
               inline="You are a Company marketing agent for Acme. Draft ONE short pitch to "
@@ -221,6 +228,14 @@ Return ONLY valid JSON with keys:
               ref=("routers.money", "LEAD_HUNT_PROMPT"),
               help="Screens web-search results for REAL local carpentry work leads and "
                    "drafts carpentry_lead missions (approval-gated)."),
+    PromptDef("budget_grocery_plan", "Money: AI grocery list", "Assistant",
+              ref=("routers.money.budget", "GROCERY_PLAN_PROMPT"),
+              help="Drafts a grocery list against your REAL remaining food budget, using only "
+                   "items from your own purchase history. The model is forbidden from inventing "
+                   "items or prices — anything not in your history is dropped by the validator, "
+                   "and every price is recomputed from your recorded receipts, not from the "
+                   "model. The result is an advisory draft you accept or reject; it never "
+                   "changes a budget or buys anything."),
     PromptDef("mail_quote", "Mail: carpentry quote draft", "Assistant",
               ref=("routers.mail", "_QUOTE_SYS"),
               help="Drafts the labor-quote email reply (fixed terms baked in). Draft only — "

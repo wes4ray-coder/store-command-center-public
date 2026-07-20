@@ -79,6 +79,26 @@ function _orAssetBadge(asset, market) {
   return `<span style="font-size:.62rem;font-weight:700;color:${col};border:1px solid ${col};
     border-radius:10px;padding:2px 8px;text-transform:uppercase;letter-spacing:.03em;">${esc(asset || '?')}</span>`;
 }
+// ladder rung label + chip (7→1w, 14→2w) and a resolve-countdown, shared with the history views
+function _orRungLabel(h) {
+  if (h == null) return '—';
+  h = Number(h);
+  return h === 7 ? '1w' : (h === 14 ? '2w' : h + 'd');
+}
+function _orRungChip(h) {
+  return `<span style="font-size:.62rem;font-weight:700;color:var(--accent);border:1px solid var(--accent);
+    border-radius:10px;padding:1px 7px;letter-spacing:.03em;">${_orRungLabel(h)}</span>`;
+}
+function _orCountdown(iso) {
+  if (!iso) return '—';
+  const ms = new Date(String(iso).replace(' ', 'T')) - Date.now();
+  if (isNaN(ms)) return '—';
+  if (ms <= 0) return '<span style="color:var(--warn);font-weight:700;">due</span>';
+  const h = ms / 3600000;
+  const txt = h < 1 ? Math.max(1, Math.round(ms / 60000)) + 'm'
+    : (h < 48 ? Math.round(h) + 'h' : Math.round(h / 24) + 'd');
+  return `<span style="color:var(--muted);">in ${txt}</span>`;
+}
 function _orDir(dir) {
   const up = dir === 'up';
   const col = up ? 'var(--green)' : 'var(--red)';
@@ -95,13 +115,14 @@ function _orConfBar(c) {
 /* ── 🏆 LEADERBOARD ───────────────────────────────────────────────────────── */
 async function oracleLoadLeaderboard() {
   const pane = document.getElementById('pane-oracle-leaderboard');
-  let d, llmOpts = [];
+  let d, llmOpts = [], orSt = null;
   try {
-    const [dd, lm] = await Promise.all([
+    const [dd, lm, st] = await Promise.all([
       api('/api/oracle/leaderboard'),
       api('/api/settings/llm-models').catch(() => ({ models: [] })),
+      api('/api/oracle/settings').catch(() => null),   // graceful: null until the server restart
     ]);
-    d = dd; llmOpts = lm.models || [];
+    d = dd; llmOpts = lm.models || []; orSt = st;
   }
   catch (e) { pane.innerHTML = `<div class="empty"><div class="empty-icon">&#10060;</div>${esc(e.message)}</div>`; return; }
   const lb = d.leaderboard || [];
@@ -111,6 +132,9 @@ async function oracleLoadLeaderboard() {
     const s = a.stats || {};
     const score = Number(s.score || 0);
     const scoreCol = score > 0 ? 'var(--green)' : (score < 0 ? 'var(--red)' : 'var(--muted)');
+    const rungChips = (s.rungs || []).map(r =>
+      `<span title="${r.resolved} resolved at ${_orRungLabel(r.h)}">${_orRungLabel(r.h)}&nbsp;${r.accuracy != null ? Math.round(r.accuracy) + '%' : '—'}</span>`
+    ).join(' · ');
     return `
       <tr style="border-top:1px solid var(--border);${a.active ? '' : 'opacity:.5;'}">
         <td style="padding:7px 10px;font-size:.95rem;white-space:nowrap;">${medal(i)}</td>
@@ -119,7 +143,8 @@ async function oracleLoadLeaderboard() {
           <div style="font-size:.68rem;color:var(--muted);">${esc(a.model || '')}</div>
         </td>
         <td style="padding:7px 10px;text-align:right;font-weight:700;color:${scoreCol};">${score > 0 ? '+' : ''}${score.toFixed(1)}</td>
-        <td style="padding:7px 10px;text-align:right;color:var(--muted);">${s.accuracy != null ? _orPct(s.accuracy, 0) : '—'}</td>
+        <td style="padding:7px 10px;text-align:right;color:var(--muted);">${s.accuracy != null ? _orPct(s.accuracy, 0) : '—'}
+          ${rungChips ? `<div style="font-size:.62rem;color:var(--muted);white-space:nowrap;" title="Per-rung accuracy on resolved calls">${rungChips}</div>` : ''}</td>
         <td style="padding:7px 10px;text-align:right;color:var(--muted);">${s.resolved ?? 0}</td>
         <td style="padding:7px 10px;text-align:right;color:var(--muted);">${s.open ?? 0}</td>
         <td style="padding:7px 10px;text-align:right;color:var(--muted);">${s.avg_horizon != null ? Number(s.avg_horizon).toFixed(1) + 'd' : '—'}</td>
@@ -137,8 +162,9 @@ async function oracleLoadLeaderboard() {
   pane.innerHTML = `
     <div class="section-header">
       <div><div class="section-title">&#127942; Leaderboard</div>
-        <div class="section-sub">Models compete to forecast prices. Scored on getting direction right,
-          how close the target was, and how far out they called it &mdash; longer correct calls score much higher.</div></div>
+        <div class="section-sub">Models compete to forecast prices with a LADDER of calls per asset
+          (1d / 3d / 5d / 1w / 2w). Every rung scores independently on direction + horizon-scaled closeness
+          &mdash; a correct 2-week call beats a correct 1-day call modestly.</div></div>
       <button class="btn-sm" onclick="_oracleLoaded.leaderboard=false;oracleSub('leaderboard')">&#8635; Refresh</button>
     </div>
 
@@ -160,6 +186,8 @@ async function oracleLoadLeaderboard() {
       <div id="or-round-status" style="margin-top:10px;"></div>
     </div>
 
+    ${_orSettingsGroup(orSt)}
+
     ${lb.length ? `
     <div class="settings-group" style="max-width:900px;overflow-x:auto;">
       <table style="width:100%;border-collapse:collapse;font-size:.8rem;">
@@ -179,6 +207,62 @@ async function oracleLoadLeaderboard() {
 
   if (_oracleRoundPoll) oraclePollRound();   // resume the live progress view if a round is running
 }
+
+/* ── ⚙️ oracle settings: cadence / ladder rungs / company hookup ──────────── */
+const _OR_RUNGS = [1, 3, 5, 7, 14];   // the standard ladder; 30d is the optional long tier
+function _orSettingsGroup(st) {
+  if (!st || !st.settings) {
+    return `<div class="settings-group" style="max-width:900px;margin-bottom:16px;">
+      <div class="settings-group-title">&#9881;&#65039; Oracle settings</div>
+      <div style="font-size:.74rem;color:var(--muted);">Settings API not reachable yet
+        (pending a server restart) &mdash; the ladder runs on its defaults: 1d / 3d / 5d / 1w / 2w.</div></div>`;
+  }
+  const s = st.settings;
+  const ladder = String(s.oracle_ladder || '1,3,5,7,14').split(',').map(x => parseInt(x, 10));
+  const chk = (id, label, on, hint) => `
+    <label style="display:inline-flex;align-items:center;gap:6px;font-size:.76rem;color:var(--text);cursor:pointer;margin-right:14px;"
+      ${hint ? `title="${esc(hint)}"` : ''}>
+      <input type="checkbox" id="${id}" ${on ? 'checked' : ''}> ${label}</label>`;
+  return `
+    <div class="settings-group" style="max-width:900px;margin-bottom:16px;">
+      <div class="settings-group-title">&#9881;&#65039; Oracle settings</div>
+      <div style="margin-bottom:8px;">
+        ${chk('or-set-auto', '&#128302; Auto-pilot (resolve due calls every 15 min)', String(s.oracle_auto).toLowerCase() !== 'off',
+              'Master switch for the background loop: it scores due rungs every 15 minutes so 1-day calls resolve on time.')}
+        ${chk('or-set-rounds', '&#128197; One autonomous round per day', s.oracle_auto_rounds === '1',
+              'When auto-pilot is on, kick off one fresh tournament round per day.')}
+        ${chk('or-set-hookup', '&#127970; Company may cite the consensus', s.oracle_company_hookup === '1',
+              'The world strategy/leaders, crypto strategy drafts and money reviews may cite the accuracy-weighted consensus. Advisory only — never an automatic action.')}
+      </div>
+      <div style="font-size:.72rem;color:var(--muted);margin-bottom:4px;">Ladder rungs &mdash; each forecast makes one call per enabled horizon:</div>
+      <div>
+        ${_OR_RUNGS.map(h => chk('or-rung-' + h, _orRungLabel(h), ladder.includes(h),
+          `Include the ${_orRungLabel(h)} horizon in every forecast ladder.`)).join('')}
+        ${chk('or-set-long', '30d long tier', s.oracle_long_tier === '1',
+              'Optionally add a 30-day long-tier rung to every ladder.')}
+      </div>
+      <div style="margin-top:10px;">
+        <button class="btn-sm primary" onclick="oracleSaveSettings()">&#128190; Save settings</button>
+        <span style="font-size:.7rem;color:var(--muted);margin-left:8px;">Also editable from the God panel.</span>
+      </div>
+    </div>`;
+}
+async function oracleSaveSettings() {
+  const ladder = _OR_RUNGS.filter(h => document.getElementById('or-rung-' + h)?.checked);
+  if (!ladder.length) { toast('Enable at least one ladder rung', 'error'); return; }
+  const body = { settings: {
+    oracle_auto: document.getElementById('or-set-auto')?.checked ? 'on' : 'off',
+    oracle_auto_rounds: document.getElementById('or-set-rounds')?.checked ? '1' : '0',
+    oracle_company_hookup: document.getElementById('or-set-hookup')?.checked ? '1' : '0',
+    oracle_long_tier: document.getElementById('or-set-long')?.checked ? '1' : '0',
+    oracle_ladder: ladder.join(','),
+  } };
+  try {
+    await api('/api/oracle/settings', { method: 'POST', body: JSON.stringify(body) });
+    toast('Oracle settings saved');
+  } catch (e) { toast('Error: ' + e.message, 'error'); }
+}
+window.oracleSaveSettings = oracleSaveSettings;
 
 /* ── 🧑‍🔬 manage analysts: add / retire / change model ── */
 function _orModelSel(id, current, llmOpts) {

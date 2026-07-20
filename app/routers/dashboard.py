@@ -56,7 +56,7 @@ def get_queue():
         rows = conn.execute("""
             SELECT id, 'image' AS kind, prompt AS label, status,
                    NULL AS progress, NULL AS detail, created_at, COALESCE(nsfw,0) AS nsfw
-              FROM generations  WHERE status='generating'
+              FROM generations  WHERE status IN ('queued','generating')
             UNION ALL
             SELECT id, 'video' AS kind, prompt AS label, status,
                    progress AS progress, progress_msg AS detail, created_at, COALESCE(nsfw,0) AS nsfw
@@ -131,6 +131,114 @@ def get_queue():
         "paused": orch.is_paused(),
         "node_guard": _node_guard_info(),
         "busy": bool(jobs) or comfy["running"] > 0 or comfy["pending"] > 0,
+    }
+
+
+@router.get("/api/queue/history")
+def get_queue_history(kind: str = None, source: str = None, status: str = None,
+                      limit: int = 50):
+    """Persistent completion history for the unified queue — what finished, what
+    it was, when, and which system asked for it. Survives restarts.
+
+    LLM rows come from the queue_history table (written by the orchestrator at
+    every terminal transition). Media jobs (image/video/audio/3D) already keep
+    their lifecycle in their own tables, so they are unioned in here at read
+    time (source='studio') instead of being double-written. Includes a small
+    counts-by-source/status summary over the last 24h.
+    """
+    limit = max(1, min(int(limit or 50), 200))
+    import nsfw as _nsfw
+    _show_nsfw = _nsfw.display_on()
+    items = []
+    conn = get_conn()
+    try:
+        # ── LLM history (the persistent table) ────────────────────────────────
+        for r in conn.execute(
+                "SELECT id, kind, label, task, source, model, status, error,"
+                "       enqueued_at, started_at, finished_at, duration_s"
+                "  FROM queue_history ORDER BY id DESC LIMIT 400").fetchall():
+            it = dict(r)
+            if it.get("source") == "private" and not _show_nsfw:
+                it.update(label=_nsfw.PRIVATE_LABEL, task=None, model=None, error=None)
+            items.append(it)
+
+        # ── Media jobs — already persisted in their own tables; union, don't copy ──
+        for r in conn.execute("""
+            SELECT id, 'image' AS kind, prompt AS label, model AS model, status, NULL AS error,
+                   created_at, updated_at, COALESCE(nsfw,0) AS nsfw
+              FROM generations WHERE status IN ('done','failed')
+            UNION ALL
+            SELECT id, 'video' AS kind, prompt AS label, model_id AS model, status, error,
+                   created_at, updated_at, COALESCE(nsfw,0) AS nsfw
+              FROM videos WHERE status IN ('done','failed','cancelled')
+            UNION ALL
+            SELECT id, 'video chain' AS kind, COALESCE(NULLIF(title,''), concept) AS label,
+                   model_id AS model, status, error, created_at, updated_at, COALESCE(nsfw,0) AS nsfw
+              FROM video_chains WHERE status IN ('done','failed','cancelled')
+            UNION ALL
+            SELECT id, 'audio' AS kind, prompt AS label, model_id AS model, status, error,
+                   created_at, updated_at, COALESCE(nsfw,0) AS nsfw
+              FROM audio_clips WHERE status IN ('done','failed','cancelled')
+             ORDER BY updated_at DESC LIMIT 200
+        """).fetchall():
+            redact = bool(r["nsfw"]) and not _show_nsfw
+            st = {"done": "done", "failed": "error", "cancelled": "cancelled"}[r["status"]]
+            dur = None
+            try:
+                row = conn.execute(
+                    "SELECT (julianday(?) - julianday(?)) * 86400.0 AS d",
+                    (r["updated_at"], r["created_at"])).fetchone()
+                if row and row["d"] is not None and 0 < row["d"] < 86400:
+                    dur = round(row["d"], 1)
+            except Exception:
+                pass
+            items.append({
+                "id": r["id"],
+                "kind": ("private" if redact else r["kind"]),
+                "label": (_nsfw.PRIVATE_LABEL if redact
+                          else (r["label"] or "").strip() or f'{r["kind"]} #{r["id"]}'),
+                "task": None, "source": ("private" if redact else "studio"),
+                "model": (None if redact else r["model"]), "status": st,
+                "error": (None if redact else r["error"]),
+                "enqueued_at": r["created_at"], "started_at": None,
+                "finished_at": r["updated_at"], "duration_s": dur,
+            })
+
+        # ── Summary: counts by source/status over the last 24h ────────────────
+        by_source, by_status = {}, {}
+        for r in conn.execute(
+                "SELECT source, status, COUNT(*) AS n FROM queue_history "
+                "WHERE finished_at >= datetime('now','-1 day') "
+                "GROUP BY source, status").fetchall():
+            src = r["source"] or "other"
+            by_source[src] = by_source.get(src, 0) + r["n"]
+            by_status[r["status"]] = by_status.get(r["status"], 0) + r["n"]
+        for tbl, terminal in (("generations", ("done", "failed")),
+                              ("videos", ("done", "failed", "cancelled")),
+                              ("video_chains", ("done", "failed", "cancelled")),
+                              ("audio_clips", ("done", "failed", "cancelled"))):
+            ph = ",".join("?" * len(terminal))
+            for r in conn.execute(
+                    f"SELECT status, COUNT(*) AS n FROM {tbl} "
+                    f"WHERE status IN ({ph}) AND updated_at >= datetime('now','-1 day') "
+                    f"GROUP BY status", terminal).fetchall():
+                st = {"done": "done", "failed": "error", "cancelled": "cancelled"}[r["status"]]
+                by_source["studio"] = by_source.get("studio", 0) + r["n"]
+                by_status[st] = by_status.get(st, 0) + r["n"]
+    finally:
+        conn.close()
+
+    # Filters + newest-first merge (finished_at is UTC text in one format everywhere).
+    if kind:
+        items = [i for i in items if i["kind"] == kind]
+    if source:
+        items = [i for i in items if i["source"] == source]
+    if status:
+        items = [i for i in items if i["status"] == status]
+    items.sort(key=lambda i: i.get("finished_at") or "", reverse=True)
+    return {
+        "items": items[:limit],
+        "summary": {"window_h": 24, "by_source": by_source, "by_status": by_status},
     }
 
 

@@ -915,12 +915,97 @@ window.WM = (function () {
     else rects.push({ x: bx + bw - wp, y: by, w: wp, h: bh, edge: 'R' });
     return rects;
   }
+  // ── CIVILIZATION ERAS: buildings visibly AGE 🪵→🧱→⚙️→🤠→🏙️→🚀→🌙 ──────────────
+  // Driven by the backend, polled into the BARE lexical global `_worldState` every 3s:
+  //   _worldState.eras = { ladder, emoji, byLoc:{loc:lvl}, town:lvl }
+  // Per building the era level = eras.byLoc[b.loc] ?? eras.town ?? 0. A SINGLE ERA_STYLE
+  // table gives each era its wall / trim / roof palette + a material-accent flag; it is
+  // threaded into the baked wall shell (_paintShell, below) AND the pseudo-3D roofs
+  // (world-render-buildings.js, via WM.eraStyle). Fully ADDITIVE: no eras data → level -1
+  // → today's exact look. Reference _worldState bare with a typeof guard (it is a `let` in
+  // tab-world.js; window._worldState would be undefined — this bit us before).
+  const ERA_STYLE = [
+    { key: 'wood',       wall: '#8a5a34', trim: '#5e3d22', face: '#a6764a', roof: ['#8a5a34', '#623d22', '#a6764a'], accent: 'plank'   },
+    { key: 'brick',      wall: '#9e4a34', trim: '#6f2f22', face: '#b5745a', roof: ['#9e4a34', '#6f2f22', '#c06a4a'], accent: 'brick'   },
+    { key: 'metal',      wall: '#8f98a4', trim: '#565d68', face: '#aab2bc', roof: ['#8f98a4', '#565d68', '#b3bcc7'], accent: 'rivet'   },
+    { key: 'western',    wall: '#c2a066', trim: '#836230', face: '#d4b483', roof: ['#b5834a', '#7c5730', '#d4aa6a'], accent: 'western' },
+    { key: 'modern',     wall: '#cbd0d6', trim: '#8a97a5', face: '#c2c8ce', roof: ['#aeb6c0', '#7c8794', '#d6dde4'], accent: 'glass'   },
+    { key: 'futuristic', wall: '#2c313d', trim: '#161a22', face: '#3a4150', roof: ['#2c313d', '#141821', '#3f4656'], accent: 'neon', neon: '#3af0d8' },
+    { key: 'moon',       wall: '#e7eaf0', trim: '#b9c0cc', face: '#eef1f6', roof: ['#dfe4ec', '#b7bfcb', '#f4f7fb'], accent: 'panel'   },
+  ];
+  function _erasObj() { return (typeof _worldState !== 'undefined' && _worldState) ? _worldState.eras : null; }
+  function eraLevel(b) {                                    // -1 = no era data → render exactly as today
+    const e = _erasObj(); if (!e) return -1;
+    const lvl = (b && b.loc != null && e.byLoc && e.byLoc[b.loc] != null) ? e.byLoc[b.loc]
+              : (e.town != null ? e.town : 0);
+    return Math.max(0, Math.min(ERA_STYLE.length - 1, lvl | 0));
+  }
+  function eraStyle(b) { const l = eraLevel(b); return l < 0 ? null : ERA_STYLE[l]; }
+  function eraEmoji(b) {                                    // tiny age glyph for the name pill
+    const e = _erasObj(), st = eraStyle(b);
+    return (e && st && e.emoji && e.emoji[st.key]) || '';
+  }
+  // Per-era material texture painted INSIDE a wall-band rect `s` (edge-tagged T/B/L/R).
+  function _eraAccent(x, s, st) {
+    const horiz = s.w >= s.h;                               // band runs horizontally (T/B) vs vertically (L/R)
+    if (st.accent === 'brick') {                            // mortar grid
+      x.fillStyle = 'rgba(238,232,224,.28)';
+      if (horiz) { for (let gx = s.x + 5; gx < s.x + s.w; gx += 6) x.fillRect(gx, s.y, 1, s.h); x.fillRect(s.x, s.y + s.h / 2 - 0.5, s.w, 1); }
+      else { for (let gy = s.y + 5; gy < s.y + s.h; gy += 6) x.fillRect(s.x, gy, s.w, 1); x.fillRect(s.x + s.w / 2 - 0.5, s.y, 1, s.h); }
+    } else if (st.accent === 'plank' || st.accent === 'western') {   // wood plank seams along the band
+      x.fillStyle = st.accent === 'western' ? 'rgba(92,62,30,.30)' : 'rgba(60,40,22,.34)';
+      if (horiz) for (let gy = s.y + 3; gy < s.y + s.h; gy += 4) x.fillRect(s.x, gy, s.w, 0.8);
+      else for (let gx = s.x + 3; gx < s.x + s.w; gx += 4) x.fillRect(gx, s.y, 0.8, s.h);
+      if (st.accent === 'western') {                        // false-front vertical board posts
+        x.fillStyle = 'rgba(120,86,44,.45)';
+        if (horiz) for (let gx = s.x + 8; gx < s.x + s.w; gx += 9) x.fillRect(gx, s.y, 1, s.h);
+        else for (let gy = s.y + 8; gy < s.y + s.h; gy += 9) x.fillRect(s.x, gy, s.w, 1);
+      }
+    } else if (st.accent === 'rivet') {                     // steel rivet dots
+      if (horiz) for (let gx = s.x + 4; gx < s.x + s.w - 1; gx += 7) { x.fillStyle = 'rgba(232,238,244,.55)'; x.fillRect(gx, s.y + Math.max(1, s.h * 0.3), 1.4, 1.4); x.fillStyle = 'rgba(18,24,32,.4)'; x.fillRect(gx + 0.5, s.y + Math.max(1, s.h * 0.3) + 0.7, 0.8, 0.8); }
+      else for (let gy = s.y + 4; gy < s.y + s.h - 1; gy += 7) { x.fillStyle = 'rgba(232,238,244,.55)'; x.fillRect(s.x + Math.max(1, s.w * 0.3), gy, 1.4, 1.4); x.fillStyle = 'rgba(18,24,32,.4)'; x.fillRect(s.x + Math.max(1, s.w * 0.3) + 0.5, gy + 0.7, 0.8, 0.8); }
+    } else if (st.accent === 'glass') {                     // blue-grey glass band
+      x.fillStyle = 'rgba(150,190,230,.34)';
+      if (horiz) x.fillRect(s.x, s.y + Math.max(1, s.h * 0.35), s.w, Math.max(1, s.h * 0.3));
+      else x.fillRect(s.x + Math.max(1, s.w * 0.35), s.y, Math.max(1, s.w * 0.3), s.h);
+    } else if (st.accent === 'neon') {                      // neon trim just inside the outer keyline
+      x.fillStyle = st.neon || '#3af0d8';
+      if (s.edge === 'T') x.fillRect(s.x, s.y + s.h - 2, s.w, 1);
+      else if (s.edge === 'B') x.fillRect(s.x, s.y + 1, s.w, 1);
+      else if (s.edge === 'L') x.fillRect(s.x + s.w - 2, s.y, 1, s.h);
+      else x.fillRect(s.x + 1, s.y, 1, s.h);
+    } else if (st.accent === 'panel') {                     // pale moon-panel seams
+      x.fillStyle = 'rgba(150,160,180,.35)';
+      if (horiz) for (let gx = s.x + 7; gx < s.x + s.w; gx += 8) x.fillRect(gx, s.y, 0.8, s.h);
+      else for (let gy = s.y + 7; gy < s.y + s.h; gy += 8) x.fillRect(s.x, gy, s.w, 0.8);
+    }
+  }
+  // Re-bake trigger: building shells are BAKED into the overview/chunks by _paintShell, so an
+  // era change is invisible until we re-bake. Detect a changed era signature each frame (cheap
+  // string over ~50 buildings) and call the existing _bake() path — mirrors the terrain/floor
+  // image swap. Skips the pure startup null→"" (no era data) transition to avoid a wasted bake.
+  let _lastEraSig = null;
+  function _eraSig() {
+    const e = _erasObj(); if (!e) return '';
+    let s = 't' + (e.town ?? 0);
+    if (e.byLoc) for (const b of buildings) if (b.loc != null && e.byLoc[b.loc] != null) s += '|' + b.loc + ':' + (e.byLoc[b.loc] | 0);
+    return s;
+  }
+  function _eraRebakeCheck() {
+    const sig = _eraSig();
+    if (sig === _lastEraSig) return;
+    const prev = _lastEraSig;
+    _lastEraSig = sig;
+    if (_overview && (sig !== '' || (prev !== null && prev !== ''))) _bake();   // era appeared / changed / reverted
+  }
+
   // Paint the themed wall band so it reads UNMISTAKABLY as a wall standing proud of the
   // floor/terrain: a solid wall face (deeper than the floor tone) + a crisp dark keyline
   // on the OUTER pixel (separates the building from the ground) + a lit highlight just
   // inside it + a shadow on the INNER pixel (where the wall meets the interior floor).
   function _paintShell(x, b) {
-    const theme = b.theme || _themeForKind(b.kind);
+    const est = eraStyle(b);                                // civilization era (null → today's per-kind theme)
+    const theme = est ? est.wall : (b.theme || _themeForKind(b.kind));
     const wall = _shade(theme, -0.10);                      // wall face — a touch deeper than the theme so it's never floor-coloured
     const lite = _shade(theme, 0.40), dark = _shade(theme, -0.34);
     const key = _shade(theme, -0.62);                       // crisp outer keyline against the terrain
@@ -944,6 +1029,7 @@ window.WM = (function () {
         x.fillStyle = dark; x.fillRect(s.x + s.w - 3, s.y, 2, s.h);
         x.fillStyle = key; x.fillRect(s.x + s.w - 1, s.y, 1, s.h);
       }
+      if (est) _eraAccent(x, s, est);                        // per-era material texture on top of the wall face
     }
   }
   const _drawBuildingShell = _paintShell;                   // painted per-region into the overview + chunks by _paintRegion()
@@ -1139,6 +1225,24 @@ window.WM = (function () {
   function _bannerFor(b) { return _BANNER[b.kind] || null; }
 
   const _TKEY = { 0: 'grass', 1: 'path', 2: 'floor', 3: 'wall', 4: 'tree', 5: 'water', 6: 'plaza' };
+  // STRUCTURAL keys keep their crafted procedural art BY DESIGN (wood floors, wall
+  // bevels/insets). Mirrors world_tileset.LOCKED server-side and world-assets'
+  // _vetTiles() client-side — they are "unmapped on purpose", never "missing art".
+  const _TSTRUCT = { floor: 1, wall: 1 };
+
+  // Paint THIS tile's slice of the whole-world terrain image (Layer 2). It is the
+  // FIRST fallback when an atlas cell is unmapped/unloadable, so a PARTIAL tileset
+  // degrades to a correct-looking map instead of erasing a feature — the world lost
+  // every road for days when `path` sat at null in the manifest and rendered nothing.
+  // Returns false when no terrain image is resident (caller then paints procedural).
+  function _terrainSlice(x, px, py) {
+    const im = _terrainImg;
+    if (!im || !im.complete || !im.naturalWidth) return false;
+    const sx = im.naturalWidth / W, sy = im.naturalHeight / H;   // image px per world px
+    x.drawImage(im, px * sx, py * sy, TILE * sx, TILE * sy, px, py, TILE, TILE);
+    return true;
+  }
+
   function _tile(x, c, r) {
     const t = grid[r][c], px = c * TILE, py = r * TILE, v = hsh(c, r);
     // Generated/atlas terrain is OFF by default: the auto-painted atlas produced a
@@ -1146,8 +1250,12 @@ window.WM = (function () {
     // world load, so procedural terrain (varied per-tile) always wins unless someone
     // explicitly opts in via window.WORLD_ATLAS_TERRAIN = true after the tileset is
     // fixed (per-tile variation + water QA). This is the durable kill-switch.
-    if (window.WORLD_ATLAS_TERRAIN === true && window.WA && WA.ready
-        && WA.tile(x, _TKEY[t], px, py, TILE)) return;
+    // NEVER RENDER NOTHING: when the override is on, an unmapped/unloadable cell
+    // falls back for THIS TILE ONLY — terrain image → crafted procedural below.
+    if (window.WORLD_ATLAS_TERRAIN === true && window.WA && WA.ready && !_TSTRUCT[_TKEY[t]]) {
+      if (WA.tile(x, _TKEY[t], px, py, TILE)) return;
+      if (_terrainSlice(x, px, py)) return;
+    }
     if (t === T.GRASS) {
       x.fillStyle = v < .5 ? '#3a7d44' : '#357640'; x.fillRect(px, py, TILE, TILE);
       x.fillStyle = 'rgba(74,150,86,.55)'; for (let i = 0; i < 3; i++) { const a = hsh(c, r, i + 1), b = hsh(c, r, i + 5); x.fillRect(px + (a * (TILE - 3) | 0), py + (b * (TILE - 3) | 0), 2, 1); }
@@ -1253,6 +1361,7 @@ window.WM = (function () {
   // both baking and drawImage cost stay flat no matter how big the map is. `canvas` gives the
   // viewport size (falls back to pyramid-only if it's missing).
   function drawTerrain(ctx, canvas) {
+    _eraRebakeCheck();                                        // re-bake baked shells when a building's civilization era changed
     if (!_overview) return;
     if (camera.scale < CHUNK_LOD || !canvas) {                  // zoomed out → coarsest crisp pyramid level is enough
       ctx.drawImage(_baseFor(camera.scale), 0, 0, W, H);
@@ -1306,16 +1415,17 @@ window.WM = (function () {
   function drawBuildingLabels(ctx) {
     ctx.textBaseline = 'alphabetic';
     for (const b of buildings) {
+      const em = eraEmoji(b);                         // tiny civilization-era glyph so age reads even zoomed out
       const icon = _bldIcon(b);
       const name = b.kind === 'hq' ? 'THE COMPANY HQ' : _plainLabel(b);
       if (b.house) {                                  // houses: just a small roof glyph, no clutter
         ctx.font = '9px sans-serif'; ctx.textAlign = 'center';
-        ctx.globalAlpha = 0.5; ctx.fillText('🏠', (b.c + b.w / 2) * TILE, b.r * TILE - 2); ctx.globalAlpha = 1;
+        ctx.globalAlpha = 0.5; ctx.fillText((em ? em : '') + '🏠', (b.c + b.w / 2) * TILE, b.r * TILE - 2); ctx.globalAlpha = 1;
         continue;
       }
       const big = b.kind === 'hq';
       ctx.font = `${big ? 'bold 11' : b.small ? '8' : 'bold 9'}px sans-serif`;
-      const txt = name ? `${icon} ${name}` : icon;
+      const txt = (em ? em + ' ' : '') + (name ? `${icon} ${name}` : icon);
       // measureText was called for every labelled building EVERY frame though the
       // text + font never change — cache the width on the building (invalidate if
       // the label/font ever changes).
@@ -1419,6 +1529,7 @@ window.WM = (function () {
     bumpWear, wearStage, loadWear, takeWearDirty, get wear() { return wear; },
     tileAt: (c, r) => (inb(c, r) ? grid[r][c] : -1),
     drawTerrain, drawBuildingLabels, drawWallBands, drawInterior, fit, get fitScale() { return _fitScale; }, screenToWorld, worldToTile, attachControls, detachControls,
+    eraStyle, eraLevel, eraEmoji,          // civilization-era styling (consumed by world-render-buildings.js roofs)
     setTerrainImage, setTerrainImageEl, exportLayoutBase,
     setFloorImage, setFloorImageEl, terrainAlive, reheal,
     // edit API

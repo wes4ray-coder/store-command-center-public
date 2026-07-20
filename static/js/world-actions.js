@@ -108,9 +108,30 @@ async function worldSettings() {
       <div style="font-weight:600;color:#9fc0ff;margin:10px 0 4px">🎨 Pixel-art generation</div>
       ${txt('world_prop_model', 'Image model', 'blank = store default')}
       ${txt('world_prop_lora', 'Pixel-art LoRA', 'file:strength, blank = off')}
+      <div style="font-weight:600;color:#9fc0ff;margin:10px 0 4px">🧍 Entity sprite sheets <span style="color:#54607a;font-weight:400;font-size:.72rem">· every agent/building/thing owns a cached set of 4-frame sheets — made ONCE on real need (transparent + QA-gated); the downloaded packs are always tried first</span></div>
+      ${chk('world_sprites_enabled', 'Generate a missing action sheet on demand (pack library first, never a picture-box)')}
+      ${num('world_sprites_max_hour', 'Generated sheets per hour, max', '')}
+      ${chk('world_sprites_auto', 'Slow background backfill (one missing sheet per interval)')}
+      ${num('world_sprites_auto_min', 'Backfill attempt every', 'minutes')}
+      ${chk('world_sprites_frame_qa', 'Frame QA — refuse sheets whose frames barely move (a still pretending to be an animation) or whose character changes between frames')}
+      ${num('world_sprites_qa_strict', 'Frame QA strictness', '% of the pack\'s own movement, 40 = default')}
+      <div style="display:flex;align-items:center;gap:8px;margin:7px 0;flex-wrap:wrap">
+        <button class="btn" style="padding:5px 12px;font-size:.76rem" onclick="worldSpritesBackfill()"
+          title="One-off: give every own-look entity its core sheets and repair legacy opaque prop squares (no-GPU knockout). Bulk work is ONLY ever this button or the toggle above — never automatic.">🧍 Backfill missing sheets</button>
+        <span id="ws-sprites-status" style="font-size:.72rem;color:#8a97ad"></span>
+      </div>
+      <div style="display:flex;align-items:center;gap:6px;margin:7px 0;flex-wrap:wrap">
+        <span style="font-size:.76rem;color:#c7d2e5">Re-roll one sheet</span>
+        <select id="ws-regen-entity" style="font-size:.74rem;padding:3px 6px"></select>
+        <select id="ws-regen-action" style="font-size:.74rem;padding:3px 6px"></select>
+        <button class="btn" style="padding:5px 12px;font-size:.76rem" onclick="worldSpriteRegen()"
+          title="Throw away that entity's sheet for that action and render the poses again. Same gates as any render: if the new frames are near-identical or the character drifts, nothing installs and the pack animation keeps playing.">🎲 Re-roll</button>
+        <span id="ws-regen-status" style="font-size:.72rem;color:#8a97ad"></span>
+      </div>
       <div style="font-weight:600;color:#9fc0ff;margin:10px 0 4px">🧱 Terrain tiles <span style="color:#54607a;font-weight:400;font-size:.72rem">· progressive — each tile is QA + style-checked before it goes live; procedural art is the permanent fallback</span></div>
       ${chk('world_tileset_auto', 'Agents slowly paint tiles (one pending tile at a time; failures are quietly scrapped)')}
       ${num('world_tileset_auto_min', 'Paint attempt every', 'minutes')}
+      <div id="ws-tileset-warn" style="display:none;margin:7px 0;padding:7px 9px;border-radius:6px;border:1px solid #6b5220;background:#2a2110;font-size:.74rem;color:#e8c98a"></div>
       <div id="ws-tileset-grid" style="display:flex;gap:10px;flex-wrap:wrap;margin:7px 0"></div>
       <div style="display:flex;align-items:center;gap:8px;margin:7px 0;flex-wrap:wrap">
         <button class="btn" style="padding:5px 12px;font-size:.76rem" onclick="worldTilesetGen()"
@@ -184,15 +205,19 @@ async function worldSettings() {
       ${chk('world_crypto_mining_enabled', 'Skilling boosts GPU mining (pays only in real mined blocks)')}
       <div style="font-weight:600;color:#9fc0ff;margin:10px 0 4px">🎵 Music</div>
       ${chk('world_music_lyrics', 'Agents may write & sing their own lyrics (vocal songs via ACE-Step)')}
+      <div style="font-weight:600;color:#9fc0ff;margin:10px 0 4px">🔮 Oracle <span style="color:#54607a;font-weight:400;font-size:.72rem">· the forecasting tournament — same settings as the Oracle tab; each change saves instantly</span></div>
+      <div id="ws-oracle-body" style="font-size:.78rem;color:#8a97ad">Loading oracle settings…</div>
       <div style="display:flex;gap:8px;margin-top:14px">
         <button class="btn" style="padding:7px 14px" onclick="worldSaveSettings()">💾 Save</button>
         <button class="btn" style="padding:7px 14px" onclick="worldCloseModal()">Cancel</button>
       </div>`;
     _worldModal('⚙️ Company Settings', body);   // via the shared helper so the console tab strip renders
     _tilesetStatus();
+    _wsRegenFill();
     _terrainStatus();
     _floorStatus();
     _moonStatus();
+    _oracleSettingsPane();
     // reflect the live roof-cutaway value in the slider
     { const rf = (window._wmRoofFade != null && window._wmRoofFade > 0) ? window._wmRoofFade : 1.15;
       const sl = document.getElementById('ws-roof-fade'), lb = document.getElementById('ws-roof-fade-val');
@@ -205,8 +230,24 @@ async function _tilesetStatus() {
   if (!el) return;
   try {
     const t = await api('/api/world/tileset');
-    el.textContent = (t.installed ? '✅ generated tiles live' : 'all procedural')
+    el.textContent = (t.installed ? (t.degraded ? '⚠️ generated tiles live — INCOMPLETE' : '✅ generated tiles live') : 'all procedural')
       + (t.state ? ` · ${t.state}${t.note ? ` (${t.note})` : ''}` : '');
+    // An INSTALLED but incomplete set is the roads-vanished failure mode: say so
+    // plainly and offer the one-click fill (same endpoint as "Fill all pending").
+    const warn = document.getElementById('ws-tileset-warn');
+    if (warn) {
+      if (t.degraded && (t.missing || []).length) {
+        warn.style.display = '';
+        warn.innerHTML = `⚠️ <b>Tileset incomplete</b> — no generated art for: `
+          + `<b>${t.missing.map(esc).join(', ')}</b>. Those tiles fall back to `
+          + `${t.fallback === 'terrain_image' ? 'the whole-world terrain image' : 'the procedural art'}, `
+          + `so nothing is missing from the map — but the set doesn't match itself. `
+          + `<span style="color:#8a97ad">(floor/wall are structural and stay procedural on purpose.)</span> `
+          + `<button class="btn" style="padding:2px 8px;font-size:.7rem;margin-left:6px" `
+          + `title="Generate the missing terrain tiles — same QA + style gates, on the GPU." `
+          + `onclick="worldTilesetGen()">🧱 Fill missing tiles</button>`;
+      } else { warn.style.display = 'none'; warn.innerHTML = ''; }
+    }
     const grid = document.getElementById('ws-tileset-grid');
     if (grid && t.tiles) {
       const D = 36, sc = D / (t.cell || 64);                 // thumbnail = atlas cell scaled down
@@ -241,6 +282,59 @@ function _tilesetWatch(doneMsg) {
     }
   }, 5000);
 }
+/* explicit BULK backfill of the per-entity sprite registry (world_sprites) —
+   a button by design: bulk generation must never fire automatically. */
+async function worldSpritesBackfill() {
+  const el = document.getElementById('ws-sprites-status');
+  try {
+    const r = await api('/api/world/sprites/backfill', { method: 'POST', body: '{}' });
+    const msg = r.started ? '🧍 Backfill started — sheets land one at a time (GPU-gated)'
+                          : (r.note || 'a sprite generation is already running');
+    if (el) el.textContent = msg;
+    toast?.(msg);
+  } catch (e) { if (el) el.textContent = e.message; toast?.(e.message); }
+}
+window.worldSpritesBackfill = worldSpritesBackfill;
+
+/* Re-roll ONE entity/action sheet. Populated from the live registry so the
+   owner picks a real entity; the action list is the pack's action vocabulary. */
+const WS_REGEN_ACTIONS = ['idle', 'walk', 'work', 'slice', 'collect', 'fishing',
+                          'water', 'carrywalk', 'carryidle', 'lying'];
+async function _wsRegenFill() {
+  const es = document.getElementById('ws-regen-entity');
+  const as = document.getElementById('ws-regen-action');
+  if (!es || !as) return;
+  as.innerHTML = WS_REGEN_ACTIONS.map(a => `<option value="${a}">${a}</option>`).join('');
+  try {
+    const j = await api('/api/world/sprites');
+    const ents = Object.keys((j && j.entities) || {}).sort();
+    es.innerHTML = ents.length ? ents.map(e => `<option value="${e}">${e}</option>`).join('')
+                              : '<option value="">— no entities yet —</option>';
+    // surface why an action has no own sheet, so a bad roll is visible
+    const failed = ents.length ? ((j.entities[ents[0]] || {}).failed || {}) : {};
+    const el = document.getElementById('ws-regen-status');
+    const first = Object.keys(failed)[0];
+    if (el && first) el.textContent = `last failure — ${first}: ${failed[first]}`;
+  } catch (e) { /* registry offline — the selects just stay empty */ }
+}
+async function worldSpriteRegen() {
+  const el = document.getElementById('ws-regen-status');
+  const entity = (document.getElementById('ws-regen-entity') || {}).value;
+  const action = (document.getElementById('ws-regen-action') || {}).value;
+  if (!entity) { toast?.('No entity has an own look yet'); return; }
+  try {
+    const r = await api(`/api/world/sprites/${encodeURIComponent(entity)}/${encodeURIComponent(action)}/regenerate`,
+                        { method: 'POST', body: '{}' });
+    const msg = r.status === 'queued'
+      ? `🎲 Re-rolling ${entity} · ${action} — it only installs if the frames really animate`
+      : `re-roll ${r.status}${r.reason ? ' — ' + r.reason : ''}`;
+    if (el) el.textContent = msg;
+    toast?.(msg);
+  } catch (e) { if (el) el.textContent = e.message; toast?.(e.message); }
+}
+window.worldSpriteRegen = worldSpriteRegen;
+window._wsRegenFill = _wsRegenFill;
+
 async function worldTilesetGen() {
   try {
     await api('/api/world/tileset', { method: 'POST', body: '{}' });
@@ -522,10 +616,50 @@ async function worldSaveSettings() {
     'world_min_item_cost', 'world_allow_free', 'world_min_price_cents', 'world_max_discount_pct',
     'world_require_review', 'world_prop_model', 'world_prop_lora', 'world_crypto_mining_enabled',
     'world_music_lyrics', 'world_leader_upgrades', 'world_leader_upgrade_hours',
-    'world_tileset_auto', 'world_tileset_auto_min'];
+    'world_tileset_auto', 'world_tileset_auto_min',
+    'world_sprites_enabled', 'world_sprites_max_hour', 'world_sprites_auto', 'world_sprites_auto_min',
+    'world_sprites_frame_qa', 'world_sprites_qa_strict'];
   const s = {};
   keys.forEach(k => { const el = document.getElementById('ws_' + k); if (el) s[k] = el.type === 'checkbox' ? (el.checked ? '1' : '0') : el.value; });
   try { await api('/api/world/settings', { method: 'POST', body: JSON.stringify({ settings: s }) });
         toast?.('Company settings saved ✓'); worldCloseModal(); }
   catch (e) { toast?.(e.message); }
 }
+
+// 🔮 Oracle settings inside the god console — mirrors the Oracle tab (backend: /api/oracle/settings).
+async function _oracleSettingsPane() {
+  const el = document.getElementById('ws-oracle-body');
+  if (!el) return;
+  let d;
+  try { d = await api('/api/oracle/settings'); }
+  catch { el.textContent = 'Oracle settings API unavailable.'; return; }
+  const s = d.settings || {};
+  const ladder = String(s.oracle_ladder || '1,3,5,7,14').split(',').map(Number);
+  const row = (id, lbl, on) => `<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;margin:7px 0">
+    <label style="font-size:.8rem;color:#c7d2e5">${lbl}</label>
+    <input id="${id}" type="checkbox" ${on ? 'checked' : ''} onchange="_oracleSettingsSave()" style="width:18px;height:18px"></div>`;
+  el.innerHTML =
+    row('wsor-auto', 'Auto-pilot (resolve due calls every 15 min)', String(s.oracle_auto).toLowerCase() !== 'off')
+    + row('wsor-rounds', 'One autonomous tournament round per day', s.oracle_auto_rounds === '1')
+    + row('wsor-hookup', 'Company may cite the oracle consensus (advisory only)', s.oracle_company_hookup === '1')
+    + `<div style="font-size:.72rem;color:#54607a;margin:6px 0 2px">Ladder rungs — one call per enabled horizon:</div>
+       <div style="display:flex;gap:12px;flex-wrap:wrap">`
+    + [1, 3, 5, 7, 14].map(h => `<label style="font-size:.78rem;color:#c7d2e5;display:inline-flex;align-items:center;gap:5px">
+      <input id="wsor-rung-${h}" type="checkbox" ${ladder.includes(h) ? 'checked' : ''} onchange="_oracleSettingsSave()"> ${h === 7 ? '1w' : h === 14 ? '2w' : h + 'd'}</label>`).join('')
+    + `<label style="font-size:.78rem;color:#c7d2e5;display:inline-flex;align-items:center;gap:5px">
+      <input id="wsor-long" type="checkbox" ${s.oracle_long_tier === '1' ? 'checked' : ''} onchange="_oracleSettingsSave()"> 30d long tier</label></div>`;
+}
+async function _oracleSettingsSave() {
+  const ladder = [1, 3, 5, 7, 14].filter(h => document.getElementById('wsor-rung-' + h)?.checked);
+  if (!ladder.length) { toast?.('Enable at least one ladder rung'); return; }
+  const body = { settings: {
+    oracle_auto: document.getElementById('wsor-auto')?.checked ? 'on' : 'off',
+    oracle_auto_rounds: document.getElementById('wsor-rounds')?.checked ? '1' : '0',
+    oracle_company_hookup: document.getElementById('wsor-hookup')?.checked ? '1' : '0',
+    oracle_long_tier: document.getElementById('wsor-long')?.checked ? '1' : '0',
+    oracle_ladder: ladder.join(','),
+  } };
+  try { await api('/api/oracle/settings', { method: 'POST', body: JSON.stringify(body) }); toast?.('🔮 Oracle settings saved'); }
+  catch (e) { toast?.(e.message); }
+}
+window._oracleSettingsSave = _oracleSettingsSave;

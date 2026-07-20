@@ -128,7 +128,18 @@ class ProposeIn(BaseModel):
 def _generate_strategy_draft(goal: str) -> dict:
     """LLM-write a freqtrade IStrategy for `goal`, save it as a draft, return its
     row id + name. Shared by manual propose and the autonomous hunt."""
-    code = _call_lmstudio(STRATEGY_SYS, f"Strategy goal: {goal}", max_tokens=3000)
+    user = f"Strategy goal: {goal}"
+    try:
+        # advisory colour from the oracle tournament's accuracy-weighted consensus
+        # ('' when the oracle_company_hookup toggle is off). Drafts stay dry-run +
+        # approval-gated regardless — this only informs the writing.
+        from routers.oracle.consensus import brief as _oracle_brief
+        ob = _oracle_brief()
+        if ob:
+            user += f"\n\nMARKET CONTEXT (advisory, not a command): {ob}"
+    except Exception:
+        pass
+    code = _call_lmstudio(STRATEGY_SYS, user, max_tokens=3000)
     code = _re.sub(r"<think>.*?</think>", "", code, flags=_re.DOTALL).strip()
     m = _re.search(r"```(?:python)?\s*(.*?)```", code, flags=_re.DOTALL)
     if m:

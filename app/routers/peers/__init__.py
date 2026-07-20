@@ -23,7 +23,9 @@ Pairing = invite key + human approval:
   3. Host sees the peer as PENDING and must approve it before any rpc call works.
 """
 from ._base import router
-from . import api, rpc  # noqa: F401 — importing registers their @router routes
+# billing FIRST: its literal /api/peers/billing/... paths must be registered before
+# api.py's /api/peers/{pid}/... or "billing" gets eaten as a {pid} and 422s.
+from . import billing, api, rpc  # noqa: F401 — importing registers their @router routes
 from .client import _call_peer, peer_has_model, delegate_llm
 
 __all__ = ["router", "_call_peer", "peer_has_model", "delegate_llm"]

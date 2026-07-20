@@ -17,6 +17,7 @@ from ._base import (
     router, _hash, _new_key, _peer_from_key, _my_name, _git_info,
     _set_job, _set_review, _MAX_DIFF, _MAX_PROMPT,
 )
+from . import metering
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -93,6 +94,17 @@ def rpc_ping(request: Request):
     return {"ok": True, "name": _my_name(), **_git_info(), "recently_promoted": promoted}
 
 
+@router.get("/api/peers/rpc/price", include_in_schema=False)
+def rpc_price(request: Request):
+    """The price this node is CHARGING RIGHT NOW, for a consumer to fetch BEFORE it
+    submits work. The consumer settles against this copy, so a provider that raises
+    its rate after the fact cannot bill the new rate for an already-quoted job.
+    Older builds have no such route — the consumer then falls back to per-job mode."""
+    _peer_from_key(request)
+    import jellycoin_extra as jx
+    return {"ok": True, "name": _my_name(), **jx.peer_price_quote()}
+
+
 @router.get("/api/peers/rpc/wallet", include_in_schema=False)
 def rpc_wallet(request: Request):
     """A buddy checks their JellyCoin wallet ON OUR CHAIN: balance earned lending us
@@ -111,6 +123,7 @@ def rpc_wallet(request: Request):
             "billing": jellycoin.peer_billing_enabled(),
             "price_per_llm_job_jly": jellycoin.peer_job_price("llm") / jellycoin.UNIT,
             "price_per_review_jly": jellycoin.peer_job_price("review") / jellycoin.UNIT,
+            "quote": __import__("jellycoin_extra").peer_price_quote(),
             "recent_txs": txs}
 
 
@@ -224,13 +237,20 @@ def rpc_job(body: RpcJobIn, request: Request):
     conn.commit()
     jid = cur.lastrowid
     conn.close()
-    # JellyCoin buddy economy: charge the peer's JLY wallet for using our AI helper
-    # (comped if broke — sharing never breaks over play money; toggle in Crypto→JellyCoin).
-    try:
-        import jellycoin
-        jellycoin.peer_job_charge(peer["name"], body.kind)
-    except Exception:
-        pass
+    # JellyCoin buddy economy. TWO modes, and the mode we bill on is the one this
+    # node ADVERTISED (rpc/price) before the job ran:
+    #   job   (legacy default) — flat fee, charged at submit, exactly as before.
+    #   token — "you only pay for the answers": nothing is charged now; the meter
+    #           settles inside _work() once we know how many completion tokens the
+    #           answer actually cost. An errored job therefore costs them nothing.
+    import jellycoin_extra as jx
+    quote = jx.peer_price_quote()
+    if quote["mode"] != "token" or body.kind != "llm":
+        try:
+            import jellycoin
+            jellycoin.peer_job_charge(peer["name"], body.kind)
+        except Exception:
+            pass
 
     if body.kind == "embedding":
         text = (body.input or "")[:8000]
@@ -247,7 +267,7 @@ def rpc_job(body: RpcJobIn, request: Request):
             _set_job(jid, status="done", result=json.dumps(r.json())[:500_000])
         except Exception as e:
             _set_job(jid, status="error", error=str(e)[:300])
-        return {"ok": True, "job_id": jid}
+        return {"ok": True, "job_id": jid, "quote": quote}
 
     sysp = (body.system or "")[:_MAX_PROMPT]
     userp = (body.user or "")[:_MAX_PROMPT]
@@ -257,8 +277,26 @@ def rpc_job(body: RpcJobIn, request: Request):
 
     def _work():
         try:
-            out = _call_lmstudio(sysp, userp, max_tokens=min(int(body.max_tokens or 1500), 4000))
-            _set_job(jid, status="done", result=json.dumps({"output": out})[:500_000])
+            m = metering.call_metered(_call_lmstudio, sysp, userp,
+                                      min(int(body.max_tokens or 1500), 4000))
+            billed = None
+            if quote["mode"] == "token":
+                # settle on the ANSWER, at the rate we advertised before the job ran
+                billed = jx.peer_settle_tokens(
+                    peer["name"], "earned", kind="llm", model=m.get("model"),
+                    prompt_tokens=m["prompt_tokens"], completion_tokens=m["completion_tokens"],
+                    reported=m["reported"],
+                    quoted_rates={"completion": int(quote["price_per_1k_completion_jly"] * 1_000_000),
+                                  "prompt": int(quote["price_per_1k_prompt_jly"] * 1_000_000)})
+            _set_job(jid, status="done", result=json.dumps({
+                "output": m["output"],
+                # the consumer needs these to check the bill against its own count
+                "usage": {"prompt_tokens": m["prompt_tokens"],
+                          "completion_tokens": m["completion_tokens"],
+                          "reported": m["reported"], "model": m.get("model")},
+                "quote": quote,
+                "billed": ({k: billed.get(k) for k in ("billed", "amount", "reason")} if billed else None),
+            })[:500_000])
         except Exception as e:
             _set_job(jid, status="error", error=str(e)[:300])
             raise
@@ -272,7 +310,7 @@ def rpc_job(body: RpcJobIn, request: Request):
         _set_job(jid, orch_tid=tid)
     except Exception as e:
         _set_job(jid, status="error", error=str(e)[:300])
-    return {"ok": True, "job_id": jid}
+    return {"ok": True, "job_id": jid, "quote": quote}
 
 
 @router.get("/api/peers/rpc/job/{jid}", include_in_schema=False)

@@ -3,7 +3,8 @@
    The seat of the economy: the company's "gold" (real $ via the world_ops
    ledger), PayPal management, the full transaction history, spend cap, and
    survival health. This is where all the money lives — the God Console just
-   shows a slice of it. Classic global-scope script; renders into #main-content. */
+   shows a slice of it. Classic global-scope script; renders into the 💰 Finance
+   tab's #fin-pane-treasury pane (tab-finance.js). */
 
 function fmtUSD(c) { return '$' + ((c || 0) / 100).toFixed(2); }
 
@@ -18,7 +19,10 @@ function _health(s) {
 const _LED_ICON = { fund: '💵', revenue: '📈', spend: '🛍️', payment: '✅', payout: '💸' };
 
 async function renderTreasury() {
-  const el = document.getElementById('main-content');
+  // Lives inside the 💰 Finance tab (fin-pane-treasury). If the pane is gone the
+  // user switched views — bail instead of clobbering whatever is on screen now.
+  const el = document.getElementById('fin-pane-treasury');
+  if (!el) return;
   el.innerHTML = '<div style="padding:24px;color:#64748b">Loading the treasury…</div>';
   let s, led;
   try {

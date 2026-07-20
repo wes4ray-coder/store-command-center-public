@@ -553,6 +553,70 @@ def create_world_tables(conn):
     """)
 
 
+def create_queue_history_table(conn):
+    conn.cursor().executescript("""
+    -- ── UNIFIED QUEUE completion history ─────────────────────────────────────
+    -- The orchestrator's task dict is in-memory only, so finished LLM work used
+    -- to vanish from the unified queue the moment it completed (and entirely on
+    -- restart). Every LLM task now writes ONE row here at its terminal
+    -- transition (done|error|cancelled) — see Orchestrator._record_history.
+    -- Media jobs (image/video/audio/3D) already persist their lifecycle in
+    -- generations/videos/video_chains/audio_clips, so they are NOT duplicated
+    -- here; GET /api/queue/history unions them in at read time.
+    CREATE TABLE IF NOT EXISTS queue_history (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        kind        TEXT DEFAULT 'llm',   -- llm (media kinds union in at read time)
+        label       TEXT,                 -- the task desc shown in the queue
+        task        TEXT,                 -- prompt-registry task key (if any)
+        source      TEXT,                 -- system that submitted it (world|proxy|studio|…)
+        model       TEXT,
+        status      TEXT,                 -- done | error | cancelled
+        error       TEXT,                 -- truncated failure reason
+        enqueued_at TEXT,
+        started_at  TEXT,
+        finished_at TEXT,
+        duration_s  REAL
+    );
+    CREATE INDEX IF NOT EXISTS idx_qhist_finished ON queue_history(finished_at);
+    """)
+
+
+def create_bills_tables(conn):
+    """REAL personal bills tracker (Finance → 📆 Bills pane; routers/money/bills.py).
+
+    NOT the game world's in-game bills — those live in world_bills (world_bills.py).
+    No credentials are stored here by design: portal_url + notes only.
+    Called from routers/money/bills.py at import (same one-time-ensure pattern as
+    the money package's _base._ensure_schema), so db.py needs no wiring."""
+    conn.cursor().executescript("""
+    CREATE TABLE IF NOT EXISTS bills (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        name         TEXT NOT NULL,
+        category     TEXT DEFAULT '',      -- free-text user category ("utilities", …)
+        portal_url   TEXT DEFAULT '',      -- the biller's payment/login page (link only — never passwords)
+        portal_note  TEXT DEFAULT '',      -- account nickname / how-to-pay notes (keep secrets out)
+        amount_cents INTEGER,              -- NULL = variable amount (prompted at mark-paid)
+        cycle        TEXT DEFAULT 'monthly', -- monthly|weekly|yearly|quarterly|once|custom-N-days
+        due_day      INTEGER,              -- day-of-month anchor (1-31) so a 31st bill survives Feb
+        next_due     TEXT,                 -- YYYY-MM-DD of the next expected payment
+        autopay      INTEGER DEFAULT 0,
+        active       INTEGER DEFAULT 1,    -- 0 = deactivated (kept for history)
+        extra        TEXT DEFAULT '{}',    -- JSON object of arbitrary user-defined fields
+        created_at   TEXT DEFAULT (datetime('now'))
+    );
+    CREATE TABLE IF NOT EXISTS bill_payments (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        bill_id      INTEGER NOT NULL,
+        paid_at      TEXT DEFAULT (datetime('now')),  -- YYYY-MM-DD (or full datetime)
+        amount_cents INTEGER DEFAULT 0,
+        note         TEXT DEFAULT ''
+    );
+    CREATE INDEX IF NOT EXISTS idx_bills_next_due ON bills(active, next_due);
+    CREATE INDEX IF NOT EXISTS idx_bill_payments_bill ON bill_payments(bill_id, paid_at);
+    """)
+    conn.commit()
+
+
 def run_migrations(conn):
     c = conn.cursor()
     # Migrations — add columns that might be missing in older DBs
@@ -661,3 +725,179 @@ def run_migrations(conn):
             conn.commit()
         except Exception:
             pass   # column already exists
+
+
+def create_ledger_tables(conn):
+    """💵 personal money ledger — paychecks IN + purchases OUT (routers/money/ledger.py).
+
+    The sibling of create_bills_tables(). Bills own recurring obligations and their
+    payment history (bill_payments); this owns income and NON-bill spending.
+    `purchases` deliberately has NO bill_id: bill payments already live in
+    bill_payments, so a bill entered here too would double-count in every total.
+    Outgoings = purchases + bill_payments, two disjoint sets.
+
+    Called from routers/money/ledger.py at import (same one-time-ensure pattern as
+    create_bills_tables), so db.py needs no wiring.
+
+    NOT the game world's economy (world_ledger / world_ops_ledger) — unrelated."""
+    conn.cursor().executescript("""
+    CREATE TABLE IF NOT EXISTS paychecks (
+        id                INTEGER PRIMARY KEY AUTOINCREMENT,
+        source            TEXT NOT NULL,        -- employer or client name
+        amount_cents      INTEGER NOT NULL,     -- net (take-home); may be derived from hours × rate
+        gross_cents       INTEGER,              -- before withholding, optional
+        received_at       TEXT,                 -- YYYY-MM-DD the money landed
+        hours             REAL,                 -- optional, for hourly/contract work
+        hourly_rate_cents INTEGER,              -- per-entry rate — never a hardcoded constant
+        cycle             TEXT DEFAULT 'irregular', -- weekly|biweekly|semimonthly|monthly|irregular
+        notes             TEXT DEFAULT '',
+        extra             TEXT DEFAULT '{}',    -- JSON object of arbitrary user-defined fields
+        created_at        TEXT DEFAULT (datetime('now'))
+    );
+    CREATE TABLE IF NOT EXISTS purchases (
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        purchased_at  TEXT,                     -- YYYY-MM-DD
+        merchant      TEXT NOT NULL,
+        amount_cents  INTEGER NOT NULL,
+        category      TEXT DEFAULT '',          -- free text; shares the bills category vocabulary
+        method        TEXT DEFAULT '',          -- card / cash / transfer / …
+        notes         TEXT DEFAULT '',
+        extra         TEXT DEFAULT '{}',        -- JSON object of arbitrary user-defined fields
+        created_at    TEXT DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_paychecks_received ON paychecks(received_at);
+    CREATE INDEX IF NOT EXISTS idx_purchases_date ON purchases(purchased_at);
+    CREATE INDEX IF NOT EXISTS idx_purchases_category ON purchases(category, purchased_at);
+    """)
+    conn.commit()
+
+
+def create_game_listing_tables(conn):
+    """🎮 Games → shop listing drafts (routers/games_publish.py).
+
+    ONE row per shop listing the owner is hand-building for a game project. This is
+    deliberately a private, opt-in table: a project only appears here because the
+    owner opened the publish editor on it. Nothing scans projects into this table,
+    and nothing in the app lists these rows publicly.
+
+    `wp_id` is set only after an explicit push, and the pushed product is always a
+    WooCommerce DRAFT — re-pushing updates that same id rather than duplicating.
+    Images live as files under DATA_DIR/game_listings/<id>/; the `images` JSON array
+    records {file, kind, label, wp_url?} for each one.
+
+    Called from routers/games_publish.py at import (same one-time-ensure pattern as
+    create_bills_tables / create_ledger_tables), so db.py needs no wiring."""
+    conn.cursor().executescript("""
+    CREATE TABLE IF NOT EXISTS game_listings (
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        project_path  TEXT NOT NULL,          -- where the project lives on the node (NEVER pushed)
+        project_name  TEXT DEFAULT '',
+        engine        TEXT DEFAULT '',        -- godot | unity | unreal
+        title         TEXT NOT NULL,
+        slug          TEXT DEFAULT '',
+        price_cents   INTEGER DEFAULT 0,      -- money is cents everywhere in this app
+        short_desc    TEXT DEFAULT '',
+        long_desc     TEXT DEFAULT '',
+        category      TEXT DEFAULT 'Games',
+        tags          TEXT DEFAULT '',        -- comma separated
+        external_url  TEXT DEFAULT '',        -- optional link/download target
+        button_text   TEXT DEFAULT 'Get the game',
+        images        TEXT DEFAULT '[]',      -- JSON array of image records
+        status        TEXT DEFAULT 'draft',   -- draft (local only) | pushed
+        wp_id         INTEGER,                -- WooCommerce product id, once pushed
+        wp_link       TEXT DEFAULT '',
+        wp_admin_url  TEXT DEFAULT '',
+        wp_status     TEXT DEFAULT '',        -- what Woo reported back; always 'draft' from here
+        pushed_at     TEXT,
+        created_at    TEXT DEFAULT (datetime('now')),
+        updated_at    TEXT DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_game_listings_project ON game_listings(project_path);
+    """)
+    conn.commit()
+
+
+def create_budget_tables(conn):
+    """🧮 Budget + grocery planner — item-level purchases, envelopes, AI plan drafts.
+
+    The three tables the budget engine adds on top of the existing money schema
+    (bills / bill_payments / paychecks / purchases). Nothing here duplicates an
+    amount that already lives elsewhere:
+
+      purchase_items    the line items OF an existing `purchases` row. The parent
+                        purchase keeps owning the authoritative amount_cents (a
+                        receipt total includes tax/fees the lines do not), so
+                        totals and budgets are ALWAYS summed from `purchases`,
+                        never from these lines. Lines exist to answer "what did I
+                        buy, how much of it, at what unit price, how often" —
+                        they are detail, not a second copy of the money.
+                        `normalized_name` is the match key across trips
+                        ("Milk 1 gal" and "milk gallon" both normalize to "milk");
+                        `name` keeps the raw text exactly as typed, for display.
+
+      budget_envelopes  one row per category the owner budgets (food, gas,
+                        savings, other, …). `kind` is 'fixed' (amount_cents) or
+                        'percent' (percent of the period's income basis). The
+                        allocation is COMPUTED per period, never stored — a
+                        stored allocation would go stale the moment income moves.
+
+      budget_plans      AI grocery-list drafts. ADVISORY ONLY: a plan is never
+                        applied to a budget and never becomes a purchase on its
+                        own. It sits at status 'draft' until the owner accepts or
+                        rejects it, and turning an accepted plan into a real
+                        purchase is a separate, explicit owner action.
+                        `items` / `observations` / `llm_notes` are JSON.
+
+    The pay cycle and the feature toggles live in `settings`
+    (budget_pay_cycle / budget_period_anchor / budget_planner_enabled /
+    budget_calendar_predictions), not here — they are single scalars.
+
+    Called from routers/money/budget.py at import (same one-time-ensure pattern as
+    create_bills_tables / create_ledger_tables), so db.py needs no wiring."""
+    conn.cursor().executescript("""
+    CREATE TABLE IF NOT EXISTS purchase_items (
+        id               INTEGER PRIMARY KEY AUTOINCREMENT,
+        purchase_id      INTEGER NOT NULL,     -- FK -> purchases.id (lines die with the purchase)
+        name             TEXT NOT NULL,        -- raw, as typed — shown to the owner verbatim
+        normalized_name  TEXT NOT NULL,        -- match key across trips (see normalize_item_name)
+        qty              REAL DEFAULT 1,       -- how many units this line covers
+        unit             TEXT DEFAULT '',      -- gal / lb / ct / pack / … free text
+        unit_price_cents INTEGER,              -- price of ONE unit; NULL when not known
+        line_total_cents INTEGER NOT NULL,     -- what this line cost (qty × unit price, or as entered)
+        category         TEXT DEFAULT '',      -- falls back to the parent purchase's category
+        created_at       TEXT DEFAULT (datetime('now'))
+    );
+    CREATE TABLE IF NOT EXISTS budget_envelopes (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        category     TEXT NOT NULL UNIQUE,     -- matches purchases.category (case-insensitive)
+        kind         TEXT DEFAULT 'fixed',     -- fixed | percent
+        amount_cents INTEGER DEFAULT 0,        -- used when kind='fixed'
+        percent      REAL DEFAULT 0,           -- used when kind='percent' (of income basis)
+        active       INTEGER DEFAULT 1,
+        sort         INTEGER DEFAULT 0,
+        notes        TEXT DEFAULT '',
+        created_at   TEXT DEFAULT (datetime('now')),
+        updated_at   TEXT DEFAULT (datetime('now'))
+    );
+    CREATE TABLE IF NOT EXISTS budget_plans (
+        id             INTEGER PRIMARY KEY AUTOINCREMENT,
+        period_start   TEXT,                   -- YYYY-MM-DD the plan was drawn for
+        period_end     TEXT,
+        envelope_cents INTEGER,                -- food envelope REMAINING at generation time
+        est_total_cents INTEGER DEFAULT 0,     -- sum of the validated lines, priced from OUR history
+        status         TEXT DEFAULT 'generating', -- generating | draft | accepted | rejected | failed
+        items          TEXT DEFAULT '[]',      -- JSON: validated grocery lines
+        rejected_items TEXT DEFAULT '[]',      -- JSON: lines the validator dropped, with the reason
+        observations   TEXT DEFAULT '[]',      -- JSON: OUR computed facts (not the model's)
+        llm_notes      TEXT DEFAULT '[]',      -- JSON: the model's advisory notes, labelled as such
+        error          TEXT DEFAULT '',
+        task_id        INTEGER,                -- orchestrator task that produced it
+        purchase_id    INTEGER,                -- set only if the owner turned it into a real purchase
+        created_at     TEXT DEFAULT (datetime('now')),
+        updated_at     TEXT DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_purchase_items_purchase ON purchase_items(purchase_id);
+    CREATE INDEX IF NOT EXISTS idx_purchase_items_norm ON purchase_items(normalized_name);
+    CREATE INDEX IF NOT EXISTS idx_budget_plans_status ON budget_plans(status, id);
+    """)
+    conn.commit()

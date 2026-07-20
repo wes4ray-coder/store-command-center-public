@@ -13,10 +13,24 @@ window.WA = (function () {
   const PACKS = '/store/static/world_assets/packs';
   const ANO = PACKS + '/anokolisa-pixel-crawler/Pixel Crawler - Free Pack';
   const FR = 64;                                   // character frame size (px)
+  // The pack ships a whole action library, not just walk/idle/work — the sim's
+  // state machine maps onto REAL animations per activity (world-render-agents
+  // _actionOf is the single source of truth for which state uses which mode).
+  // NOTE: 'work' (Crush) has a PICKAXE baked into the sheet — it is the MINING
+  // animation only; using it for every planted action was the "everything is a
+  // pickaxe" bug.
+  const ABASE = ANO + '/Entities/Characters/Body_A/Animations/';
   const CHAR = {
-    walk: { frames: 6, spd: 110, base: ANO + '/Entities/Characters/Body_A/Animations/Walk_Base/Walk_' },
-    idle: { frames: 4, spd: 200, base: ANO + '/Entities/Characters/Body_A/Animations/Idle_Base/Idle_' },
-    work: { frames: 8, spd: 90,  base: ANO + '/Entities/Characters/Body_A/Animations/Crush_Base/Crush_' },
+    walk:      { frames: 6, spd: 110, base: ABASE + 'Walk_Base/Walk_' },
+    idle:      { frames: 4, spd: 200, base: ABASE + 'Idle_Base/Idle_' },
+    work:      { frames: 8, spd: 90,  base: ABASE + 'Crush_Base/Crush_' },        // pickaxe crush — MINING only
+    slice:     { frames: 8, spd: 90,  base: ABASE + 'Slice_Base/Slice_' },        // blade swing — combat / woodcut
+    collect:   { frames: 8, spd: 150, base: ABASE + 'Collect_Base/Collect_' },    // bend & gather — build / forage / medic
+    fishing:   { frames: 8, spd: 170, base: ABASE + 'Fishing_Base/Fishing_' },    // rod cast + reel
+    water:     { frames: 8, spd: 150, base: ABASE + 'Watering_Base/Watering_' },  // watering can — farming
+    carrywalk: { frames: 6, spd: 110, base: ABASE + 'Carry_Walk/Carry_Walk_' },   // hauling a crate while walking
+    carryidle: { frames: 4, spd: 200, base: ABASE + 'Carry_Idle/Carry_Idle_' },   // holding the crate, planted
+    lying:     { frames: 8, spd: 120, base: ABASE + 'Death_Base/Death_', hold: 7, dir: 'Down' }, // flat on the ground — sleep / downed
   };
   // extracted single-sprite props (name → filename in packs/_extracted/)
   const EXTRACT = {
@@ -46,6 +60,8 @@ window.WA = (function () {
   }
 
   async function init(base) {
+    // (0) per-entity OWN sprite sheets (the WSP registry below) — non-blocking
+    try { if (window.WSP) WSP.init(); } catch (e) { /* world renders pack/procedural */ }
     // (1) optional tileset/structure manifest
     try {
       const r = await fetch((base || '/store/static/world_assets/tilesets') + '/manifest.json', { cache: 'no-cache' });
@@ -66,11 +82,14 @@ window.WA = (function () {
       }
     } catch (e) { /* no manifest → procedural terrain/structures */ }
 
-    // (2) animated character sheets (the important part)
-    const urls = [];
-    for (const act of ['walk', 'idle', 'work']) for (const d of ['Down', 'Up', 'Side']) urls.push(CHAR[act].base + d + '-Sheet.png');
-    const oks = await Promise.all(urls.map(_load));
-    charsReady = oks.every(Boolean);
+    // (2) animated character sheets (the important part). Extra action modes are
+    // best-effort: ready needs only the core walk/idle/work trio, and drawActor
+    // falls back to idle for any mode whose sheet failed to load.
+    const urls = new Set();
+    for (const act in CHAR) for (const d of ['Down', 'Up', 'Side']) urls.add(CHAR[act].base + d + '-Sheet.png');
+    await Promise.all([...urls].map(_load));
+    charsReady = ['walk', 'idle', 'work'].every(act =>
+      ['Down', 'Up', 'Side'].every(d => img[CHAR[act].base + d + '-Sheet.png']));
     if (charsReady) console.log('[WA] animated character sheets loaded');
     // (3) extracted single-sprite props (stations + landmark trees)
     await Promise.all(Object.keys(EXTRACT).map(n => _load(exUrl(n))));
@@ -154,13 +173,23 @@ window.WA = (function () {
     ctx.drawImage(a, t.x, t.y, sw, t.h || 16, dx, dy, size, size); return true;
   }
 
-  // ── animated character: draw a villager facing `dir` in mode walk|idle|work ──
+  // is a mode's sheet actually loaded? (extra action modes are best-effort)
+  function hasMode(mode) {
+    const s = CHAR[mode]; if (!s) return false;
+    return !!img[s.base + (s.dir || 'Down') + '-Sheet.png'];
+  }
+
+  // ── animated character: draw a villager facing `dir` in an action mode
+  //    (walk/idle/work/slice/collect/fishing/water/carrywalk/carryidle/lying) ──
   function drawActor(ctx, dir, mode, x, y, size) {
     if (!charsReady) return false;
-    const spec = CHAR[mode] || CHAR.idle;
-    const sheetDir = (dir === 'left' || dir === 'right') ? 'Side' : (dir === 'up' ? 'Up' : 'Down');
-    const im = img[spec.base + sheetDir + '-Sheet.png']; if (!im) return false;
-    const f = Math.floor(performance.now() / spec.spd) % spec.frames;
+    let spec = CHAR[mode] || CHAR.idle;
+    const dirOf = s => s.dir || ((dir === 'left' || dir === 'right') ? 'Side' : (dir === 'up' ? 'Up' : 'Down'));
+    let im = img[spec.base + dirOf(spec) + '-Sheet.png'];
+    if (!im) { spec = CHAR.idle; im = img[spec.base + dirOf(spec) + '-Sheet.png']; }   // missing sheet → idle
+    if (!im) return false;
+    // hold: freeze on a frame (e.g. 'lying' holds the final on-the-ground frame)
+    const f = spec.hold != null ? spec.hold : Math.floor(performance.now() / spec.spd) % spec.frames;
     const dw = size, dh = size, dyp = y - dh * 0.86;
     ctx.save();
     if (dir === 'left') { ctx.translate(2 * x, 0); ctx.scale(-1, 1); }   // mirror Side → left
@@ -170,5 +199,113 @@ window.WA = (function () {
     return true;
   }
 
-  return { init, has, draw, tile, drawActor, hasSprite, drawSprite, get ready() { return ready; }, get charsReady() { return charsReady; }, get manifest() { return manifest; } };
+  return { init, has, draw, tile, drawActor, hasMode, hasSprite, drawSprite, get ready() { return ready; }, get charsReady() { return charsReady; }, get manifest() { return manifest; } };
+})();
+
+/* ══════════════════════════════════════════════════════════════════════════
+   Per-entity OWN sprite sheets (window.WSP) — the client side of the
+   world_sprites registry. Every agent/player/building/thing may own a cached
+   SET of 4-frame 64px sheets (static/world_assets/entities/<id>/<action>.png),
+   generated ONCE (transparent, QA-gated) and reused forever.
+
+   Render chain per entity action (world-render-agents/_character et al.):
+     (a) the entity's OWN sheet from its manifest      → WSP.draw()
+     (b) the downloaded pack sheet for that action     → WA.drawActor()
+     (c) procedural canvas art                          → existing fallbacks
+   While a sheet is pending the chain simply keeps (b)/(c) — never a
+   picture-box, never a blank. `need()` is the on-demand trigger: it asks the
+   backend (once per entity:action per session) only when the entity has an
+   established own look, or when no pack sheet covers the action.
+   ══════════════════════════════════════════════════════════════════════════ */
+window.WSP = (function () {
+  let idx = {};                    // entity → {sheets:{action:{url,frames,fw,fh,v}}, pending:[..]}
+  let packActs = null;             // actions the pack covers (server-confirmed; null until loaded)
+  const img = {};                  // url → HTMLImageElement
+  const asked = {};                // 'entity:action' → last get-or-enqueue status
+  let ready = false, timer = null, fetching = false, fails = 0;
+
+  async function _fetch() {
+    if (fetching) return;
+    fetching = true;
+    try {
+      const j = await api('/api/world/sprites');
+      idx = (j && j.entities) || {};
+      if (j && j.pack_actions) packActs = j.pack_actions;
+      ready = true; fails = 0;
+    } catch (e) {
+      // registry unreachable (old backend / offline) — back off rather than
+      // spamming 404s every poll; re-armed on the next tab entry (WA.init).
+      if (++fails >= 3 && timer) { clearInterval(timer); timer = null; }
+    }
+    fetching = false;
+  }
+  function init() {
+    fails = 0;
+    _fetch();
+    if (!timer) timer = setInterval(_fetch, 45000);   // pending sheets appear without a reload
+  }
+
+  function _meta(entity, action) {
+    const e = idx[entity];
+    return (e && e.sheets && e.sheets[action]) || null;
+  }
+  function has(entity, action) { return !!_meta(entity, action); }
+  function hasOwnLook(entity) { const e = idx[entity]; return !!(e && e.sheets && Object.keys(e.sheets).length); }
+
+  function _img(m) {
+    const url = m.url + (m.v ? (m.url.includes('?') ? '&' : '?') + 'v=' + m.v : '');
+    let im = img[url];
+    if (im === undefined) {
+      im = new Image(); im.onerror = () => { img[url] = null; };
+      im.src = encodeURI(url); img[url] = im;
+    }
+    return (im && im.complete && im.naturalWidth) ? im : null;
+  }
+
+  /* draw the entity's own sheet for `action`, bottom-anchored at (x,y), height
+     `size`; mirrors for dir==='left'. staticFrame pins frame 0 (buildings —
+     inanimate things must not bob). Returns false when no sheet is ready. */
+  function draw(ctx, entity, action, x, y, size, dir, staticFrame) {
+    const m = _meta(entity, action);
+    if (!m) return false;                       // chain falls to the pack sheet / procedural
+    const im = _img(m); if (!im) return false;
+    const fw = m.fw || 64, fh = m.fh || 64, frames = m.frames || 4;
+    // ms per frame comes from the sheet now: generated sheets carry the pack's
+    // frame COUNT per action (walk 6, idle 4, work 8), so a fixed 180ms played
+    // them at the wrong speed — a 6-frame walk crawled, an 8-frame swing dragged.
+    const spd = m.spd || 180;
+    const f = staticFrame ? 0 : Math.floor(performance.now() / spd) % frames;
+    const dh = size, dw = size * (fw / fh), dyp = y - dh * 0.92;
+    ctx.save();
+    if (dir === 'left') { ctx.translate(2 * x, 0); ctx.scale(-1, 1); }
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(im, f * fw, 0, fw, fh, x - dw / 2, dyp, dw, dh);
+    ctx.restore();
+    return true;
+  }
+  function drawStatic(ctx, entity, action, x, y, size) { return draw(ctx, entity, action, x, y, size, 'down', true); }
+
+  /* ON-DEMAND need trigger: called from render paths on a cache miss. Fires the
+     get-or-enqueue POST at most once per entity:action per session; the backend
+     arbitrates (pack-first, toggles, hourly budget, one render at a time). */
+  function need(entity, action, label, kind) {
+    if (!ready || !entity || !action) return;
+    const key = entity + ':' + action;
+    if (asked[key] || has(entity, action)) return;
+    const e = idx[entity];
+    if (e && e.pending && e.pending.indexOf(action) >= 0) return;   // already in flight
+    // only ask when there is a real need: an established own look (keep it
+    // consistent across actions), or no pack sheet covering this action.
+    const packCovers = kind !== 'agent' ? false
+      : (packActs ? packActs.indexOf(action) >= 0 : (window.WA && WA.hasMode && WA.hasMode(action)));
+    if (!hasOwnLook(entity) && packCovers) { asked[key] = 'pack'; return; }
+    asked[key] = 'asked';
+    api('/api/world/sprites/' + encodeURIComponent(entity) + '/' + encodeURIComponent(action),
+        { method: 'POST', body: JSON.stringify({ label: label || '', kind: kind || 'agent' }) })
+      .then(r => { asked[key] = (r && r.status) || 'done'; if (r && r.status === 'queued') setTimeout(_fetch, 20000); })
+      .catch(() => { asked[key] = 'error'; });
+  }
+
+  return { init, has, hasOwnLook, draw, drawStatic, need,
+           get ready() { return ready; }, get index() { return idx; } };
 })();

@@ -71,14 +71,60 @@ valid    :=  int(pow_hash, big-endian) < target               -- 256-bit compare
   block, so bootstrap mining works on any hardware.
 - **Difficulty retarget:** every 20 blocks, target scales by
   `actual_span / expected_span` toward **60-second blocks**, clamped to 4× per
-  adjustment, never easier than genesis.
+  adjustment (in exact integer arithmetic), never easier than genesis.
+- **Stall recovery:** because retargeting only happens when a block lands, a chain
+  whose miners all disappear at a hard target could never recover on its own. Work
+  issued after 20 minutes of silence is therefore progressively eased — one step
+  per missed block interval — until some rig can find a block again. It clears the
+  moment a block lands, and it can never mint past the cap, so it affects liveness
+  only. Operator-toggleable.
 - **Reward:** 50 JLY per block, halving every 50,000 blocks.
 - **Premine:** 1,000,000 JLY minted in the genesis block to the treasury — the
   float that funds NFT fees, compute payouts, grants, and store perks. All
   further supply is mined.
+- **Maximum supply:** **6,000,000 JLY. Hard, and enforced in code.**
 - **Units:** 1 JLY = 1,000,000 µJLY. All ledger math is integer µJLY.
 
-### 3.1 The getwork protocol
+### 3.1 The supply cap
+
+Summed exactly, the halving series pays
+`Σ (50 JLY >> k) × 50,000` for k = 0…25 — after which the integer reward shifts to
+zero at height 1,300,000 — for **4,999,999.4 JLY** of mining subsidy. With the
+1,000,000 JLY premine that is 5,999,999.4 JLY, and the cap is that figure rounded
+to a clean **6,000,000 JLY**. The cap was chosen to ratify the curve already in
+force rather than to replace it: no holder's expected emission changes.
+
+Three properties matter, and all three are enforced when a block is accepted, not
+merely asserted here:
+
+1. **Every mint site is capped.** Both the coinbase and the skilling-boost payout
+   draw from the same headroom. Nothing else in the system can create JLY.
+2. **The last block is trimmed, not overshot.** When the remaining headroom is
+   smaller than the scheduled reward, the block pays exactly the headroom. After
+   that the reward is zero.
+3. **Boosts are inside the cap.** They were previously additional, unbounded
+   emission on top of the block reward. They are not any more — which means boost
+   emission now *shortens* the subsidy tail, spending headroom that would
+   otherwise have paid the final coinbases. This is the honest consequence of
+   having one cap that means one number.
+
+Because 6,000,000 is a rounding-up, the subsidy alone stops 0.6 JLY short of the
+cap; only boost emission can consume that last fraction. There is no burn
+mechanism, so headroom never returns once spent.
+
+### 3.2 The tail: after the cap, mining pays nothing
+
+**This chain has no transaction fees.** Transfers are free. So when the cap is
+reached there is no block subsidy *and* no fee market to replace it, and a miner
+who solves a block past that point earns **zero JLY**. That is stated plainly
+because it is the truthful outcome of the design, not an oversight: blocks are
+still validated, ordered, and appended, so mining continues to secure and
+sequence the chain — it simply stops paying.
+
+No fee market is invented to paper over this. If one is ever wanted it is a
+deliberate future decision, not something this document quietly assumes.
+
+### 3.3 The getwork protocol
 
 Miners speak plain HTTP to the node: `GET /work` returns
 `{work_id, header76, target, height}`; the miner grinds nonces; `POST /submit`
@@ -86,7 +132,7 @@ returns accept/reject. Work expires in 10 minutes; the first valid submission at
 a height wins; later ones are rejected as stale. The node *verifies* hashes — it
 never generates them.
 
-### 3.2 Why GPU-only holds
+### 3.4 Why GPU-only holds
 
 The reference miner enumerates OpenCL **GPU devices only** and refuses to start
 otherwise. Could someone write a CPU miner against the open protocol? Yes — and
@@ -111,7 +157,16 @@ Agents in the operator's virtual company gather resources (woodcutting, mining,
 fishing…). Each unit of in-world yield queues a **boost ticket**. Tickets do
 nothing on their own: they cash out **only inside a real mined block**, minting a
 small bonus (0.05 JLY/ticket, ≤ 20 JLY/block, 24 h expiry) split between the
-agent and the company. No GPU online → tickets expire worthless. The game can
+agent and the company. No GPU online → tickets expire worthless.
+
+Boost emission is **inside the 6,000,000 JLY cap** (§3.1): a block pays its
+coinbase first and boosts only from what headroom is left. If only part of the
+queue fits, the tickets that fit are paid and the rest **stay pending**, first in
+line for the next block. Tickets that will never be paid — aged out, or with the
+cap exhausted — are **marked expired with a stated reason and kept on the ledger**
+rather than deleted, so owed value never silently disappears; and once the cap is
+exhausted no new tickets are issued at all, since that would accrue a debt the
+chain has already promised not to pay. The game can
 *decorate* proof-of-work; it can never *replace* it. The whole mechanism sits
 behind an operator toggle.
 

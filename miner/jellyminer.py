@@ -16,6 +16,18 @@ Protocol (must match app/jellycoin.py on the Store):
     valid   when sha256(sha256(message)) read as a big-endian int < target
     POST {url}/api/jelly/mining/submit  {work_id, nonce, miner}
 
+The Store may answer getwork with HTTP 503 + {"pause": true, "retry_after": n}
+instead of a job, meaning "stand down" — the AI queue owns the GPU, or we are
+outside the hours the owner set. We sleep and re-poll with a modest backoff
+rather than fight LM Studio/ComfyUI for VRAM. Submits are never held, so a nonce
+found just before a pause is still banked.
+
+A 200 may also carry {"policy": {"throttle": 90, "batch": 1048576}} — the Store
+telling this rig how hard to mine RIGHT NOW. We adopt it between batches, so the
+owner can retune intensity from the UI with no restart and no reinstall. The
+field is optional in both directions: an older Store never sends it (we keep the
+CLI values), and --local-policy pins the CLI values against a Store that does.
+
 Install (any box with a GPU):
     pip install pyopencl numpy requests
     python3 jellyminer.py --url http://<store-host>:8787 --token <X-Jelly-Token> --name rig1
@@ -109,6 +121,34 @@ def gpu_devices():
     return devs
 
 
+# Intensity bounds — must stay in step with app/routers/jellycoin.py, which
+# clamps to the same range before sending a policy.
+THROTTLE_MAX = 90
+BATCH_MIN, BATCH_MAX = 1 << 16, 1 << 26
+
+
+def apply_policy(policy, throttle, batch):
+    """Adopt a Store-sent intensity policy. Returns (throttle, batch, changed?).
+
+    Defensive on purpose: this arrives over the network, so anything malformed is
+    ignored and the current values survive. Missing keys keep their current value
+    rather than snapping to a default, so the Store can send `throttle` alone."""
+    if not isinstance(policy, dict):
+        return throttle, batch, False
+    new_t, new_b = throttle, batch
+    if policy.get("throttle") is not None:
+        try:
+            new_t = min(THROTTLE_MAX, max(0, int(policy["throttle"])))
+        except (TypeError, ValueError):
+            pass
+    if policy.get("batch") is not None:
+        try:
+            new_b = min(BATCH_MAX, max(BATCH_MIN, int(policy["batch"])))
+        except (TypeError, ValueError):
+            pass
+    return new_t, new_b, (new_t != throttle or new_b != batch)
+
+
 def verify_cpu(header76: bytes, nonce: int, target: int) -> bool:
     """Exact 256-bit check of ONE candidate before submitting (verification, not mining)."""
     msg = header76 + struct.pack(">I", nonce)
@@ -128,7 +168,10 @@ def main():
     ap.add_argument("--throttle", type=int, default=0, metavar="PCT",
                     help="percent of time to idle between batches (0-90). Use ~50 on a "
                          "modern card that's ALSO running AI (LM Studio etc.) so mining "
-                         "fills the gaps instead of fighting for the GPU")
+                         "fills the gaps instead of fighting for the GPU. ~90 with a small "
+                         "--batch is the 'barely there' setting for a box doing other work")
+    ap.add_argument("--local-policy", action="store_true",
+                    help="ignore the intensity the Store sends and keep these CLI values")
     args = ap.parse_args()
 
     devs = gpu_devices()
@@ -141,11 +184,15 @@ def main():
               "and none will be added. Install your GPU's OpenCL driver (old NVIDIA: legacy\n"
               "driver; old AMD: mesa/rusticl or amdgpu) and retry. `clinfo` helps debug.")
         return 2
-    throttle = min(90, max(0, args.throttle))
+    # Live-tunable intensity. These start at the CLI values and are replaced
+    # whenever the Store sends a different policy (unless --local-policy).
+    throttle = min(THROTTLE_MAX, max(0, args.throttle))
+    batch = min(BATCH_MAX, max(BATCH_MIN, args.batch))
     dev = devs[min(args.device, len(devs) - 1)]
     gpu_name = dev.name.strip()
-    print(f"⛏️  JellyMiner on: {gpu_name}  (OpenCL, batch {args.batch}"
-          + (f", throttle {throttle}%" if throttle else "") + ")")
+    print(f"⛏️  JellyMiner on: {gpu_name}  (OpenCL, batch {batch}"
+          + (f", throttle {throttle}%" if throttle else "")
+          + (", local policy" if args.local_policy else "") + ")")
 
     ctx = cl.Context([dev])
     queue = cl.CommandQueue(ctx)
@@ -159,17 +206,50 @@ def main():
     if args.token:
         sess.headers["X-Jelly-Token"] = args.token
     hashrate = 0.0
+    holds = 0                       # consecutive "AI queue owns the GPU" answers
 
     while True:
         try:
             r = sess.get(f"{args.url}/api/jelly/mining/work", timeout=10,
                          params={"miner": args.name, "gpu": gpu_name, "hashrate": hashrate})
+            # The Store holds mining while its AI queue is working. Accept the
+            # hold from a 503 body OR a 200 body (a proxy could rewrite either),
+            # and stay perfectly happy on an older Store that never sends one.
+            hold = {}
+            if r.status_code in (503, 200):
+                try:
+                    body = r.json()
+                    hold = body if isinstance(body, dict) and body.get("pause") else {}
+                except ValueError:
+                    hold = {}
+            if hold:
+                holds += 1
+                base = float(hold.get("retry_after") or 15)
+                wait = min(60.0, max(2.0, base) * (1.5 ** min(holds - 1, 4)))
+                if holds == 1 or holds % 4 == 0:
+                    print(f"⏸️  mining paused — {hold.get('reason', 'GPU in use by the AI queue')}"
+                          f"; re-checking in {wait:.0f}s")
+                time.sleep(wait)
+                continue
             r.raise_for_status()
             work = r.json()
         except Exception as e:
             print(f"getwork failed ({e}); retrying in 10s")
             time.sleep(10)
             continue
+        if holds:
+            print("▶️  mining resumed")
+            holds = 0
+
+        # Live intensity. Adopted BEFORE this round's grind, so a change the owner
+        # (or the Company, or the chain-defence ramp) made takes effect on the very
+        # next batch — no restart, no reinstall. An older Store sends no policy and
+        # this is a no-op.
+        if not args.local_policy:
+            throttle, batch, changed = apply_policy(work.get("policy"), throttle, batch)
+            if changed:
+                src = (work.get("policy") or {}).get("source") or "the Store"
+                print(f"🎚️  intensity now throttle {throttle}%, batch {batch} (set by {src})")
 
         header76 = bytes.fromhex(work["header76"])
         target = int(work["target"], 16)
@@ -206,12 +286,12 @@ def main():
             tb = time.time()
             out_np[:] = 0
             cl.enqueue_copy(queue, out_buf, out_np)
-            kern(queue, (args.batch,), None, hdr_buf,
+            kern(queue, (batch,), None, hdr_buf,
                  np.uint32(base), np.uint64(max(1, cmp_hi)), out_buf)
             cl.enqueue_copy(queue, out_np, out_buf)
             queue.finish()
-            hashes += args.batch
-            base += args.batch
+            hashes += batch
+            base += batch
             if throttle:    # politeness for modern cards that also run AI workloads
                 time.sleep((time.time() - tb) * throttle / (100 - throttle))
             if out_np[0]:

@@ -33,46 +33,69 @@ function _orThesis(p) {
   </details>`;
 }
 
-/* ── 🔮 OPEN CALLS ────────────────────────────────────────────────────────── */
+/* ── 🔮 OPEN CALLS — grouped by asset, rung chips + resolve countdowns ────── */
 async function oracleLoadOpen() {
   const pane = document.getElementById('pane-oracle-open');
   let d;
-  const q = '/api/oracle/predictions?status=open&limit=200' + (_oracleHistoryFilter ? '&agent_id=' + encodeURIComponent(_oracleHistoryFilter) : '');
+  const q = '/api/oracle/predictions?status=open&limit=300' + (_oracleHistoryFilter ? '&agent_id=' + encodeURIComponent(_oracleHistoryFilter) : '');
   try { d = await api(q); }
   catch (e) { pane.innerHTML = `<div class="empty"><div class="empty-icon">&#10060;</div>${esc(e.message)}</div>`; return; }
-  const preds = (d.predictions || []).slice().sort((a, b) =>
-    String(a.resolve_at || '').localeCompare(String(b.resolve_at || '')));
+  const preds = d.predictions || [];
 
-  const rows = preds.map(p => `
-    <tr style="border-top:1px solid var(--border);vertical-align:top;">
-      <td style="padding:7px 10px;font-weight:600;">${esc(p.agent_name || '')}</td>
-      <td style="padding:7px 10px;">${_orAssetBadge(p.asset, p.market)}</td>
-      <td style="padding:7px 10px;">${_orDir(p.direction)}</td>
-      <td style="padding:7px 10px;white-space:nowrap;">${_orUsd(p.current_value)} <span style="color:var(--muted);">&rarr;</span> <b>${_orUsd(p.target_value)}</b></td>
-      <td style="padding:7px 10px;text-align:center;color:var(--muted);white-space:nowrap;">${p.horizon_days != null ? p.horizon_days + 'd' : '—'}</td>
-      <td style="padding:7px 10px;color:var(--muted);white-space:nowrap;">${_orDate(p.resolve_at)}</td>
-      <td style="padding:7px 10px;min-width:120px;">${_orConfBar(p.confidence)}</td>
-      <td style="padding:7px 10px;max-width:280px;">${_orThesis(p)}</td>
-    </tr>`).join('');
+  // group by asset; inside an asset keep each analyst's ladder together, short rungs first
+  const byAsset = {};
+  preds.forEach(p => (byAsset[p.asset] = byAsset[p.asset] || []).push(p));
+  const assetKeys = Object.keys(byAsset).sort((a, b) => {
+    const soon = k => Math.min(...byAsset[k].map(p => new Date(String(p.resolve_at || '9999').replace(' ', 'T')).getTime() || Infinity));
+    return soon(a) - soon(b);
+  });
+
+  const cards = assetKeys.map(asset => {
+    const ps = byAsset[asset].slice().sort((a, b) =>
+      (a.agent_name || '').localeCompare(b.agent_name || '')
+      || String(b.batch_id || '').localeCompare(String(a.batch_id || ''))
+      || (a.horizon_days || 0) - (b.horizon_days || 0));
+    const rows = ps.map((p, i) => {
+      const newLadder = i === 0 || ps[i - 1].agent_name !== p.agent_name || ps[i - 1].batch_id !== p.batch_id;
+      return `
+      <tr style="border-top:1px ${newLadder ? 'solid' : 'dashed'} var(--border);vertical-align:top;${newLadder ? '' : 'opacity:.92;'}">
+        <td style="padding:6px 10px;font-weight:600;">${newLadder ? esc(p.agent_name || '') : ''}</td>
+        <td style="padding:6px 10px;white-space:nowrap;">${_orRungChip(p.horizon_days)}</td>
+        <td style="padding:6px 10px;">${_orDir(p.direction)}</td>
+        <td style="padding:6px 10px;white-space:nowrap;">${_orUsd(p.current_value)} <span style="color:var(--muted);">&rarr;</span> <b>${_orUsd(p.target_value)}</b></td>
+        <td style="padding:6px 10px;white-space:nowrap;">${_orCountdown(p.resolve_at)} <span style="color:var(--muted);font-size:.66rem;">${_orDate(p.resolve_at)}</span></td>
+        <td style="padding:6px 10px;min-width:110px;">${_orConfBar(p.confidence)}</td>
+        <td style="padding:6px 10px;max-width:280px;">${newLadder ? _orThesis(p) : ''}</td>
+      </tr>`;
+    }).join('');
+    const chips = [...new Set(ps.map(p => p.horizon_days))].sort((a, b) => a - b).map(_orRungChip).join(' ');
+    return `
+    <div class="settings-group" style="max-width:1000px;overflow-x:auto;margin-bottom:14px;">
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:6px;">
+        ${_orAssetBadge(asset, ps[0].market)}
+        <span style="font-size:.72rem;color:var(--muted);">${ps.length} open call(s)</span>
+        <span style="display:flex;gap:4px;">${chips}</span>
+      </div>
+      <table style="width:100%;border-collapse:collapse;font-size:.8rem;">
+        <thead><tr style="text-align:left;color:var(--muted);font-size:.66rem;text-transform:uppercase;letter-spacing:.04em;">
+          <th style="padding:5px 10px;">Analyst</th><th style="padding:5px 10px;">Rung</th>
+          <th style="padding:5px 10px;">Call</th><th style="padding:5px 10px;">Target</th>
+          <th style="padding:5px 10px;">Resolves</th><th style="padding:5px 10px;">Confidence</th>
+          <th style="padding:5px 10px;">Thesis</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>`;
+  }).join('');
 
   pane.innerHTML = `
     <div class="section-header">
       <div><div class="section-title">&#128302; Open calls</div>
-        <div class="section-sub">Live forecasts still awaiting their horizon, soonest to resolve first.</div></div>
+        <div class="section-sub">Live forecast ladders grouped by asset &mdash; each rung (1d/3d/5d/1w/2w) resolves
+          independently; soonest-resolving asset first.</div></div>
       <button class="btn-sm" onclick="_oracleLoaded.open=false;oracleSub('open')">&#8635; Refresh</button>
     </div>
     ${_orFilterBanner()}
-    ${preds.length ? `
-    <div class="settings-group" style="max-width:1000px;overflow-x:auto;">
-      <table style="width:100%;border-collapse:collapse;font-size:.8rem;">
-        <thead><tr style="text-align:left;color:var(--muted);font-size:.66rem;text-transform:uppercase;letter-spacing:.04em;">
-          <th style="padding:6px 10px;">Analyst</th><th style="padding:6px 10px;">Asset</th>
-          <th style="padding:6px 10px;">Call</th><th style="padding:6px 10px;">Target</th>
-          <th style="padding:6px 10px;text-align:center;">Horizon</th><th style="padding:6px 10px;">Resolves</th>
-          <th style="padding:6px 10px;">Confidence</th><th style="padding:6px 10px;">Thesis</th></tr></thead>
-        <tbody>${rows}</tbody>
-      </table>
-    </div>`
+    ${preds.length ? cards
     : `<div class="empty"><div class="empty-icon">&#128302;</div>${_oracleHistoryFilter ? 'No open calls for this analyst.' : 'No open calls yet — run a tournament round to see analysts compete.'}</div>`}`;
 }
 window.oracleLoadOpen = oracleLoadOpen;
@@ -95,6 +118,7 @@ async function oracleLoadResults() {
     <tr style="border-top:1px solid var(--border);vertical-align:top;">
       <td style="padding:7px 10px;font-weight:600;">${esc(p.agent_name || '')}</td>
       <td style="padding:7px 10px;">${_orAssetBadge(p.asset, p.market)}</td>
+      <td style="padding:7px 10px;white-space:nowrap;">${_orRungChip(p.horizon_days)}</td>
       <td style="padding:7px 10px;white-space:nowrap;">${_orDir(p.direction)} ${_orUsd(p.target_value)}</td>
       <td style="padding:7px 10px;white-space:nowrap;"><b>${_orUsd(p.actual_value)}</b></td>
       <td style="padding:7px 10px;text-align:center;color:${cCol};font-weight:700;">${correct ? '&#10003;' : '&#10007;'}</td>
@@ -105,18 +129,36 @@ async function oracleLoadResults() {
     </tr>`;
   }).join('');
 
+  // per-rung accuracy strip across whatever is loaded (respects the analyst filter)
+  const rungAgg = {};
+  preds.forEach(p => {
+    const k = p.horizon_days;
+    rungAgg[k] = rungAgg[k] || { n: 0, c: 0 };
+    rungAgg[k].n++; if (p.correct) rungAgg[k].c++;
+  });
+  const rungStrip = Object.keys(rungAgg).map(Number).sort((a, b) => a - b).map(h => {
+    const r = rungAgg[h], pct = Math.round(100 * r.c / r.n);
+    const col = pct >= 50 ? 'var(--green)' : 'var(--red)';
+    return `<span style="font-size:.72rem;color:var(--muted);" title="${r.c}/${r.n} correct at ${_orRungLabel(h)}">
+      ${_orRungChip(h)} <b style="color:${col};">${pct}%</b> <span style="font-size:.62rem;">(${r.n})</span></span>`;
+  }).join(' ');
+
   pane.innerHTML = `
     <div class="section-header">
       <div><div class="section-title">&#128202; Results</div>
-        <div class="section-sub">Resolved calls, scored on direction, how close the target was, and how far out it was called.</div></div>
+        <div class="section-sub">Resolved calls, scored per rung on direction + horizon-scaled closeness.</div></div>
       <button class="btn-sm" onclick="_oracleLoaded.results=false;oracleSub('results')">&#8635; Refresh</button>
     </div>
     ${_orFilterBanner()}
+    ${rungStrip ? `<div style="display:flex;gap:14px;align-items:center;flex-wrap:wrap;margin-bottom:12px;">
+      <span style="font-size:.7rem;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;">Accuracy by rung</span>
+      ${rungStrip}</div>` : ''}
     ${preds.length ? `
     <div class="settings-group" style="max-width:1000px;overflow-x:auto;">
       <table style="width:100%;border-collapse:collapse;font-size:.8rem;">
         <thead><tr style="text-align:left;color:var(--muted);font-size:.66rem;text-transform:uppercase;letter-spacing:.04em;">
           <th style="padding:6px 10px;">Analyst</th><th style="padding:6px 10px;">Asset</th>
+          <th style="padding:6px 10px;">Rung</th>
           <th style="padding:6px 10px;">Called</th><th style="padding:6px 10px;">Actual</th>
           <th style="padding:6px 10px;text-align:center;">Correct</th><th style="padding:6px 10px;text-align:right;">% off</th>
           <th style="padding:6px 10px;text-align:right;">Score</th><th style="padding:6px 10px;">Resolved</th>

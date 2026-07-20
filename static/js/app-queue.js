@@ -43,6 +43,9 @@ async function loadQueue() {
     _setDot('topbar-gpu-dot', q.busy);
     const tinfo = document.getElementById('topbar-gpu'); if (tinfo) tinfo.textContent = 'GPU ' + label;
     const sv = document.getElementById('studio-queue-list'); if (sv) sv.innerHTML = queueJobsHtml(q.jobs);
+    // Recent-completions section (persistent history) in the strip popover —
+    // only when the popover is actually open; degrades quietly pre-restart.
+    if (list && list.style.display !== 'none') _renderStripHistory(list);
   } catch {
     const info = document.getElementById('gpu-strip-info'); if (info) info.textContent = 'Status unavailable';
     const tinfo = document.getElementById('topbar-gpu');    if (tinfo) tinfo.textContent = 'GPU n/a';
@@ -71,6 +74,75 @@ function startQueuePolling() {
 // Back-compat: older tabs call loadGpuStrip() after an action to refresh the strip.
 function loadGpuStrip() { return loadQueue(); }
 
+/* ── QUEUE HISTORY (persistent completions — GET /api/queue/history) ──
+   Written by the orchestrator at every terminal transition, so it survives
+   restarts. Pre-restart the endpoint 404s: flip _histSupported off and hide
+   the section quietly. */
+const HIST_MARK = { done: '✓', error: '✕', cancelled: '⊘' };
+let _histSupported = true;
+let _histCache = null, _histAt = 0;
+
+async function loadQueueHistory(force = false) {
+  if (!_histSupported) return null;
+  if (!force && _histCache && Date.now() - _histAt < 15000) return _histCache;
+  try {
+    const h = await api('/api/queue/history?limit=12');
+    _histCache = h; _histAt = Date.now();
+    return h;
+  } catch (e) {
+    if (/404|not found/i.test(e.message || '')) _histSupported = false;  // backend not restarted yet
+    return null;
+  }
+}
+
+function _histAgo(iso) {
+  if (!iso) return '';
+  const t = Date.parse(iso.replace(' ', 'T') + 'Z');   // stored as UTC text
+  if (isNaN(t)) return '';
+  const s = Math.max(0, (Date.now() - t) / 1000);
+  if (s < 60)    return 'now';
+  if (s < 3600)  return `${Math.floor(s / 60)}m`;
+  if (s < 86400) return `${Math.floor(s / 3600)}h`;
+  return `${Math.floor(s / 86400)}d`;
+}
+function _histDur(d) {
+  if (d == null || d === '') return '';
+  if (d < 60) return `${Math.round(d)}s`;
+  return `${Math.floor(d / 60)}m ${Math.round(d % 60)}s`;
+}
+function histRowHtml(r) {
+  const mark = HIST_MARK[r.status] || '·';
+  const srcChip = r.source ? ` <span style="font-size:.6rem;padding:0 5px;border-radius:6px;background:rgba(120,150,205,.18);color:#9fb4d8;white-space:nowrap">${esc(r.source)}</span>` : '';
+  const dur = _histDur(r.duration_s);
+  const tip = [r.label, r.model ? `model: ${r.model}` : '', r.error ? `error: ${r.error}` : '',
+               dur ? `took ${dur}` : ''].filter(Boolean).join('\n');
+  // reuse the .q-state pill: muted for done/cancelled, amber (running style) for errors
+  const pillCls = r.status === 'error' ? 'running' : 'queued';
+  return `<div class="q-row" title="${esc(tip)}">
+    <span class="q-ico">${QUEUE_ICON[r.kind] || '⚙️'}</span>
+    <span class="q-label">${esc(r.label || '')}${srcChip}</span>
+    <span class="q-state ${pillCls}">${mark} ${_histAgo(r.finished_at)}</span>
+  </div>`;
+}
+
+// Append/refresh the "Recent" section inside the strip popover (rebuilt every poll).
+async function _renderStripHistory(list) {
+  const h = await loadQueueHistory();
+  if (!h || !_histSupported) return;                      // hide quietly (pre-restart)
+  const rows = (h.items || []).slice(0, 8);
+  if (!rows.length) return;                               // nothing finished yet — no section
+  let sec = document.getElementById('q-hist-strip');
+  if (!sec) {
+    sec = document.createElement('div');
+    sec.id = 'q-hist-strip';
+    sec.style.cssText = 'display:flex;flex-direction:column;gap:6px;';
+    list.appendChild(sec);
+  }
+  sec.innerHTML =
+    '<div style="font-size:.6rem;font-weight:800;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);margin-top:4px;">Recent</div>'
+    + rows.map(histRowHtml).join('');
+}
+
 function renderStudioQueue() {
   const root = viewRoot();
   root.innerHTML = `
@@ -86,8 +158,74 @@ function renderStudioQueue() {
         <button class="btn-sm danger" id="q-clear" onclick="queueClear()">&#128465;&#65039; Clear</button>
       </div>
     </div>
-    <div class="queue-pop" id="studio-queue-list" style="max-height:none;"></div>`;
+    <div class="queue-pop" id="studio-queue-list" style="max-height:none;"></div>
+    <div id="studio-hist-wrap" style="display:none;">
+      <div class="section-header" style="margin-top:22px;">
+        <div>
+          <div class="section-title">&#128220; History</div>
+          <div class="section-sub">What finished &mdash; persisted across restarts, with who/what asked for it.</div>
+        </div>
+        <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
+          <select id="qh-kind" onchange="loadStudioHistory()">
+            <option value="">all kinds</option>
+            <option value="llm">&#129504; llm</option><option value="image">&#127912; image</option>
+            <option value="video">&#127916; video</option><option value="video chain">&#127902;&#65039; video chain</option>
+            <option value="audio">&#127925; audio</option>
+          </select>
+          <select id="qh-status" onchange="loadStudioHistory()">
+            <option value="">all statuses</option>
+            <option value="done">&#10003; done</option><option value="error">&#10007; error</option>
+            <option value="cancelled">&#8856; cancelled</option>
+          </select>
+          <select id="qh-source" onchange="loadStudioHistory()"><option value="">all sources</option></select>
+          <button class="btn-sm" onclick="loadStudioHistory(true)">&#8635; Refresh</button>
+        </div>
+      </div>
+      <div id="studio-hist-summary" style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px;"></div>
+      <div class="queue-pop" id="studio-hist-list" style="max-height:none;"></div>
+    </div>`;
   loadQueue();   // fills #studio-queue-list + sets the paused/running button state; 4s poller keeps it live
+  loadStudioHistory();
+}
+
+// Fuller, filterable history list in the Studio GPU view. Hidden entirely when
+// the backend doesn't have the endpoint yet (pre-restart).
+async function loadStudioHistory() {
+  const wrap = document.getElementById('studio-hist-wrap');
+  const box  = document.getElementById('studio-hist-list');
+  if (!wrap || !box || !_histSupported) return;
+  const qs = new URLSearchParams({ limit: 50 });
+  for (const [id, key] of [['qh-kind', 'kind'], ['qh-status', 'status'], ['qh-source', 'source']]) {
+    const v = (document.getElementById(id) || {}).value;
+    if (v) qs.set(key, v);
+  }
+  try {
+    const h = await api('/api/queue/history?' + qs.toString());
+    wrap.style.display = '';
+    const items = h.items || [];
+    box.innerHTML = items.length ? items.map(histRowHtml).join('')
+                                 : '<div class="q-empty">Nothing here yet.</div>';
+    // summary chips: per-source counts over the last 24h
+    const s = h.summary || {}, bySrc = s.by_source || {}, bySt = s.by_status || {};
+    const chip = (t) => `<span style="font-size:.64rem;padding:2px 8px;border-radius:10px;background:var(--surface2);border:1px solid var(--border);color:var(--muted);">${t}</span>`;
+    const sum = document.getElementById('studio-hist-summary');
+    if (sum) sum.innerHTML =
+      chip(`24h &mdash; &#10003; ${bySt.done || 0} &middot; &#10007; ${bySt.error || 0} &middot; &#8856; ${bySt.cancelled || 0}`)
+      + Object.entries(bySrc).sort((a, b) => b[1] - a[1]).slice(0, 10)
+              .map(([k, v]) => chip(`${esc(k)}: ${v}`)).join('');
+    // fill the source filter from the summary (preserve the current pick)
+    const sel = document.getElementById('qh-source');
+    if (sel && sel.options.length <= 1) {
+      const cur = sel.value;
+      Object.keys(bySrc).sort().forEach(src => {
+        const o = document.createElement('option'); o.value = src; o.textContent = src;
+        sel.appendChild(o);
+      });
+      sel.value = cur;
+    }
+  } catch (e) {
+    if (/404|not found/i.test(e.message || '')) { _histSupported = false; wrap.style.display = 'none'; }
+  }
 }
 
 // Pause / Start / Clear for the unified queue. Each POSTs, toasts, and refreshes.

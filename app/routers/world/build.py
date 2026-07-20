@@ -13,7 +13,12 @@ from ._base import router
 
 @router.get("/api/world/tileset")
 def world_tileset_status():
-    """Generated-terrain-tileset status (state/progress + whether one is installed)."""
+    """Generated-terrain-tileset status: state/progress, whether one is installed, and
+    its COMPLETENESS — `complete`, `missing` (required terrain keys with no usable atlas
+    cell; structural floor/wall are excluded by design) and `degraded` (installed but
+    incomplete). A half-filled set once erased the world's roads silently, so an
+    incomplete install must never report as a healthy one. Each tile also carries the
+    `source` the renderer will actually paint: atlas → terrain_image → procedural."""
     import world_tileset
     return world_tileset.status()
 
@@ -127,6 +132,40 @@ def world_floor_remove():
     import world_floors
     world_floors.remove()
     return {"ok": True}
+
+
+# ── per-CIVILIZATION-ERA generated building sprites (world_era_sprites) — an
+# OPTIONAL generated top-down pixel-art image per (building-type, era) that swaps
+# in over the procedural era restyle. Rides the world_sprites GPU pipeline + its
+# hourly budget; OFF by default (world_era_sprites_enabled). Entity id scheme:
+# era_<type>_<eraName>, drawn client-side via WSP.drawStatic. ─────────────────
+@router.get("/api/world/era-sprites")
+def world_era_sprites_status():
+    """Which (type, era) building sprites exist + counts + queued + budget-remaining,
+    plus the ladder, the type list, and the running pre-seed state."""
+    import world_era_sprites
+    return world_era_sprites.status()
+
+
+@router.post("/api/world/era-sprites/preseed")
+def world_era_sprites_preseed(body: dict = Body(default={})):
+    """Kick a budget-paced BACKGROUND pre-seed of era building sprites (all types,
+    or a {types:[...]} subset). Generates one-at-a-time on the shared GPU, stopping
+    when the hourly budget is spent — re-run to continue. Requires the feature on."""
+    import world_era_sprites
+    return world_era_sprites.pre_seed(body.get("types"))
+
+
+@router.post("/api/world/era-sprites/one")
+def world_era_sprites_one(body: dict = Body(default={})):
+    """Get-or-enqueue ONE era building sprite. body: {type, era}. Returns ready/
+    pending/queued or a gated reason (disabled/capped/busy). Made once, cached."""
+    import world_era_sprites
+    t = (body.get("type") or "").strip()
+    era = (body.get("era") or "").strip()
+    if not t or not era:
+        raise HTTPException(400, "type and era are required")
+    return world_era_sprites.request(t, era)
 
 
 @router.get("/api/world/moon")

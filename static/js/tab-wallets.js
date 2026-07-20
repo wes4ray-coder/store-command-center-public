@@ -17,7 +17,11 @@ function _waBal(c) {
 }
 
 async function renderWallets() {
-  document.getElementById('main-content').innerHTML = `
+  // Lives inside the 💰 Finance tab (fin-pane-wallets). If the pane is gone the
+  // user switched views — bail instead of clobbering whatever is on screen now.
+  const _waRoot = document.getElementById('fin-pane-wallets');
+  if (!_waRoot) return;
+  _waRoot.innerHTML = `
     <div class="view-header">
       <div class="view-title">&#128092; Wallets
         <span id="wa-xmr-status" title="Monero wallet daemon status" style="font-size:.6rem;font-weight:700;vertical-align:middle;margin-left:10px;padding:3px 9px;border-radius:10px;background:var(--surface2);color:var(--muted);text-transform:uppercase;letter-spacing:.04em;">&#9679; Monero daemon &hellip;</span></div>
@@ -33,6 +37,7 @@ window.renderWallets = renderWallets;
 
 async function waLoad() {
   const el = document.getElementById('wa-coins');
+  if (!el) return;   // wallets pane no longer on screen — don't clobber anything
   let d;
   try { d = await api('/api/wallets'); }
   catch (e) { el.innerHTML = `<div class="empty"><div class="empty-icon">&#10060;</div>${esc(e.message)}</div>`; return; }

@@ -30,6 +30,39 @@ DEFAULT_ANALYSTS = [
 CRYPTO_IDS = {"BTC": "bitcoin", "ETH": "ethereum", "SOL": "solana", "XRP": "ripple",
               "DOGE": "dogecoin", "ADA": "cardano", "LTC": "litecoin"}
 
+# ── the short-horizon LADDER ──────────────────────────────────────────────────
+# Each forecast produces one prediction PER RUNG (day-trade-friendly horizons), so
+# every rung resolves and scores independently. The long tier (30d) is optional.
+LADDER_DEFAULT = [1, 3, 5, 7, 14]
+LONG_TIER_DAYS = 30
+
+# Oracle settings (plain rows in the `settings` table; surfaced in the Oracle tab
+# AND the God panel — every gate ships with a toggle, per the house rule).
+ORACLE_SETTINGS_DEFAULTS = {
+    "oracle_auto":           "on",              # master auto loop (resolve + rounds)
+    "oracle_auto_rounds":    "1",               # one autonomous tournament round per day
+    "oracle_ladder":         "1,3,5,7,14",      # per-rung enable: the horizons forecast
+    "oracle_long_tier":      "0",               # add the optional 30d long-tier rung
+    "oracle_company_hookup": "1",               # Company/world may cite the consensus (advisory only)
+}
+
+
+def oracle_setting(key: str) -> str:
+    return str(get_setting(key, ORACLE_SETTINGS_DEFAULTS.get(key, "")) or ORACLE_SETTINGS_DEFAULTS.get(key, ""))
+
+
+def ladder_days() -> list:
+    """The enabled rung horizons (days), sorted + deduped, each clamped 1–90."""
+    days = []
+    for tok in oracle_setting("oracle_ladder").split(","):
+        tok = tok.strip()
+        if tok.isdigit() and 1 <= int(tok) <= 90:
+            days.append(int(tok))
+    if oracle_setting("oracle_long_tier") in ("1", "true", "on"):
+        days.append(LONG_TIER_DAYS)
+    days = sorted(set(days)) or list(LADDER_DEFAULT)
+    return days
+
 
 # ── schema ────────────────────────────────────────────────────────────────────
 def _ensure_schema():
@@ -50,6 +83,13 @@ def _ensure_schema():
         created_at TEXT DEFAULT (datetime('now')));
     CREATE TABLE IF NOT EXISTS oracle_meta (k TEXT PRIMARY KEY, v TEXT);
     """)
+    # additive migration: ladder rows carry a batch_id grouping the rungs of one
+    # forecast call. Legacy rows keep batch_id NULL — that's also the scoring
+    # discriminator (NULL → old curve, set → the ladder curve).
+    try:
+        conn.execute("ALTER TABLE oracle_predictions ADD COLUMN batch_id TEXT")
+    except Exception:
+        pass                                   # column already exists
     conn.commit()
     conn.close()
 

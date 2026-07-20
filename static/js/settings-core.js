@@ -131,7 +131,7 @@ async function _loadTrendIntoSettings() {
 
 // Settings sub-tabs: every field stays in the DOM (so all save/wire logic is
 // untouched) — we only toggle which pane is visible.
-const _SETTINGS_PANES = ['system', 'models', 'integrations', 'store', 'account', 'prompts', 'systems'];
+const _SETTINGS_PANES = ['system', 'models', 'integrations', 'store', 'account', 'prompts', 'systems', 'plugins'];
 function settingsSub(k) {
   _SETTINGS_PANES.forEach(name => {
     const pane = document.getElementById('pane-' + name);
@@ -143,6 +143,7 @@ function settingsSub(k) {
   if (k === 'prompts') loadPromptsEditor();
   if (k === 'models') loadModelRegistry();
   if (k === 'systems' && typeof renderSystemsPane === 'function') renderSystemsPane();
+  if (k === 'plugins' && typeof renderPluginsPane === 'function') renderPluginsPane();
 }
 
 async function renderSettings() {
@@ -161,6 +162,7 @@ async function renderSettings() {
       <div class="subtab" onclick="settingsSub('account')">&#128274; Account</div>
       <div class="subtab" onclick="settingsSub('prompts')">&#128221; Prompts</div>
       <div class="subtab" onclick="settingsSub('systems')">&#129513; Systems</div>
+      <div class="subtab" onclick="settingsSub('plugins')">&#128268; Plugins</div>
     </div>
 
     <div class="settings-tabpane" id="pane-system">
@@ -288,6 +290,10 @@ async function renderSettings() {
     </div>
 
     <div class="settings-tabpane" id="pane-systems" style="display:none;">
+      <div style="color:var(--muted);font-size:.8rem;">Loading&#8230;</div>
+    </div>
+
+    <div class="settings-tabpane" id="pane-plugins" style="display:none;">
       <div style="color:var(--muted);font-size:.8rem;">Loading&#8230;</div>
     </div>`;
 

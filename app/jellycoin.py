@@ -44,12 +44,53 @@ MAX_TARGET = 1 << 240                 # easiest allowed target (~65k hashes/bloc
 WORK_TTL_SEC = 600                    # issued work expires
 MINER_FRESH_SEC = 300                 # heartbeat window for "online" rigs
 
-# Company skilling boosts — tickets only cash out inside a REAL mined block.
+# ── the hard cap ─────────────────────────────────────────────────────────────
+# 6,000,000 JLY, and nothing may ever mint past it.
+#
+# Why this number: it is what the schedule ALREADY implies, rounded to a clean
+# figure. Summing the halving series exactly — Σ (50 JLY >> k) × 50_000 blocks
+# for k = 0..25, after which the integer reward shifts to zero at height
+# 1,300,000 — gives 4,999,999.4 JLY of mining subsidy. Plus the 1,000,000 JLY
+# genesis premine that is 6,000,000 minus 0.6 JLY. Rounding up to 6,000,000
+# rather than picking a new number means the cap does NOT change the emission
+# any live holder was already promised: it ratifies the existing curve instead
+# of rewriting it.
+#
+# The cap is a ceiling on TOTAL emission, not on the block subsidy alone. Boost
+# payouts (below) mint inside real blocks and were previously unbounded, which
+# is the hole this closes: they now draw from the same 6M pool. Because they do,
+# the subsidy tail runs out slightly EARLIER than height 1,300,000 — boosts
+# spend headroom that would otherwise have gone to the final coinbases. That is
+# intended, and it is the only honest way to have one cap mean one number.
+MAX_SUPPLY = 6_000_000 * UNIT
+
+# Company skilling boosts — tickets only cash out inside a REAL mined block,
+# and (since the cap) only to the extent the cap has headroom left over after
+# that block's coinbase. The subsidy has priority; boosts take the remainder.
 BOOST_PER_TICKET = UNIT // 20         # 0.05 JLY minted per ticket…
 BOOST_MAX_PER_BLOCK = 20 * UNIT       # …capped per block
 BOOST_MAX_PENDING = 500               # ticket queue cap (oldest kept)
 BOOST_TTL_SEC = 86_400                # unpaid tickets expire after a day
 BOOST_AGENT_SHARE = 0.5               # rest goes to the company wallet
+
+# Unpaid tickets are never silently dropped. They are marked expired with a
+# human-readable reason and kept as a row, so the ledger can always answer
+# "what happened to the value I earned?".
+BOOST_EXPIRY_TTL = "unpaid for 24h — no block was mined in time"
+BOOST_EXPIRY_CAP = "supply cap reached — no headroom left to mint boosts"
+
+# ── emergency difficulty adjustment (stall recovery) ─────────────────────────
+# This chain has one node and no P2P, so difficulty only ever retargets when a
+# block lands. If the rigs that set a hard target all vanish, nothing can pull
+# the target back down — the chain simply stops, permanently. That is a real
+# dead end, so work issued during a stall is progressively EASED: after
+# EDA_AFTER_SEC of silence the target is multiplied by (idle / TARGET_BLOCK_SEC),
+# growing the longer the silence lasts, until some rig can find a block again.
+# It self-clears the instant a block lands (idle resets to ~0 ⇒ factor 1.0) and
+# it can never mint more than the cap allows, so it changes liveness only.
+EDA_ENABLED_KEY = "jelly_eda_enabled"   # settings toggle, default "1" (ON)
+EDA_AFTER_SEC = TARGET_BLOCK_SEC * 20   # 20 min of no blocks before easing starts
+EDA_MAX_EASE = 1 << 32                  # ceiling on a single easing step
 
 NFT_MINT_FEE = 5 * UNIT
 
@@ -193,6 +234,17 @@ def ensure_schema(conn=None):
             conn.execute("ALTER TABLE jelly_miners ADD COLUMN owner TEXT")
         except Exception:
             pass
+        # Boost tickets that will never be paid used to be DELETEd outright, which
+        # made owed value vanish with no trace. Keep the row and record WHY it was
+        # dropped instead. Purely additive: two nullable columns, old rows read as
+        # (NULL, NULL) = "not expired", which is exactly their historical meaning,
+        # and dropping the columns again restores the previous schema.
+        for ddl in ("ALTER TABLE jelly_boosts ADD COLUMN expired INTEGER",
+                    "ALTER TABLE jelly_boosts ADD COLUMN expired_reason TEXT"):
+            try:
+                conn.execute(ddl)
+            except Exception:
+                pass
         # Found a chain ONLY when hosting. A joined node is a participant on a
         # buddy's ledger, so minting it a genesis + premine here would be exactly
         # the island-per-install problem. Tables still exist (peer wallets, txs).
@@ -326,25 +378,93 @@ def _tip_height(conn) -> int:
 
 
 def block_reward(height: int) -> int:
+    """The SCHEDULED subsidy at a height, ignoring the cap. Used for projections
+    and display. What a block actually pays is effective_block_reward()."""
     return BLOCK_REWARD >> (height // HALVING_INTERVAL)
 
 
-def current_target(conn) -> int:
-    """Retarget every RETARGET_INTERVAL blocks toward TARGET_BLOCK_SEC, clamped 4x."""
+# ── supply accounting ────────────────────────────────────────────────────────
+# The block table is the single authority. Every ujly that has ever existed was
+# written into jelly_blocks as either `reward` (genesis premine + coinbases) or
+# `boost` (skilling payouts), so summing those two columns IS the money supply —
+# it does not depend on wallet balances being right, which is precisely what
+# makes it usable to audit them.
+def minted_total(conn) -> int:
+    return int(conn.execute(
+        "SELECT COALESCE(SUM(reward),0)+COALESCE(SUM(boost),0) s FROM jelly_blocks").fetchone()["s"])
+
+
+def burned_total(conn) -> int:
+    """Provably destroyed coin. No burn path exists today (this is always 0);
+    it is computed rather than assumed so that adding one later cannot silently
+    desynchronise the cap arithmetic."""
+    try:
+        return int(conn.execute(
+            "SELECT COALESCE(SUM(amount),0) s FROM jelly_txs WHERE kind='burn'").fetchone()["s"])
+    except Exception:
+        return 0
+
+
+def circulating(conn) -> int:
+    return max(0, minted_total(conn) - burned_total(conn))
+
+
+def remaining_headroom(conn) -> int:
+    """ujly that may still be minted before MAX_SUPPLY. Never negative."""
+    return max(0, MAX_SUPPLY - circulating(conn))
+
+
+def effective_block_reward(conn, height: int) -> int:
+    """The subsidy this block may actually pay: the schedule, TRIMMED to whatever
+    headroom is left under the cap. The block that reaches the cap pays exactly
+    the remainder rather than overshooting it; every block after that pays 0."""
+    return max(0, min(block_reward(height), remaining_headroom(conn)))
+
+
+def eda_enabled() -> bool:
+    """Stall-recovery easing. Default ON — without it a chain whose rigs all die
+    is dead for good. Toggleable because it is a consensus-visible behaviour."""
+    try:
+        return str(get_setting(EDA_ENABLED_KEY) or "1") in ("1", "true", "on")
+    except Exception:
+        return True
+
+
+def _eda_ease(tip_time: int, now: int) -> int:
+    """Integer multiplier applied to the target when the chain has gone quiet: 1
+    (no change) until EDA_AFTER_SEC of silence, then one step easier per missed
+    block interval, so recovery is guaranteed rather than merely hoped for."""
+    idle = now - int(tip_time)
+    if idle < EDA_AFTER_SEC:
+        return 1
+    return max(1, min(EDA_MAX_EASE, idle // TARGET_BLOCK_SEC))
+
+
+def current_target(conn, now: int = None) -> int:
+    """Retarget every RETARGET_INTERVAL blocks toward TARGET_BLOCK_SEC, clamped 4x,
+    then ease if the chain has stalled (see EDA notes at the top of this module)."""
     tip = _tip(conn)
     height = int(tip["height"])
     target = int(tip["target"], 16)
     nxt = height + 1
-    if nxt < RETARGET_INTERVAL or nxt % RETARGET_INTERVAL:
-        return target
-    first = conn.execute("SELECT time FROM jelly_blocks WHERE height=?",
-                         (height - RETARGET_INTERVAL + 1,)).fetchone()
-    if not first:
-        return target
-    actual = max(1, int(tip["time"]) - int(first["time"]))
-    expected = TARGET_BLOCK_SEC * (RETARGET_INTERVAL - 1)
-    ratio = min(4.0, max(0.25, actual / expected))
-    return min(MAX_TARGET, max(1, int(target * ratio)))
+    if nxt >= RETARGET_INTERVAL and not nxt % RETARGET_INTERVAL:
+        first = conn.execute("SELECT time FROM jelly_blocks WHERE height=?",
+                             (height - RETARGET_INTERVAL + 1,)).fetchone()
+        if first:
+            actual = max(1, int(tip["time"]) - int(first["time"]))
+            expected = TARGET_BLOCK_SEC * (RETARGET_INTERVAL - 1)
+            # Clamp the RATIO to [1/4, 4] by clamping `actual`, then scale with exact
+            # integer arithmetic. The old `int(target * ratio)` multiplied a 240-bit
+            # target by a float, which loses ~53 bits of precision and could round the
+            # result just PAST the 4x clamp it was supposed to enforce. The numeric
+            # difference is negligible (~1e-16 relative, far below one difficulty step,
+            # so the live chain's target is unchanged in any observable way) but the
+            # clamp is now a real bound instead of an approximate one.
+            actual = min(max(actual, expected // 4), expected * 4)
+            target = min(MAX_TARGET, max(1, target * actual // expected))
+    if eda_enabled():
+        target *= _eda_ease(int(tip["time"]), int(time.time()) if now is None else now)
+    return min(MAX_TARGET, max(1, target))
 
 
 # ── mining: getwork / submit ─────────────────────────────────────────────────
@@ -384,7 +504,7 @@ def get_work(miner: str, gpu: str = "", hashrate: float = 0.0) -> dict:
                                "share_target": share_target, "miner": miner, "issued": now}
         resp = {"work_id": work_id, "header76": header.hex(), "target": f"{target:064x}",
                 "height": height, "difficulty": difficulty(target),
-                "symbol": SYMBOL, "reward": block_reward(height) / UNIT}
+                "symbol": SYMBOL, "reward": effective_block_reward(conn, height) / UNIT}
         # Only advertise the share target when pooling is ON — with it absent the
         # getwork response is byte-for-byte today's, and the miner stays solo.
         if pool_enabled():
@@ -414,21 +534,30 @@ def submit_work(work_id: str, nonce: int, miner: str) -> dict:
             if tip["hash"] != w["prev"]:
                 return {"ok": False, "reason": "stale: chain moved on"}
             height, now = w["height"], int(time.time())
-            reward = block_reward(height)
+            # THE CAP. Everything minted below draws from this one number, and
+            # the subsidy is trimmed to it rather than allowed to overshoot.
+            headroom = remaining_headroom(conn)
+            reward = max(0, min(block_reward(height), headroom))
             miner = (miner or w["miner"]).strip()[:40]
             miner_wallet = f"miner:{miner}"
             _wallet(conn, miner_wallet, kind="miner")
-            txs = [{"kind": "coinbase", "dst": miner_wallet, "amount": reward}]
-            # cash out pending Company skilling boosts INSIDE this real block
-            boost_total = _payout_boosts(conn, height, now, txs)
+            txs = []
+            if reward:
+                txs.append({"kind": "coinbase", "dst": miner_wallet, "amount": reward})
+            # cash out pending Company skilling boosts INSIDE this real block, but
+            # only from whatever the coinbase left under the cap
+            boost_total = _payout_boosts(conn, height, now, txs, headroom - reward)
             conn.execute(
                 "INSERT INTO jelly_blocks (height,hash,prev,merkle,target,nonce,time,miner,reward,boost,txs)"
                 " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                 (height, h, w["prev"], w["merkle"], f"{w['target']:064x}", nonce, now,
                  miner, reward, boost_total, json.dumps(txs)))
-            conn.execute("UPDATE jelly_wallets SET balance=balance+? WHERE name=?", (reward, miner_wallet))
-            conn.execute("INSERT INTO jelly_txs (height,time,frm,dst,amount,kind,memo) VALUES (?,?,NULL,?,?,?,?)",
-                         (height, now, miner_wallet, reward, "coinbase", f"block {height} reward"))
+            # A capped-out block is still a valid block — it orders and secures the
+            # chain. It just pays nobody, so it writes no coinbase credit at all.
+            if reward:
+                conn.execute("UPDATE jelly_wallets SET balance=balance+? WHERE name=?", (reward, miner_wallet))
+                conn.execute("INSERT INTO jelly_txs (height,time,frm,dst,amount,kind,memo) VALUES (?,?,NULL,?,?,?,?)",
+                             (height, now, miner_wallet, reward, "coinbase", f"block {height} reward"))
             conn.execute("UPDATE jelly_miners SET blocks=blocks+1, last_seen=? WHERE name=?", (now, miner))
             conn.commit()
             _works.pop(work_id, None)
@@ -438,10 +567,38 @@ def submit_work(work_id: str, nonce: int, miner: str) -> dict:
         conn.close()
 
 
-def _payout_boosts(conn, height: int, now: int, txs: list) -> int:
-    conn.execute("DELETE FROM jelly_boosts WHERE height IS NULL AND created < ?", (now - BOOST_TTL_SEC,))
-    rows = conn.execute("SELECT * FROM jelly_boosts WHERE height IS NULL ORDER BY id "
-                        "LIMIT ?", (BOOST_MAX_PER_BLOCK // BOOST_PER_TICKET,)).fetchall()
+def _expire_boosts(conn, when: int, reason: str, sql_where: str, params: tuple = ()):
+    """Mark unpaid tickets dead WITH A REASON instead of deleting them. Nothing
+    that was owed ever just disappears from the ledger — it becomes a row you
+    can point at."""
+    conn.execute(f"UPDATE jelly_boosts SET expired=?, expired_reason=? "
+                 f"WHERE height IS NULL AND expired IS NULL AND {sql_where}",
+                 (when, reason) + params)
+
+
+def _payout_boosts(conn, height: int, now: int, txs: list, headroom: int) -> int:
+    """Mint skilling boosts inside a real block, bounded by `headroom` — the ujly
+    left under MAX_SUPPLY after this block's coinbase.
+
+    Ticket policy, in order:
+      • too old (BOOST_TTL_SEC)  → expired, reason recorded, never paid.
+      • headroom is zero         → expired, reason recorded. The cap is permanent
+                                   (there is no burn path, so headroom never comes
+                                   back), so holding them pending forever would be
+                                   a lie about value that can never be paid.
+      • headroom is partial      → pay as many whole tickets as fit; the rest stay
+                                   PENDING and are first in line next block.
+    """
+    _expire_boosts(conn, now, BOOST_EXPIRY_TTL, "created < ?", (now - BOOST_TTL_SEC,))
+    if headroom < BOOST_PER_TICKET:
+        # Not even one ticket fits. If the cap is genuinely exhausted, say so and
+        # close the queue out; if it is merely a tight final block, leave them.
+        if remaining_headroom(conn) <= 0:
+            _expire_boosts(conn, now, BOOST_EXPIRY_CAP, "1=1")
+        return 0
+    limit = min(BOOST_MAX_PER_BLOCK // BOOST_PER_TICKET, headroom // BOOST_PER_TICKET)
+    rows = conn.execute("SELECT * FROM jelly_boosts WHERE height IS NULL AND expired IS NULL "
+                        "ORDER BY id LIMIT ?", (limit,)).fetchall()
     total = 0
     per_agent: dict = {}
     for r in rows:
@@ -509,10 +666,11 @@ def _submit_pool_work(work_id: str, w: dict, nonce: int, h: str, miner: str) -> 
                 conn.commit()
                 return {"ok": True, "share": True, "block": False,
                         "reason": "stale: chain moved on", "height": height, "owner": owner}
-            reward = block_reward(height)
+            headroom = remaining_headroom(conn)            # same cap, same trim
+            reward = max(0, min(block_reward(height), headroom))
             txs: list = []
-            boost_total = _payout_boosts(conn, height, now, txs)
-            splits = _split_pool_reward(conn, height, reward, owner, now, txs)
+            boost_total = _payout_boosts(conn, height, now, txs, headroom - reward)
+            splits = _split_pool_reward(conn, height, reward, owner, now, txs) if reward else {}
             conn.execute(
                 "INSERT INTO jelly_blocks (height,hash,prev,merkle,target,nonce,time,miner,reward,boost,txs)"
                 " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
@@ -566,7 +724,7 @@ def pool_state() -> dict:
     try:
         _ensure(conn)
         height = _tip_height(conn) + 1
-        reward = block_reward(height)
+        reward = effective_block_reward(conn, height)
         rows = conn.execute("SELECT rig, owner, COUNT(*) shares, SUM(weight) w FROM jelly_shares "
                             "WHERE round_id=? GROUP BY rig, owner ORDER BY w DESC", (height,)).fetchall()
         shares_by_rig = [dict(r) for r in rows]
@@ -676,10 +834,16 @@ def set_rig_owner(rig: str, owner: str):
 
 # ── Company skilling hook (called from world_sim; NEVER mines by itself) ─────
 def skill_pulse(conn, agent_key: str, agent_name: str, skill: str, units: int):
-    """Record boost tickets for real skilling work. Cheap, same world-sim connection."""
+    """Record boost tickets for real skilling work. Cheap, same world-sim connection.
+
+    Refuses once the cap is exhausted: issuing tickets that provably can never be
+    minted would be accruing a debt the chain has already promised not to pay."""
     _ensure(conn)
+    if remaining_headroom(conn) < BOOST_PER_TICKET:
+        return
     now = int(time.time())
-    pending = conn.execute("SELECT COUNT(*) c FROM jelly_boosts WHERE height IS NULL").fetchone()["c"]
+    pending = conn.execute("SELECT COUNT(*) c FROM jelly_boosts "
+                           "WHERE height IS NULL AND expired IS NULL").fetchone()["c"]
     room = BOOST_MAX_PENDING - int(pending)
     n = min(int(units), room)
     for _ in range(max(0, n)):
@@ -695,6 +859,100 @@ from jellycoin_extra import (  # noqa: E402,F401
     PEER_BILLING_KEY, PEER_PRICE_KEY, PEER_PRICE_DEFAULT,
     peer_billing_enabled, peer_job_price, peer_job_charge, peer_job_credit,
 )
+
+
+# ── supply audit ─────────────────────────────────────────────────────────────
+def _avg_block_sec(conn, window: int = 200) -> float:
+    """Observed seconds per block over the last `window` blocks. Falls back to the
+    target when there is not enough chain to measure."""
+    rows = conn.execute("SELECT time FROM jelly_blocks WHERE height>0 "
+                        "ORDER BY height DESC LIMIT ?", (max(2, window),)).fetchall()
+    if len(rows) < 2:
+        return float(TARGET_BLOCK_SEC)
+    span = int(rows[0]["time"]) - int(rows[-1]["time"])
+    return (span / (len(rows) - 1)) if span > 0 else float(TARGET_BLOCK_SEC)
+
+
+def _blocks_to_cap(height: int, headroom: int, boost_per_block: int = 0) -> int:
+    """How many more blocks until the cap is exhausted, walking the halving epochs
+    rather than assuming today's reward lasts forever. Returns -1 if the subsidy
+    decays to nothing before the cap is reached (i.e. the cap is never hit)."""
+    blocks, h = 0, height
+    while headroom > 0:
+        nxt = h + 1
+        per = block_reward(nxt) + boost_per_block
+        if per <= 0:
+            return -1                                  # subsidy is dead; cap unreachable
+        epoch_end = ((nxt // HALVING_INTERVAL) + 1) * HALVING_INTERVAL
+        n = epoch_end - nxt                            # blocks left at this reward
+        if per * n >= headroom:
+            return blocks + -(-headroom // per)        # ceil-divide into this epoch
+        headroom -= per * n
+        blocks += n
+        h = epoch_end - 1
+    return blocks
+
+
+def supply_report(conn=None) -> dict:
+    """Authoritative emission audit, computed from the block table and reconciled
+    against the wallet ledger. The two are derived independently on purpose: if
+    `discrepancy` is ever non-zero, coins were credited or debited outside a
+    block and that is a bug, so it is reported rather than hidden."""
+    own = conn is None
+    if own:
+        conn = get_conn()
+    try:
+        _ensure(conn)
+        tip = _tip(conn)
+        if tip is None:                                # joined mode: no local chain
+            return {"chain": False, "circulating": 0, "max_supply": MAX_SUPPLY / UNIT,
+                    "remaining": MAX_SUPPLY / UNIT, "pct_mined": 0.0}
+        height = int(tip["height"])
+        mined_sub = int(conn.execute("SELECT COALESCE(SUM(reward),0) s FROM jelly_blocks "
+                                     "WHERE height>0").fetchone()["s"])
+        boosted = int(conn.execute("SELECT COALESCE(SUM(boost),0) s FROM jelly_blocks").fetchone()["s"])
+        burned = burned_total(conn)
+        circ = circulating(conn)
+        headroom = remaining_headroom(conn)
+        wallet_sum = int(conn.execute(
+            "SELECT COALESCE(SUM(balance),0) s FROM jelly_wallets").fetchone()["s"])
+        pend = conn.execute("SELECT COUNT(*) c FROM jelly_boosts "
+                            "WHERE height IS NULL AND expired IS NULL").fetchone()["c"]
+        expd = conn.execute("SELECT COUNT(*) c FROM jelly_boosts "
+                            "WHERE expired IS NOT NULL").fetchone()["c"]
+        avg_sec = _avg_block_sec(conn)
+        # Boosts mint alongside the subsidy, so a projection that ignores them
+        # would place the cap later than it will really arrive.
+        boost_rate = (boosted // height) if height else 0
+        n_blocks = _blocks_to_cap(height, headroom, boost_rate)
+        eta = (int(time.time()) + int(n_blocks * avg_sec)) if n_blocks >= 0 else None
+        nxt_halving = ((height // HALVING_INTERVAL) + 1) * HALVING_INTERVAL
+        return {
+            "chain": True, "unit": UNIT, "height": height,
+            "circulating": circ / UNIT,
+            "max_supply": MAX_SUPPLY / UNIT,
+            "remaining": headroom / UNIT,
+            "pct_mined": round(100.0 * circ / MAX_SUPPLY, 4),
+            "premine": PREMINE / UNIT,
+            "mined_subsidy": mined_sub / UNIT,
+            "boost_minted": boosted / UNIT,
+            "burned": burned / UNIT,
+            "block_reward": effective_block_reward(conn, height + 1) / UNIT,
+            "scheduled_reward": block_reward(height + 1) / UNIT,
+            "next_halving_height": nxt_halving,
+            "blocks_to_halving": nxt_halving - height,
+            "blocks_to_cap": n_blocks,
+            "avg_block_sec": round(avg_sec, 1),
+            "cap_eta_epoch": eta,
+            "boosts_pending": int(pend), "boosts_expired": int(expd),
+            # reconciliation: block-derived supply vs the sum of every balance
+            "wallet_sum": wallet_sum / UNIT,
+            "discrepancy": (circ - wallet_sum) / UNIT,
+            "reconciled": circ == wallet_sum,
+        }
+    finally:
+        if own:
+            conn.close()
 
 
 # ── status ───────────────────────────────────────────────────────────────────
@@ -718,7 +976,8 @@ def status() -> dict:
             "SELECT name,gpu,last_seen,blocks,hashrate FROM jelly_miners ORDER BY last_seen DESC LIMIT 20")]
         for m in miners:
             m["online"] = (now - m["last_seen"]) < MINER_FRESH_SEC
-        pending = conn.execute("SELECT COUNT(*) c FROM jelly_boosts WHERE height IS NULL").fetchone()["c"]
+        pending = conn.execute("SELECT COUNT(*) c FROM jelly_boosts "
+                               "WHERE height IS NULL AND expired IS NULL").fetchone()["c"]
         paid = conn.execute("SELECT COALESCE(SUM(boost),0) s FROM jelly_blocks").fetchone()["s"]
         nfts = conn.execute("SELECT COUNT(*) c FROM jelly_nfts").fetchone()["c"]
         target = current_target(conn)
@@ -727,7 +986,11 @@ def status() -> dict:
             "mode": jelly_mode(), "home_peer": jelly_home_peer(), "chain": True,
             "height": int(tip["height"]), "tip_hash": tip["hash"], "tip_time": int(tip["time"]),
             "difficulty": round(difficulty(target), 3), "target": f"{target:064x}",
-            "supply": supply / UNIT, "block_reward": block_reward(int(tip["height"]) + 1) / UNIT,
+            "supply": supply / UNIT,
+            "block_reward": effective_block_reward(conn, int(tip["height"]) + 1) / UNIT,
+            "max_supply": MAX_SUPPLY / UNIT,
+            "remaining": remaining_headroom(conn) / UNIT,
+            "pct_mined": round(100.0 * circulating(conn) / MAX_SUPPLY, 4),
             "miners": miners, "miners_online": sum(1 for m in miners if m["online"]),
             "boosts_pending": int(pending), "boosts_paid_jly": paid / UNIT, "nft_count": int(nfts),
         }

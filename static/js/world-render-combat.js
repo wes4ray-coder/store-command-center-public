@@ -61,8 +61,58 @@ function _trackDefeats() {
     _threatSeen[t.id] = t.status;
   }
 }
+/* ── duel feedback: the backend resolves fighter duels tick-by-tick; we watch
+   each threat's HP between polls and burst a slash + floating damage number at
+   the enemy the moment a hit lands (plus a positional 'swing' clash). This is
+   what makes combat visibly INTERACT instead of two sides idling at range. ── */
+const _hpSeen = {};           // threat id → last seen hp
+const _hitfx = [];            // {x,y,t0,amt}
+function _trackHits() {
+  const raid = _worldState?.raid;
+  if (!raid || raid.phase !== 'raid') { for (const k in _hpSeen) delete _hpSeen[k]; return; }
+  for (const t of (raid.threats || [])) {
+    const prev = _hpSeen[t.id];
+    if (t.status === 'active' && prev != null && t.hp < prev && _threatPos[t.id]) {
+      _hitfx.push({ ..._threatPos[t.id], t0: performance.now(), amt: Math.max(1, Math.round(prev - t.hp)) });
+      if (_hitfx.length > 14) _hitfx.shift();
+      if (window.WAU && WAU.sfxAt) WAU.sfxAt('swing', _threatPos[t.id].x, _threatPos[t.id].y, 300);
+    }
+    _hpSeen[t.id] = t.hp;
+  }
+}
+function _drawHitFx(ctx) {
+  const now = performance.now();
+  for (let i = _hitfx.length - 1; i >= 0; i--) {
+    const h = _hitfx[i], age = (now - h.t0) / 700;
+    if (age >= 1) { _hitfx.splice(i, 1); continue; }
+    const al = 1 - age;
+    ctx.strokeStyle = `rgba(255,255,255,${0.9 * al})`; ctx.lineWidth = 2;      // slash arc
+    ctx.beginPath(); ctx.arc(h.x, h.y - 10, 9, -0.6 - age * 1.4, 0.9 - age * 1.4); ctx.stroke();
+    ctx.font = 'bold 8px monospace'; ctx.textAlign = 'center';
+    ctx.fillStyle = `rgba(255,130,95,${al})`;
+    ctx.fillText('-' + h.amt, h.x + 9, h.y - 18 - age * 10);
+  }
+}
+
+/* nearest live enemy's drawn position — fighters use this to face + lunge at
+   their duel partner (world-render-agents). null outside a raid. */
+function _nearestThreatPos(x, y) {
+  const raid = _worldState?.raid;
+  if (!raid || raid.phase !== 'raid') return null;
+  let best = null, bd = Infinity;
+  for (const t of (raid.threats || [])) {
+    if (t.status !== 'active') continue;
+    const p = _threatPos[t.id]; if (!p) continue;
+    const d = (p.x - x) * (p.x - x) + (p.y - y) * (p.y - y);
+    if (d < bd) { bd = d; best = p; }
+  }
+  return best;
+}
+
 function _drawDefeatFx(ctx) {
   _trackDefeats();
+  _trackHits();
+  _drawHitFx(ctx);
   const now = performance.now();
   for (let i = _poofs.length - 1; i >= 0; i--) {
     const p = _poofs[i], age = (now - p.t0) / 900;

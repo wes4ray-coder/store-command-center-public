@@ -158,8 +158,10 @@ def _render_candidates(prop_id, prompt, n):
             raw = WORLD_ASSETS / f"prop_{prop_id}_raw{k}.png"
             seed = str(random.randint(1, 2**31 - 1))
             try:
+                # 20 steps: the default lightning model renders near-black at the
+                # old 8 (the tileset lesson — verified live).
                 res = subprocess.run(
-                    [str(GENERATE_SCRIPT), prompt, str(raw), "768", "768", "8", seed, model, lora, "", matte],
+                    [str(GENERATE_SCRIPT), prompt, str(raw), "768", "768", "20", seed, model, lora, "", matte],
                     capture_output=True, text=True, timeout=300)
                 if res.returncode == 0 and raw.exists():
                     cand = WORLD_ASSETS / f"prop_{prop_id}_c{len(out)}.png"
@@ -195,6 +197,24 @@ def generate_world_prop(prop_id: int):
         WORLD_ASSETS.mkdir(parents=True, exist_ok=True)
 
         label = r["label"]
+
+        # PACK LIBRARY FIRST: a label the downloaded asset packs already cover
+        # never spends GPU — the extracted sprite (already transparent, already
+        # pixel-art) becomes the prop's image directly.
+        try:
+            import world_sprites
+            pack_url = world_sprites.pack_match(label)
+        except Exception:
+            pack_url = None
+        if pack_url:
+            conn.execute("UPDATE world_props SET status='done', image_path=?, score=?, verdict=? WHERE id=?",
+                         (pack_url, None, "pack asset", prop_id))
+            if r.get("owner_key"):
+                _event(conn, r["owner_key"], "system",
+                       f"A {label} arrived from the town stores (asset library). 📦")
+            conn.commit(); conn.close()
+            return
+
         base_prompt = r["prompt"] or pixel_prompt(label)
         see = ws.b("world_vision_enabled") and world_vision.available()
         n = max(1, ws.i("world_vision_candidates")) if see else 1
@@ -208,6 +228,22 @@ def generate_world_prop(prop_id: int):
                 cands = _render_candidates(prop_id, prompt, n)
                 if not cands:
                     continue
+                # PICTURE-BOX GATE: an opaque square (the background survived both
+                # the matte and the flood-fill) is rejected outright — retried with
+                # a corrective prompt, NEVER shipped. This was the bug that put
+                # background-boxes all over the map.
+                try:
+                    from PIL import Image as _Im
+                    import world_sprites as _wsp
+                    clear = [c for c in cands if _wsp.alpha_ok(_Im.open(c))]
+                except Exception:
+                    clear = cands
+                if not clear:
+                    logger.warning("prop %d round %d: every candidate was an opaque box — retrying", prop_id, rnd)
+                    prompt = (f"{base_prompt}. MUST be ONE small centered object on a perfectly "
+                              f"plain flat solid single-color background, nothing else in frame")
+                    continue
+                cands = clear
                 if see:
                     for c in cands:
                         ev = world_vision.evaluate_asset(c, label)
@@ -342,7 +378,12 @@ def agent_makeover(c, a, charge=True):
 
 
 def _generate_agent_sprite(agent_id: int):
-    """Render one full-body character sprite through the current pixel pipeline."""
+    """Render a custom full-body look and register it as REAL sprite sheets in
+    the entity registry (world_sprites): transparency-gated (opaque renders are
+    rejected and retried, never installed — the old picture-box bug), vision-QA
+    scored, then idle+walk sheets derived from the vetted base. The renderer
+    reads the sheets from the entity manifest; sprite_path survives only as the
+    "has an own look" marker + portrait."""
     if not _gen_lock.acquire(blocking=False):
         return
     try:
@@ -355,30 +396,66 @@ def _generate_agent_sprite(agent_id: int):
         finally:
             conn.close()
         from world_defs import DEPARTMENTS
-        dept = DEPARTMENTS.get(a["dept"], (a["dept"], ""))[0]
-        prompt = pixel_prompt(f"full-body standing villager game character, a {dept} worker, "
-                              f"friendly face, front view, whole body visible head to feet")
-        raw = WORLD_ASSETS / f"agent_{a['key']}_raw.png"
-        final = WORLD_ASSETS / f"agent_{a['key']}.png"
+        import world_sprites
+        from PIL import Image
         import random as _r
-        res = subprocess.run([str(GENERATE_SCRIPT), prompt, str(raw), "768", "768", "8",
-                              str(_r.randint(1, 2**31 - 1)), DEFAULT_IMAGE_MODEL,
-                              ws.s("world_prop_lora"), "", _matte_model()],
-                             capture_output=True, text=True, timeout=300)
-        if res.returncode != 0 or not raw.exists():
-            logger.error("agent sprite %s failed: %s", a["key"], (res.stderr or "")[:160])
-            return
-        _pixelate(raw, final, cells=64, colors=28)
+        dept = DEPARTMENTS.get(a["dept"], (a["dept"], ""))[0]
+        look = pixel_prompt(f"full-body standing villager game character, a {dept} worker, "
+                            f"friendly face, front view, whole body visible head to feet")
+        raw = WORLD_ASSETS / f"agent_{a['key']}_raw.png"
+        tmp = WORLD_ASSETS / f"agent_{a['key']}_cand.png"
+        sprite, seed, score = None, None, None
+        orch.image_acquire()
         try:
-            raw.unlink()
-        except Exception:
-            pass
+            for _attempt in range(3):                    # opaque output → fresh-seed retry
+                seed = str(_r.randint(1, 2**31 - 1))
+                res = subprocess.run([str(GENERATE_SCRIPT), look, str(raw), "768", "768", "20",
+                                      seed, ws.s("world_prop_model") or DEFAULT_IMAGE_MODEL,
+                                      ws.s("world_prop_lora"), "", _matte_model()],
+                                     capture_output=True, text=True, timeout=300)
+                if res.returncode != 0 or not raw.exists():
+                    logger.error("agent sprite %s render failed: %s", a["key"], (res.stderr or "")[:160])
+                    continue
+                _pixelate(raw, tmp, cells=64, colors=28)
+                im = Image.open(tmp).convert("RGBA")
+                if world_sprites.alpha_ok(im):           # the picture-box gate
+                    sprite = im
+                    break
+                logger.warning("agent sprite %s: opaque/shredded render rejected", a["key"])
+        finally:
+            orch.image_release()
+            for f in (raw, tmp):
+                try: f.unlink()
+                except Exception: pass
+        if sprite is None:
+            _note_fail = get_conn()
+            try:
+                _note_fail.execute("INSERT INTO world_events (agent_key,kind,text) VALUES (?,?,?)",
+                                   (a["key"], "system",
+                                    f"🎨 {a['name']}'s studio session didn't produce a usable look — "
+                                    f"the fee covers another sitting soon."))
+                _note_fail.commit()
+            finally:
+                _note_fail.close()
+            return
+        # QA (permissive when no vision model is around, like every world asset)
+        qa_tmp = WORLD_ASSETS / f"agent_{a['key']}_qa.png"
+        sprite.save(qa_tmp)
+        try:
+            ev = world_vision.evaluate_asset(qa_tmp, f"full-body villager character ({a['name']})")
+            score = ev.get("score")
+        finally:
+            try: qa_tmp.unlink()
+            except Exception: pass
+        world_sprites.install_base(f"agent_{a['key']}", sprite, look, seed=seed,
+                                   score=score, actions=("idle", "walk"))
         conn = get_conn()
         try:
             conn.execute("UPDATE world_agents SET sprite_path=? WHERE id=?",
-                         (f"/store/static/world_assets/{final.name}", agent_id))
+                         (f"/store/static/world_assets/entities/agent_{a['key']}/base.png", agent_id))
+            tag = f" (vision {score}/10)" if score is not None else ""
             conn.execute("INSERT INTO world_events (agent_key,kind,text) VALUES (?,?,?)",
-                         (a["key"], "system", f"✨ {a['name']} debuts a brand-new look!"))
+                         (a["key"], "system", f"✨ {a['name']} debuts a brand-new look!{tag}"))
             conn.commit()
         finally:
             conn.close()

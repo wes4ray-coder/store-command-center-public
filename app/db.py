@@ -33,6 +33,7 @@ def init_db():
         create_social_tables,
         create_swarm_tables,
         create_world_tables,
+        create_queue_history_table,
         run_migrations,
     )
     conn = get_conn()
@@ -46,6 +47,7 @@ def init_db():
     create_social_tables(conn)
     create_swarm_tables(conn)
     create_world_tables(conn)
+    create_queue_history_table(conn)
     conn.commit()
     # Migrations — add columns that might be missing in older DBs
     run_migrations(conn)

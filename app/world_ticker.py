@@ -62,6 +62,7 @@ def _loop():
             _safe("tileset", lambda: __import__("world_tileset").auto_tick(conn))    # an agent paints ONE terrain tile (self-cadenced, toggle-gated)
             _safe("sprites", lambda: __import__("world_sprites").auto_tick(conn))    # backfill ONE missing entity sprite sheet (self-cadenced, toggle-gated, OFF by default)
             _safe("space", lambda: __import__("world_space").tick(conn))             # JASA space program: launch/return crews to the Moon (decoupled overlay, toggle-gated)
+            _safe("era", lambda: __import__("world_era").tick(conn))                 # per-building civilization era: dept buildings climb ages when USED, rot when idle (decoupled overlay, toggle-gated)
 
             c = conn.cursor()
             # Scheduled cognition — the ONLY periodic LLM work. Loads a model at most

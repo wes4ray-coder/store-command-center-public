@@ -151,6 +151,21 @@ def _voters(conn):
     return [dict(r) for r in conn.execute("SELECT name,dept FROM world_agents").fetchall()]
 
 
+def _oracle_view(conn):
+    """(strength, brief) from the oracle tournament's accuracy-weighted consensus.
+    ADVISORY ONLY — cited in notes/votes, never an action. (0.0, "") when the
+    `oracle_company_hookup` toggle is off, nothing is open, or the oracle errs."""
+    try:
+        from routers.oracle import consensus as _oc
+        if not _oc.hookup_enabled():
+            return 0.0, ""
+        assets = _oc.compute(conn).get("assets") or []
+        strength = sum(abs(a["bias"]) for a in assets) / len(assets) if assets else 0.0
+        return strength, _oc.brief(conn=conn)
+    except Exception:
+        return 0.0, ""
+
+
 def _spawn(conn, strat, plan):
     """Turn an adopted strategy into real actions. Returns count executed now
     (gated actions like code count as 'queued for your approval', not executed)."""
@@ -237,6 +252,8 @@ def run_cycle(conn=None):
                         for sid in strat_ids} if world_taste.stats(conn)["trained"] else {}
         except Exception:
             taste_by = {}
+        # the oracle's read on the market — a moving market makes scouting timely
+        orc_strength, orc_brief = _oracle_view(conn)
         for _v in voters or [{"name": "Assembly"}]:
             best, bscore = None, -1
             for sid in strat_ids:
@@ -248,6 +265,8 @@ def run_cycle(conn=None):
                     score += 1.0                       # boldness breaks standstill
                 if st["category"] in ("hustle", "create", "platform"):
                     score += 0.4
+                if st["category"] == "watch" and orc_strength > 0.25:
+                    score += 0.8               # oracle consensus says the market's moving — scout it
                 score += (taste_by.get(sid, 0.5) - 0.5) * 1.6   # lean toward god's taste
                 score += random.random() * 0.8         # personal conviction
                 if score > bscore:
@@ -267,6 +286,8 @@ def run_cycle(conn=None):
         conn.commit()
 
         # ── act on the mandate ──
+        if orc_brief:
+            wo.note(f"🔮 {orc_brief}", kind="info", from_agent="The Oracle", conn=conn)
         plan = json.loads(winner["plan"] or "{}")
         executed = _spawn(conn, winner, plan)
         conn.execute("UPDATE world_strategies SET status='acted', actions_run=?, resolved_at=datetime('now') WHERE id=?",
@@ -337,7 +358,9 @@ def state(conn=None):
         recent = [dict(r) for r in conn.execute(
             "SELECT * FROM world_strategies ORDER BY id DESC LIMIT 12").fetchall()]
         last_cycle = _get(conn, "last_cycle")
+        _, orc_brief = _oracle_view(conn)
         return {
+            "oracle_brief": orc_brief,          # advisory oracle consensus ('' when hookup off)
             "standing": standing,
             "stagnation": stag,
             "threat": threat,

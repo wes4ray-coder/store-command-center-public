@@ -77,6 +77,15 @@ def maybe_upgrade(conn):
     leader, title, spec, cost = pick
     spec = (f"{spec}\n\n[Filed by {leader} from the company fund — {cost}\U0001fa99 "
             f"is charged only when the owner APPROVES this job.]")
+    try:
+        # the leader cites the oracle tournament's read on the market (advisory
+        # colour only; '' when the oracle_company_hookup toggle is off)
+        from routers.oracle.consensus import brief as _oracle_brief
+        ob = _oracle_brief(conn=conn)
+        if ob:
+            spec += f"\n\n[Market watch cited by {leader} — {ob}]"
+    except Exception:
+        pass
     jid = c.execute(
         "INSERT INTO swarm_jobs (title,spec,repo,branch,autonomy,status) "
         "VALUES (?,?,NULL,'dev',NULL,'proposed')", (title, spec)).lastrowid

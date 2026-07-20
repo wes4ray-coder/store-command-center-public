@@ -93,6 +93,15 @@ def run_review():
     cat_lines = "\n".join(f"- {t}" for t in titles) if titles else "(catalog is empty)"
     user = (f"SHOP SEARCH QUERIES ({len(signals)} recent):\n{sig_lines}\n\n"
             f"CURRENT CATALOG ({len(titles)} product titles):\n{cat_lines}")
+    try:
+        # advisory market colour from the oracle tournament ('' when the
+        # oracle_company_hookup toggle is off) — helps online_income leads.
+        from routers.oracle.consensus import brief as _oracle_brief
+        _ob = _oracle_brief()
+        if _ob:
+            user += f"\n\nMARKET CONTEXT (advisory): {_ob}"
+    except Exception:
+        pass
     sig_ids = [s["id"] for s in signals]
     first_id = sig_ids[0]
 

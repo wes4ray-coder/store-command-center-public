@@ -9,11 +9,12 @@ Endpoints only. All behaviour lives in the world modules:
 
 This module is a package: the shared ``router`` lives in ``_base``; the routes are
 split across ``state`` (settings + the read snapshots), ``agents`` (agent actions,
-props, governance), ``economy`` (production/config controls + bills) and ``build``
-(tileset, raids, map layout, soundscape). Importing the submodules runs their
+props, governance), ``economy`` (production/config controls + bills), ``build``
+(tileset, raids, map layout, soundscape) and ``hud`` (read-only aggregations for
+the overlay HUD). Importing the submodules runs their
 ``@router.*`` decorators, registering every route on the single shared ``router``.
 """
 from ._base import router                       # shared router
-from . import state, agents, economy, build     # noqa: F401  (import registers their @router routes)
+from . import state, agents, economy, build, sprites, hud, public   # noqa: F401  (import registers their @router routes)
 
 __all__ = ["router"]

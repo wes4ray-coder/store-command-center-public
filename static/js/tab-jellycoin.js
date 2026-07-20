@@ -13,6 +13,275 @@ function _jlyStat(label, val, hint) {
     <div style="font-size:1.05rem;font-weight:700;margin-top:2px;">${val}</div></div>`;
 }
 
+/* ── the hard cap ─────────────────────────────────────────────────────────────
+      6,000,000 JLY, enforced at every mint site — block subsidy AND skilling
+      boosts draw from the same pool, so this bar is the whole story of how much
+      JLY can ever exist. `sup` comes from /api/jelly/supply, which derives the
+      number from the block table and reconciles it against the wallet ledger. */
+function _jlySupplyPanel(sup) {
+  if (!sup || !sup.chain) return '';
+  const pct = Math.max(0, Math.min(100, +sup.pct_mined || 0));
+  const eta = sup.cap_eta_epoch
+    ? new Date(sup.cap_eta_epoch * 1000).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })
+    : 'never (subsidy decays to zero first)';
+  const n = (v, d = 2) => (+v).toLocaleString(undefined, { maximumFractionDigits: d });
+  // A non-zero discrepancy means coins moved outside a block. Never hide it.
+  const bad = !sup.reconciled;
+  return `<div class="settings-group" style="margin-bottom:16px;">
+    <div class="settings-group-title">🧾 Supply &amp; hard cap
+      ${hlp('JellyCoin has a fixed maximum of 6,000,000 JLY: the 1,000,000 genesis premine plus the 4,999,999.4 JLY the halving schedule pays out over 26 halvings, rounded to a clean 6M. The cap is enforced when a block is accepted, not merely documented — the final block\'s reward is trimmed to whatever headroom is left instead of overshooting, and after that the subsidy is zero. Skilling boosts mint inside the same cap, so they spend headroom that would otherwise have gone to the last coinbases.')}</div>
+    <div style="display:flex;justify-content:space-between;font-size:.78rem;margin-bottom:5px;">
+      <span><b>${n(sup.circulating)}</b> <span style="color:var(--muted);">JLY in circulation</span></span>
+      <span style="color:var(--muted);">${pct.toFixed(2)}% of ${n(sup.max_supply, 0)}</span>
+    </div>
+    <div style="background:var(--surface,#161a22);border-radius:5px;height:15px;overflow:hidden;border:1px solid var(--border,#243049);">
+      <div style="width:${Math.max(0.6, pct)}%;height:100%;background:linear-gradient(90deg,#00d4aa,#6c63ff);"></div>
+    </div>
+    <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:12px;">
+      ${_jlyStat('Remaining', n(sup.remaining) + ' JLY', 'Headroom left under the cap. Every mint — coinbase and boost alike — is trimmed to fit inside this.')}
+      ${_jlyStat('Block reward', n(sup.block_reward) + ' JLY', sup.block_reward < sup.scheduled_reward ? 'TRIMMED: the schedule says ' + n(sup.scheduled_reward) + ' JLY but only this much headroom remains under the cap.' : 'Halves every 50,000 blocks.')}
+      ${_jlyStat('Next halving', '#' + n(sup.next_halving_height, 0), n(sup.blocks_to_halving, 0) + ' blocks away, ~' + n(sup.avg_block_sec, 0) + 's per block at the current rate.')}
+      ${_jlyStat('Cap reached', eta, 'Projected from the observed block rate and the halving schedule, including the boost emission that mints alongside it. Not a promise — it moves with hashrate.')}
+    </div>
+    <div style="display:flex;gap:14px;flex-wrap:wrap;font-size:.72rem;color:var(--muted);margin-top:10px;line-height:1.8;">
+      <span>Premine <b>${n(sup.premine, 0)}</b></span>
+      <span>Mined <b>${n(sup.mined_subsidy)}</b></span>
+      <span>Boosts <b>${n(sup.boost_minted)}</b></span>
+      ${sup.burned ? `<span>Burned <b>${n(sup.burned)}</b></span>` : ''}
+      <span>Tickets pending <b>${n(sup.boosts_pending, 0)}</b>${sup.boosts_expired ? ` · expired <b>${n(sup.boosts_expired, 0)}</b>` : ''}</span>
+    </div>
+    <div style="font-size:.72rem;margin-top:8px;color:${bad ? '#f87171' : 'var(--muted)'};line-height:1.7;">
+      ${bad
+      ? `⚠️ <b>Ledger mismatch:</b> the block table says ${n(sup.circulating)} JLY exists but wallet balances sum to ${n(sup.wallet_sum)} JLY — a difference of ${n(sup.discrepancy)} JLY. Coins moved outside a block; this is a bug, not a rounding artefact.`
+      : `✅ Reconciled: block-derived supply and the sum of all ${''}wallet balances agree exactly (${n(sup.wallet_sum)} JLY).`}
+    </div>
+    <div style="font-size:.72rem;color:var(--muted);margin-top:6px;line-height:1.7;">
+      Once the cap is reached there is no block subsidy, and this chain has no transaction fees —
+      so mining past that point earns nothing. It still orders and secures blocks; it just stops paying.
+    </div>
+  </div>`;
+}
+
+/* ── how hard, and when: the owner's mining envelope ──────────────────────────
+      Intensity is per-rig and reaches the card LIVE inside getwork, so editing a
+      throttle here retunes a running miner within one refresh — no restart, no
+      reinstall. The schedule is enforced on the SERVER (getwork just answers 503),
+      so it binds even a rig running an old build that knows nothing about hours. */
+function _jlyBatchOpts(sel) {
+  return [[1 << 18, '2¹⁸ — tiniest'], [1 << 20, '2²⁰ — small'], [1 << 22, '2²² — normal'],
+          [1 << 24, '2²⁴ — large']]
+    .map(([v, l]) => `<option value="${v}"${+sel === v ? ' selected' : ''}>${l}</option>`).join('');
+}
+
+const _JLY_SRC = {
+  owner: ['rgba(148,163,184,.16)', 'var(--muted)', 'yours'],
+  agent: ['rgba(124,58,237,.18)', '#a78bfa', 'company'],
+  defense: ['rgba(239,68,68,.18)', '#ef4444', 'defending'],
+};
+
+function _jlyRigsTable(rigs, mpol) {
+  const pr = ((mpol || {}).rigs) || [];
+  const byName = {};
+  pr.forEach(r => { byName[r.name] = r; });
+  _JLY.rigRows = rigs.map(m => m.name);
+  const budget = ((mpol || {}).schedule || {}).daily_hours || 0;
+  if (!rigs.length) return `<div style="font-size:.78rem;color:var(--muted);">No rigs yet. Dust off an old graphics card:</div>`;
+  return `<table class="mini-table" style="width:100%;font-size:.78rem;">
+    <tr><th style="text-align:left;">Rig</th><th style="text-align:left;">GPU</th><th>MH/s</th><th>Blocks</th>
+      <th style="text-align:left;">Intensity ${hlp('How hard this rig mines. "Idle %" is the share of each second the card spends doing nothing — 0 is full blast, 90 is barely-there. Batch is the work per kernel launch: a smaller batch keeps each launch short so nothing else on that box ever waits long for the GPU. Both are sent to the rig inside its next getwork, so a change lands within a few seconds without restarting anything.')}</th>
+      <th>Today ${hlp('Hours this rig has ACTUALLY mined since local midnight — counted from work issued, not wall-clock, so a paused or offline rig does not burn its budget.')}</th><th></th></tr>
+    ${rigs.map((m, i) => {
+      const p = byName[m.name] || { throttle: 50, batch: 1 << 22, cost: 'ai', source: 'owner', hours_today: 0 };
+      const [bg, fg, lbl] = _JLY_SRC[p.source] || _JLY_SRC.owner;
+      return `<tr><td>${esc(m.name)}</td><td style="color:var(--muted);">${esc(m.gpu || '?')}</td>
+        <td style="text-align:center;">${(m.hashrate / 1e6).toFixed(1)}</td><td style="text-align:center;">${m.blocks}</td>
+        <td style="white-space:nowrap;">
+          <input id="jly-thr-${i}" type="number" min="0" max="90" value="${p.throttle}" style="width:56px;" title="idle %">
+          <span style="color:var(--muted);font-size:.7rem;">% idle</span>
+          <select id="jly-bat-${i}" style="width:104px;">${_jlyBatchOpts(p.batch)}</select>
+          <select id="jly-cost-${i}" style="width:96px;" title="does this card also do AI work?">
+            <option value="ai"${p.cost !== 'free' ? ' selected' : ''}>AI box</option>
+            <option value="free"${p.cost === 'free' ? ' selected' : ''}>spare</option></select>
+          <span style="font-size:.6rem;font-weight:700;background:${bg};color:${fg};border-radius:8px;padding:2px 6px;">${lbl}</span>
+        </td>
+        <td style="text-align:center;color:var(--muted);">${(p.hours_today || 0).toFixed(1)}h${budget ? ` / ${budget}` : ''}</td>
+        <td style="text-align:center;white-space:nowrap;">
+          <span style="color:${p.held ? '#f59e0b' : (m.online ? 'var(--green)' : 'var(--muted)')};">${p.held ? '⏸ held' : (m.online ? '● online' : '○ offline')}</span>
+          <button class="btn-sm" style="margin-left:6px;" onclick="jellyRigSave(${i})">💾</button></td></tr>`;
+    }).join('')}
+  </table>`;
+}
+
+function _jlySchedPanel(mpol) {
+  const s = (mpol || {}).schedule;
+  if (!s) return '';
+  const on = !!s.enabled;
+  return `<div style="background:var(--panel2,#0b1120);border:1px solid var(--border,#243049);border-radius:10px;padding:10px 12px;margin-bottom:10px;">
+    <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+      <b style="font-size:.8rem;">🕒 Mining hours</b>
+      <span style="font-size:.62rem;font-weight:700;background:${on ? 'rgba(34,197,94,.16)' : 'rgba(148,163,184,.16)'};color:${on ? 'var(--green)' : 'var(--muted)'};border-radius:10px;padding:2px 8px;text-transform:uppercase;">${on ? 'on' : 'off'}</span>
+      ${hlp('Your hard limits on when the rigs may mine at all. Enforced on the SERVER: outside your hours getwork simply refuses to hand out work, so even a rig running an old miner build obeys — it just sees the same "stand down" it already understands. Leave the toggle off and mining runs whenever the AI queue is free.')}
+      ${on ? `<span style="font-size:.72rem;color:${s.open_now ? 'var(--green)' : 'var(--muted)'};">${s.open_now ? '● window open now' : '○ outside the window'}</span>` : ''}
+      <span style="font-size:.7rem;color:var(--muted);">times are ${esc(s.tz || 'local')} (this box's clock)</span>
+    </div>
+    ${s.error ? `<div style="font-size:.72rem;color:#ef4444;margin-top:6px;">${esc(s.error)}</div>` : ''}
+    <div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;margin-top:10px;">
+      <button class="btn-sm" onclick="jellySchedSave(${on ? 'false' : 'true'})">${on ? '⏸ Turn off' : '▶ Turn on'} schedule</button>
+      <div class="field" style="margin:0;"><label>Allowed hours ${hlp('Comma-separated HH:MM-HH:MM windows, e.g. "22:00-06:00" for overnight only, or "22:00-06:00, 12:00-13:00". Windows may cross midnight. Leave EMPTY to allow any hour and limit purely by the daily budget below.')}</label>
+        <input id="jly-sched-win" value="${esc(s.windows || '')}" placeholder="22:00-06:00" style="width:190px;"></div>
+      <div class="field" style="margin:0;"><label>Hours/day per rig ${hlp('A real budget, not a theory: the server counts the time each rig is actually issued work and stops handing out more once the rig hits this many hours today. Resets at local midnight. 0 = no daily limit.')}</label>
+        <input id="jly-sched-hrs" type="number" min="0" max="24" step="0.5" value="${s.daily_hours || 0}" style="width:80px;"></div>
+      <button class="btn-sm" onclick="jellySchedSave()">💾 Save</button>
+    </div>
+  </div>`;
+}
+
+function _jlyAgentPanel(mpol) {
+  const a = (mpol || {}).agent;
+  if (!a) return '';
+  const on = !!a.enabled, plan = a.plan || null;
+  return `<div style="background:var(--panel2,#0b1120);border:1px solid var(--border,#243049);border-radius:10px;padding:10px 12px;margin-bottom:10px;">
+    <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+      <b style="font-size:.8rem;">🏢 Let the Company decide</b>
+      <span style="font-size:.62rem;font-weight:700;background:${on ? 'rgba(124,58,237,.18)' : 'rgba(148,163,184,.16)'};color:${on ? '#a78bfa' : 'var(--muted)'};border-radius:10px;padding:2px 8px;text-transform:uppercase;">${on ? 'on' : 'off'}</span>
+      ${hlp('When on, the Company picks when and how hard to mine — but only INSIDE the envelope you set here. Agents can never mine outside your hours, exceed the daily budget, push harder than the floor below, or override the AI queue. Those limits are enforced elsewhere in the server, so a bad decision physically cannot widen them; the worst an agent can do is mine less. Every plan is logged and shows as "company" on the rig it touches. Ships OFF.')}
+    </div>
+    ${plan ? `<div style="font-size:.74rem;color:var(--muted);margin-top:6px;">
+      Active plan — <b>${esc(plan.agent || 'the Company')}</b> on <code>${esc(plan.rig)}</code>:
+      ${plan.throttle != null ? `throttle ${plan.throttle}%` : 'no intensity change'}${plan.pause_until ? ', standing down' : ''}.
+      ${esc(plan.reason || '')}
+      <button class="btn-sm" style="margin-left:6px;" onclick="jellyAgentSave({clear_agent_plan:true})">✖ Clear</button></div>` : ''}
+    <div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;margin-top:10px;">
+      <button class="btn-sm" onclick="jellyAgentSave({agent_enabled:${on ? 'false' : 'true'}})">${on ? '⏸ Turn off' : '▶ Turn on'}</button>
+      <div class="field" style="margin:0;"><label>Hardest they may push ${hlp('The lowest idle % an agent is allowed to ask for — their aggression ceiling. 25 means agents may choose anything from 25% idle (fairly hard) down to 90% idle (barely there), and nothing harder. Your own settings are unaffected.')}</label>
+        <input id="jly-agent-thr" type="number" min="0" max="90" value="${a.min_throttle}" style="width:72px;"></div>
+      <div class="field" style="margin:0;"><label>Max stand-down (min) ${hlp('The longest an agent may pause a rig in one decision.')}</label>
+        <input id="jly-agent-pause" type="number" min="0" max="1440" value="${a.max_pause_min}" style="width:80px;"></div>
+      <div class="field" style="margin:0;"><label>Max plan length (min) ${hlp('How long one agent decision stays in force before it expires and control reverts to your settings.')}</label>
+        <input id="jly-agent-min" type="number" min="1" max="1440" value="${a.max_minutes}" style="width:80px;"></div>
+      <button class="btn-sm" onclick="jellyAgentSave()">💾 Save</button>
+    </div>
+  </div>`;
+}
+
+/* ── 51%-attack defence: measured share of network hashpower + auto response ── */
+function _jlyDefenseBanner(d) {
+  if (!d || !d.enabled) return '';
+  if (d.engaged) {
+    const mins = d.engaged_since ? Math.round((Date.now() / 1000 - d.engaged_since) / 60) : 0;
+    return `<div style="background:rgba(239,68,68,.14);border:1px solid #ef4444;border-radius:10px;padding:12px 14px;margin-bottom:10px;">
+      <div style="font-weight:700;color:#ef4444;font-size:.9rem;">🛡️ CHAIN DEFENCE ENGAGED — every rig at full power</div>
+      <div style="font-size:.78rem;color:var(--muted);margin-top:4px;line-height:1.6;">
+        Our share of network hashpower measured <b>${_jlyPct(d.share_pct)}</b>, below your ${d.act_pct}% action line.
+        All rigs ramped automatically ${mins ? `${mins} min ago` : 'just now'} — no approval needed, because an attack will not wait.
+        ${d.preempt_ai ? 'AI work is being preempted for the duration (in-flight jobs were allowed to finish; nothing was cancelled).' : 'AI work still has priority — the preempt toggle is off.'}
+        ${d.ai_seconds ? `Cost so far: ~${Math.round(d.ai_seconds / 60)} min of AI GPU time.` : ''}
+        Stands down automatically once share holds above ${d.clear_pct}% for ${d.settle_min} min.
+      </div>
+      <button class="btn-sm" style="margin-top:8px;" onclick="jellyDefenseSave({stand_down:true})">✋ Stand down now</button>
+    </div>`;
+  }
+  if (d.level === 'warn') {
+    return `<div style="background:rgba(245,158,11,.14);border:1px solid #f59e0b;border-radius:10px;padding:10px 12px;margin-bottom:10px;">
+      <div style="font-weight:700;color:#f59e0b;font-size:.82rem;">⚠️ Hashpower share slipping — ${_jlyPct(d.share_pct)}</div>
+      <div style="font-size:.76rem;color:var(--muted);margin-top:3px;">
+        Below your ${d.warn_pct}% warning line. Spare rigs are ramping; full defence engages below ${d.act_pct}%.</div></div>`;
+  }
+  return '';
+}
+
+function _jlyDefensePanel(d) {
+  if (!d) return '';
+  const on = !!d.enabled;
+  const hist = (d.history || []).filter(h => h.share_pct != null);
+  const series = hist.map(h => ({ t: h.at, h: h.blocks }));
+  return `<div class="settings-group" style="margin-bottom:16px;">
+    <div class="settings-group-title">🛡️ Chain defence
+      <span style="font-size:.62rem;font-weight:700;background:${on ? 'rgba(34,197,94,.16)' : 'rgba(148,163,184,.16)'};color:${on ? 'var(--green)' : 'var(--muted)'};border-radius:10px;padding:2px 8px;margin-left:8px;text-transform:uppercase;">${on ? 'on' : 'off'}</span>
+      ${hlp('JellyCoin is a real proof-of-work chain, so whoever holds the majority of hashpower can rewrite recent history. Today that is you. If outsiders ever join and your share erodes, this ramps your own rigs automatically — cheapest capacity first, and with no approval step, because an attack will not wait for you to wake up. Ships ON. It raises the cost of an attack; it cannot make a small chain unattackable.')}</div>
+    <div style="font-size:.78rem;color:var(--muted);line-height:1.7;margin-bottom:10px;">
+      Share is measured from <b>blocks actually solved</b> in the last ${d.window_blocks} blocks — the only evidence the chain can verify.
+      A miner's self-reported hashrate is display only; an attacker can put any number there.
+      ${d.confident ? '' : `<b>${esc(d.reason || 'sample too small')}</b> — no action will be taken on this.`}
+      ${d.auto_rigs ? `<br><b>Your rigs were auto-detected</b> (${(d.my_rigs || []).map(esc).join(', ') || 'none'}) as "everything not mapped to a peer wallet". Pin the list below if outsiders ever mine here.` : ''}
+    </div>
+    <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:12px;">
+      ${_jlyStat('Our share', _jlyPct(d.share_pct), 'Fraction of recently solved blocks that came from your rigs. Binomial noise is real: at 60 blocks a true 50% attacker can read anywhere from ~37% to ~63%, which is why the thresholds carry margin.')}
+      ${_jlyStat('Network hashrate', _jlyHash(d.net_hashrate), 'Estimated from the work the chain absorbed: sum of 2²⁵⁶/target over the window, divided by the time it spanned.')}
+      ${_jlyStat('Ours', _jlyHash(d.my_hashrate))}
+      ${_jlyStat('Sample', (d.blocks || 0) + ' blocks', 'Confidence figure — the number of blocks the share was measured over.')}
+    </div>
+    ${(d.per_rig || []).length ? `<div style="font-size:.72rem;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px;">Who is finding blocks</div>
+      ${_jlyBars((d.per_rig || []).map(r => ({ miner: r.rig + (r.mine ? '' : ' ⚠ not yours'), blocks: r.blocks })))}` : ''}
+    ${series.length > 2 ? `<div style="margin-top:14px;">
+      <div style="font-size:.72rem;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px;">Our share over time (%)</div>
+      ${_jlyChart(series, hist.map(h => h.share_pct), { color: '#ef4444', fmt: _jlyChartInt, refY: d.warn_pct, refLabel: 'warn ' + d.warn_pct + '%' })}
+      <div style="font-size:.72rem;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin:10px 0 4px;">Network hashrate (MH/s)</div>
+      ${_jlyChart(series, hist.map(h => (h.net_hashrate || 0) / 1e6), { color: '#6c63ff', fmt: _jlyChartInt })}
+    </div>` : `<div style="font-size:.74rem;color:var(--muted);margin-top:10px;">History builds up as blocks are mined — a datapoint every ${d.sample_min || 15} min, plus one on every level change, so a slow erosion over days shows up instead of passing unnoticed.</div>`}
+    <div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;margin-top:12px;">
+      <button class="btn-sm" onclick="jellyDefenseSave({enabled:${on ? 'false' : 'true'}})">${on ? '⏸ Turn off' : '▶ Turn on'} defence</button>
+      <button class="btn-sm" onclick="jellyDefenseSave({preempt_ai:${d.preempt_ai ? 'false' : 'true'}})">${d.preempt_ai ? '🤖 AI keeps priority' : '🛡️ Let defence beat AI'}</button>
+      <div class="field" style="margin:0;"><label>Warn below ${hlp('Share that gets you told and starts ramping SPARE rigs only — capacity that costs nothing but watts.')}</label>
+        <input id="jly-def-warn" type="number" min="0" max="100" value="${d.warn_pct}" style="width:72px;"></div>
+      <div class="field" style="margin:0;"><label>Engage below ${hlp('Share that triggers full automatic defence: every rig to full power, immediately, no approval.')}</label>
+        <input id="jly-def-act" type="number" min="0" max="100" value="${d.act_pct}" style="width:72px;"></div>
+      <div class="field" style="margin:0;"><label>Stand down above ${hlp('Share that must be regained before defence ends. Kept at or above the engage line so recovery is a genuinely better position, not the same one.')}</label>
+        <input id="jly-def-clear" type="number" min="0" max="100" value="${d.clear_pct}" style="width:72px;"></div>
+      <div class="field" style="margin:0;"><label>…held for (min) ${hlp('Hysteresis. The share must stay recovered this long before standing down, so one noisy measurement cannot flap every rig on the box in and out of full power.')}</label>
+        <input id="jly-def-settle" type="number" min="0" max="1440" value="${d.settle_min}" style="width:72px;"></div>
+      <div class="field" style="margin:0;"><label>Window (blocks) ${hlp('How many recent blocks the share is measured over. Bigger = steadier but slower to notice an attack.')}</label>
+        <input id="jly-def-window" type="number" min="5" max="500" value="${d.window_blocks}" style="width:72px;"></div>
+      <div class="field" style="margin:0;flex:1;min-width:180px;"><label>My rigs ${hlp('Comma-separated rig names that count as YOURS. Leave empty to auto-detect (anything not mapped to a peer wallet) — but pin it once strangers can mine here, or a hostile rig would be counted as one of your own.')}</label>
+        <input id="jly-def-rigs" value="${esc((d.my_rigs || []).join(', '))}" placeholder="auto-detect" style="width:100%;"></div>
+      <button class="btn-sm" onclick="jellyDefenseSave()">💾 Save</button>
+    </div>
+    ${(d.history || []).length ? `<details style="margin-top:10px;">
+      <summary style="font-size:.74rem;color:var(--muted);cursor:pointer;">Defence log (${d.history.length}) — what happened while you were asleep</summary>
+      <table class="mini-table" style="width:100%;font-size:.74rem;margin-top:6px;">
+        <tr><th style="text-align:left;">When</th><th>Share</th><th>Blocks</th><th style="text-align:left;">Level</th><th style="text-align:left;">Note</th></tr>
+        ${d.history.slice(-40).reverse().map(h => `<tr>
+          <td style="color:var(--muted);white-space:nowrap;">${new Date(h.at * 1000).toLocaleString()}</td>
+          <td style="text-align:center;">${_jlyPct(h.share_pct)}</td><td style="text-align:center;">${h.blocks}</td>
+          <td style="color:${h.level === 'engage' ? '#ef4444' : h.level === 'warn' ? '#f59e0b' : 'var(--muted)'};">${esc(h.level)}</td>
+          <td style="color:var(--muted);">${esc(h.note || '')}</td></tr>`).join('')}
+      </table></details>` : ''}
+  </div>`;
+}
+
+function _jlyPct(v) { return v == null ? '—' : (+v).toFixed(1) + '%'; }
+function _jlyHash(h) {
+  h = +h || 0;
+  return h >= 1e9 ? (h / 1e9).toFixed(2) + ' GH/s' : (h / 1e6).toFixed(1) + ' MH/s';
+}
+
+/* ── "yield to the AI queue" — mining stands down while the GPU is doing AI work.
+      Same card runs LM Studio/ComfyUI and the miner; sharing it made models fail
+      to load, so getwork holds until the queue has been idle for settle_sec. ── */
+function _jlyYieldPanel(y) {
+  if (!y) return '';
+  const held = !!y.held, on = !!y.enabled;
+  const [bg, fg, txt] = !on ? ['rgba(148,163,184,.16)', 'var(--muted)', 'yield off — mining always']
+    : held ? ['rgba(245,158,11,.16)', '#f59e0b', 'mining paused — GPU in use by the queue']
+    : ['rgba(34,197,94,.16)', 'var(--green)', 'mining — GPU free'];
+  return `<div style="background:var(--panel2,#0b1120);border:1px solid var(--border,#243049);border-radius:10px;padding:10px 12px;margin-bottom:10px;">
+    <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+      <span style="font-size:.66rem;font-weight:700;background:${bg};color:${fg};border-radius:10px;padding:3px 9px;text-transform:uppercase;">${txt}</span>
+      ${hlp('The GPU node runs LM Studio + ComfyUI for the store\'s AI work and mines JLY on the same card. When both ran at once, models failed to load ("the GPU may be busy with another model or ComfyUI"), so getwork tells rigs to stand down while the queue is working and to resume once it has been idle for the settle window. Turn this off to go back to always-on mining.')}
+      ${on && held && y.resume_in ? `<span style="font-size:.72rem;color:var(--muted);">resuming in ~${y.resume_in}s</span>` : ''}
+      ${on && held && y.busy ? `<span style="font-size:.72rem;color:var(--muted);">queue busy${y.held_for ? ' · held ' + y.held_for + 's' : ''}</span>` : ''}
+    </div>
+    <div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;margin-top:10px;">
+      <button class="btn-sm" onclick="jellyYieldSave(${on ? 'false' : 'true'})">${on ? '⏸ Turn off' : '▶ Turn on'} yield-to-queue</button>
+      <div class="field" style="margin:0;"><label>Settle (sec) ${hlp('How long the queue must stay idle before mining resumes. Stops a burst of queued jobs from making the rig start/stop every few seconds. A single momentary job pauses it instantly.')}</label>
+        <input id="jly-yield-settle" type="number" min="0" max="600" value="${y.settle_sec}" style="width:80px;"></div>
+      <div class="field" style="margin:0;"><label>Re-check (sec) ${hlp('What a held rig is told to sleep before asking for work again. The miner backs off further if the hold persists.')}</label>
+        <input id="jly-yield-retry" type="number" min="2" max="300" value="${y.retry_sec}" style="width:80px;"></div>
+      <button class="btn-sm" onclick="jellyYieldSave()">💾 Save</button>
+    </div>
+  </div>`;
+}
+
 /* ── tiny SVG chart kit (dataviz-skill spec: thin marks, recessive grid, muted
       text ink, hover tooltip on every plot, one series per chart → no legend) ── */
 function _jlyChart(series, ys, { color, fmt, refY = null, refLabel = '' }) {
@@ -169,7 +438,7 @@ async function _jlyRenderJoined(pane, st) {
 
 async function cryptoLoadJelly() {
   const pane = document.getElementById('pane-crypto-jelly');
-  let st, wal, tok, nfts, missions, blocks, ws, pb, stats, pool, buddies, mine;
+  let st, wal, tok, nfts, missions, blocks, ws, pb, stats, pool, buddies, mine, yld, mpol, mdef, sup;
   // Mode first: a JOINED node founded no chain, so the chain endpoints below have
   // nothing to answer with. Render the participant view and skip them entirely.
   try {
@@ -181,7 +450,7 @@ async function cryptoLoadJelly() {
   if (st.mode === 'joined') return _jlyRenderJoined(pane, st);
 
   try {
-    [wal, tok, nfts, missions, blocks, ws, pb, stats, pool, buddies, mine] = await Promise.all([
+    [wal, tok, nfts, missions, blocks, ws, pb, stats, pool, buddies, mine, yld, mpol, mdef, sup] = await Promise.all([
       api('/api/jelly/wallets'), api('/api/jelly/miner-token'),
       api('/api/jelly/nft/list'), api('/api/jelly/missions'), api('/api/jelly/blocks?limit=8'),
       api('/api/world/settings').catch(() => ({ settings: {} })),
@@ -190,6 +459,10 @@ async function cryptoLoadJelly() {
       api('/api/jelly/pool').catch(() => null),
       api('/api/peers').catch(() => null),
       api('/api/peers/my-wallets').catch(() => null),
+      api('/api/jelly/miner-yield').catch(() => null),
+      api('/api/jelly/miner-policy').catch(() => null),
+      api('/api/jelly/miner-defense').catch(() => null),
+      api('/api/jelly/supply').catch(() => null),
     ]);
   } catch (e) {
     pane.innerHTML = `<div class="empty"><div class="empty-icon">&#10060;</div>${esc(e.message)}</div>`;
@@ -218,6 +491,8 @@ async function cryptoLoadJelly() {
       ${_jlyStat('NFTs', st.nft_count)}
     </div>
 
+    ${_jlySupplyPanel(sup)}
+
     ${stats && (stats.series || []).length > 2 ? `<div class="settings-group" style="margin-bottom:16px;">
       <div class="settings-group-title">📊 Network graphs ${hlp('Derived live from the block table. Hover any chart for per-block values. Difficulty retargets every 20 blocks toward the dashed 60-second block goal.')}</div>
       <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px;">
@@ -233,13 +508,12 @@ async function cryptoLoadJelly() {
     </div>` : ''}
 
     <div class="settings-group" style="margin-bottom:16px;">
-      <div class="settings-group-title">⛏️ GPU rigs ${hlp('Any LAN box with an OpenCL GPU can mine — even cards far too old for AI. The miner refuses to run on CPU by design.')}</div>
-      ${rigs.length ? `<table class="mini-table" style="width:100%;font-size:.78rem;">
-        <tr><th style="text-align:left;">Rig</th><th style="text-align:left;">GPU</th><th>MH/s</th><th>Blocks</th><th></th></tr>
-        ${rigs.map(m => `<tr><td>${esc(m.name)}</td><td style="color:var(--muted);">${esc(m.gpu || '?')}</td>
-          <td style="text-align:center;">${(m.hashrate / 1e6).toFixed(1)}</td><td style="text-align:center;">${m.blocks}</td>
-          <td style="text-align:center;color:${m.online ? 'var(--green)' : 'var(--muted)'};">${m.online ? '● online' : '○ offline'}</td></tr>`).join('')}
-      </table>` : `<div style="font-size:.78rem;color:var(--muted);">No rigs yet. Dust off an old graphics card:</div>`}
+      <div class="settings-group-title">⛏️ GPU rigs ${hlp('Any LAN box with an OpenCL GPU can mine — even cards far too old for AI. The miner refuses to run on CPU by design. Rigs are just a set: adding a third or fourth card is an install, never a code change.')}</div>
+      ${_jlyDefenseBanner(mdef)}
+      ${_jlyYieldPanel(yld)}
+      ${_jlySchedPanel(mpol)}
+      ${_jlyAgentPanel(mpol)}
+      ${_jlyRigsTable(rigs, mpol)}
       <div style="font-size:.76rem;color:var(--muted);line-height:1.8;margin-top:10px;">
         <b>One line on any Linux box with a GPU</b> ${hlp('Installs just the miner — its own venv, the OpenCL loader, and a systemd service that survives reboots. Not the full node build: no ComfyUI, no LM Studio. Re-runnable any time; `install-miner.sh check` reports without changing anything.')}<br>
         <code style="word-break:break-all;">${esc(tok.install || '')}</code>
@@ -247,6 +521,11 @@ async function cryptoLoadJelly() {
         <div style="margin-top:10px;">
           <button class="btn-sm" onclick="jellyDeployMinerToNode()">🖥️ Install on my GPU node</button>
           <span style="font-size:.72rem;">&nbsp;pushes it over SSH to the configured node (throttled 50% so it fills the gaps around AI work)</span>
+        </div>
+        <div style="margin-top:8px;">
+          <b>Second rig on this box's own idle GPU</b> ${hlp('The store box has a graphics card sitting near-idle while it serves the store, nginx and docker. This script turns it into a second rig at the lowest viable intensity — measured here at 26 MH/s for ~10% of the card, +2.5W and +2°C over idle, with store request latency unchanged. It refuses to install if no OpenCL GPU is present rather than leaving you a service that will not start. Intensity is server-side, so retune it in the table above without touching that box.')}<br>
+          <code style="word-break:break-all;">./deploy/miner/install-local-rig.sh</code>
+          <span style="font-size:.72rem;">&nbsp;· <code>check</code> to report, <code>uninstall</code> to remove</span>
         </div>
       </div>
       <details style="margin-top:10px;">
@@ -259,6 +538,8 @@ async function cryptoLoadJelly() {
         </div>
       </details>
     </div>
+
+    ${_jlyDefensePanel(mdef)}
 
     <div class="settings-group" style="margin-bottom:16px;">
       <div class="settings-group-title">🏢 Company boosts
@@ -511,6 +792,77 @@ async function jellyToggleCompany(on) {
   } catch (e) { toast?.(e.message); }
 }
 window.jellyToggleCompany = jellyToggleCompany;
+
+async function jellyYieldSave(enabled) {
+  const body = {
+    settle_sec: +document.getElementById('jly-yield-settle').value,
+    retry_sec: +document.getElementById('jly-yield-retry').value,
+  };
+  if (enabled !== undefined) body.enabled = enabled;
+  try {
+    const r = await api('/api/jelly/miner-yield', { method: 'POST', body: JSON.stringify(body) });
+    toast?.(r.enabled ? 'Mining yields to the AI queue ⛏️⏸' : 'Mining now runs through AI work');
+    _jlyReload();
+  } catch (e) { toast?.(e.message); }
+}
+window.jellyYieldSave = jellyYieldSave;
+
+/* ── the owner's envelope: schedule, per-rig intensity, agent bounds ── */
+async function _jlyPolicyPost(body, msg) {
+  try {
+    await api('/api/jelly/miner-policy', { method: 'POST', body: JSON.stringify(body) });
+    toast?.(msg);
+    _jlyReload();
+  } catch (e) { toast?.(e.message); }
+}
+
+async function jellySchedSave(enabled) {
+  const body = {
+    windows: document.getElementById('jly-sched-win').value.trim(),
+    daily_hours: +document.getElementById('jly-sched-hrs').value || 0,
+  };
+  if (enabled !== undefined) body.sched_enabled = enabled;
+  await _jlyPolicyPost(body, enabled === false ? 'Mining hours off — rigs mine whenever the queue is free'
+                                               : 'Mining hours saved 🕒');
+}
+window.jellySchedSave = jellySchedSave;
+
+async function jellyRigSave(i) {
+  const name = (_JLY.rigRows || [])[i];
+  if (!name) return;
+  await _jlyPolicyPost({ rigs: { [name]: {
+    throttle: +document.getElementById('jly-thr-' + i).value,
+    batch: +document.getElementById('jly-bat-' + i).value,
+    cost: document.getElementById('jly-cost-' + i).value,
+  } } }, `${name}: intensity sent — it lands on the rig within a few seconds ⛏️`);
+}
+window.jellyRigSave = jellyRigSave;
+
+async function jellyAgentSave(extra) {
+  const body = Object.assign({
+    agent_min_throttle: +document.getElementById('jly-agent-thr').value,
+    agent_max_pause_min: +document.getElementById('jly-agent-pause').value,
+    agent_max_minutes: +document.getElementById('jly-agent-min').value,
+  }, extra || {});
+  await _jlyPolicyPost(body, 'Company mining bounds saved 🏢');
+}
+window.jellyAgentSave = jellyAgentSave;
+
+async function jellyDefenseSave(extra) {
+  const g = id => document.getElementById(id);
+  const body = Object.assign(g('jly-def-warn') ? {
+    warn_pct: +g('jly-def-warn').value, act_pct: +g('jly-def-act').value,
+    clear_pct: +g('jly-def-clear').value, settle_min: +g('jly-def-settle').value,
+    window_blocks: +g('jly-def-window').value, my_rigs: g('jly-def-rigs').value.trim(),
+  } : {}, extra || {});
+  try {
+    const r = await api('/api/jelly/miner-defense', { method: 'POST', body: JSON.stringify(body) });
+    toast?.(r.enabled ? (r.engaged ? '🛡️ Defence engaged' : 'Chain defence saved 🛡️')
+                      : 'Chain defence OFF — the chain will not defend itself');
+    _jlyReload();
+  } catch (e) { toast?.(e.message); }
+}
+window.jellyDefenseSave = jellyDefenseSave;
 
 async function jellyShowDoc(name, title) {
   try {

@@ -24,6 +24,7 @@ from a blurred copy, then NEAREST-downscaled to 64px pixel-art.
 """
 import colorsys
 import json
+import logging
 import random
 import subprocess
 import threading
@@ -111,24 +112,121 @@ def _installed():
     return bool(_gen_keys())
 
 
+# ── COMPLETENESS: a PARTIAL tileset must never read as a healthy install ─────
+# The world lost every road for DAYS because a transient generation failure left
+# the installed manifest with `path: null`, and an unmapped terrain key rendered
+# as NOTHING. So "installed" is not enough state — completeness is first-class.
+# REQUIRED = every KINDS key that is NOT structural; `LOCKED` is the single
+# source of truth for "deliberately procedural" (floor/wall keep their crafted
+# interior art and the API refuses to generate them), so there is never a second
+# hand-maintained list to drift out of sync.
+def required_keys():
+    """Terrain keys a COMPLETE tileset must map (structural LOCKED keys excluded)."""
+    return [k for k, _d in KINDS if k not in LOCKED]
+
+
+def _atlas_sizes(m):
+    """{atlas id: (w, h)} for every declared atlas whose file is actually on disk."""
+    out = {}
+    for a in (m.get("atlases") or []):
+        aid, src = a.get("id"), a.get("src")
+        if not aid or not src:
+            continue
+        p = TILESET_DIR / src
+        if not p.exists():
+            continue
+        try:
+            from PIL import Image
+            with Image.open(p) as im:
+                out[aid] = im.size
+        except Exception:
+            pass
+    return out
+
+
+def _cell_ok(sizes, t):
+    """Is this manifest tile entry a REAL, loadable atlas cell? Mirrors the client's
+    own re-validation: the atlas must be declared + on disk, and the crop rect must
+    lie inside it. `None`, a missing key, or a cell pointing outside the atlas all
+    mean 'no art' — exactly the states that used to render nothing."""
+    if not isinstance(t, dict):
+        return False
+    wh = sizes.get(t.get("atlas"))
+    if not wh:
+        return False
+    return (t.get("x", 0) >= 0 and t.get("y", 0) >= 0
+            and t.get("x", 0) + (t.get("w") or CELL) <= wh[0]
+            and t.get("y", 0) + (t.get("h") or CELL) <= wh[1])
+
+
+def _terrain_image_live():
+    """Is the whole-world terrain image (Layer 2) enabled AND rendered? That's the
+    client's FIRST per-tile fallback when an atlas cell is missing."""
+    try:
+        import world_terrain
+        st = world_terrain.status()
+        return bool(st.get("enabled") and st.get("has_image"))
+    except Exception:
+        return False
+
+
+def missing_keys(m=None):
+    """REQUIRED terrain keys with no usable atlas cell — the degraded set."""
+    m = m if m is not None else _manifest()
+    sizes = _atlas_sizes(m)
+    tiles = m.get("tiles") or {}
+    return [k for k in required_keys() if not _cell_ok(sizes, tiles.get(k))]
+
+
+def resolve_tile(key, m=None, terrain_image=None):
+    """What the renderer ACTUALLY paints for `key`, in the same order the client's
+    world-map `_tile()` fallback uses:
+        'atlas' → 'terrain_image' → 'procedural'
+    It never resolves to nothing. Structural keys are always 'procedural' by design."""
+    m = m if m is not None else _manifest()
+    if key in LOCKED:
+        return "procedural"
+    if _cell_ok(_atlas_sizes(m), (m.get("tiles") or {}).get(key)):
+        return "atlas"
+    if terrain_image is None:
+        terrain_image = _terrain_image_live()
+    return "terrain_image" if terrain_image else "procedural"
+
+
 def tiles_state():
-    """Per-tile view for the 🧱 panel: procedural vs generated + atlas crop info."""
+    """Per-tile view for the 🧱 panel: procedural vs generated + atlas crop info,
+    plus the COMPLETENESS verdict (complete / missing / degraded) and what each key
+    actually resolves to."""
     m = _manifest()
     gen = _gen_keys(m)
+    sizes = _atlas_sizes(m)
+    tiles = m.get("tiles") or {}
+    ti = _terrain_image_live()
+    missing = [k for k in required_keys() if not _cell_ok(sizes, tiles.get(k))]
     return {
         "tiles": [{"key": k, "desc": d, "generated": k in gen, "locked": k in LOCKED,
-                   "x": i * CELL} for i, (k, d) in enumerate(KINDS)],
+                   "missing": k in missing,
+                   "source": resolve_tile(k, m, ti), "x": i * CELL}
+                  for i, (k, d) in enumerate(KINDS)],
         "atlas": f"world_assets/tilesets/{ATLAS_FILE}",
         "v": m.get("v") or 0, "cell": CELL,
+        "required": required_keys(),
+        "missing": missing,
+        "complete": not missing,
+        # installed-but-incomplete: report DEGRADED, never a healthy install
+        "degraded": bool(gen) and bool(missing),
+        "fallback": "terrain_image" if ti else "procedural",
         "rejects": _recent_rejects(limit=6),
     }
 
 
-def _set_status(state, note=""):
+def _set_status(state, note="", extra=None):
+    rec = {"state": state, "note": note, "t": time.time()}
+    if extra:
+        rec.update(extra)
     conn = get_conn()
     try:
-        mset(conn.cursor(), "tileset_status",
-             json.dumps({"state": state, "note": note, "t": time.time()}))
+        mset(conn.cursor(), "tileset_status", json.dumps(rec))
         conn.commit()
     finally:
         conn.close()
@@ -454,7 +552,8 @@ def generate_tile(key, theme=None):
         finally:
             orch.image_release()
         if not ok:
-            _set_status("failed", f"{key}: {why}")
+            # a failure must never quietly leave a hole: record what is still unmapped
+            _set_status("failed", f"{key}: {why}", {"missing_at_failure": missing_keys()})
             return {"ok": False, "key": key, "reason": why}
         _install_tile(key, tile)
         _set_status("done", f"tile '{key}' installed")
@@ -501,7 +600,14 @@ def generate(theme=None):
         finally:
             orch.image_release()
         if not made:
-            _set_status("failed", "no tiles passed — is the GPU box reachable?")
+            # THE roads-vanished failure mode: a transient GPU outage leaves the set
+            # half-filled forever. Record the still-missing keys with the failure so
+            # the degraded state is visible instead of being forgotten.
+            miss = missing_keys()
+            _set_status("failed",
+                        "no tiles passed — is the GPU box reachable?"
+                        + (f" Still unmapped: {', '.join(miss)}." if miss else ""),
+                        {"missing_at_failure": miss})
             return False
         _set_status("done", f"{len(made)}/{len(todo)} tiles ({', '.join(sorted(made))})")
         return True
@@ -565,14 +671,44 @@ def _auto_paint(key, agent):
         conn.close()
 
 
+def degraded_watch(c, every=6 * 3600):
+    """Slow watchdog (rides the existing world_ticker tileset hook — no new timer).
+
+    An INSTALLED but INCOMPLETE tileset silently erased the world's roads for days,
+    because a transient generation failure left a key unmapped and nobody re-checked.
+    So re-check on a slow cadence and LOG the degraded set. This never generates
+    anything: filling is the owner's 🧱 button, or the pre-existing
+    `world_tileset_auto` toggle (default OFF) — no automatic GPU work without it."""
+    now = time.time()
+    last = float(mget(c, "tileset_degraded_last", 0) or 0)
+    if last and now - last < every:
+        return None
+    mset(c, "tileset_degraded_last", now)
+    miss = missing_keys() if _installed() else []
+    mset(c, "tileset_missing", json.dumps(miss))
+    if miss:
+        logging.warning(
+            "[tileset] DEGRADED — installed but %d terrain tile(s) unmapped: %s. "
+            "The map falls back per-tile (terrain image → procedural), but fill them "
+            "from Company Settings → 🧱 Terrain tiles.", len(miss), ", ".join(miss))
+    return miss or None
+
+
 def auto_tick(conn, _run=None):
     """world_ticker hook: when `world_tileset_auto` is ON, every
     `world_tileset_auto_min` minutes one world agent paints ONE pending tile
     (QA + style gated; failures silently discarded). Returns the picked key or
-    None. Self-cadenced; never overlaps a running generation."""
+    None. Self-cadenced; never overlaps a running generation.
+
+    The degraded re-check runs FIRST and regardless of the toggle — it only looks
+    and logs, so an incomplete set can't stay invisible while auto-paint is off."""
+    c = conn.cursor()
+    try:
+        degraded_watch(c)
+    except Exception:
+        pass
     if not ws.b("world_tileset_auto", conn):
         return None
-    c = conn.cursor()
     every = max(15, ws.i("world_tileset_auto_min", conn) or 180) * 60
     now = time.time()
     last = float(mget(c, "tileset_auto_last", 0) or 0)

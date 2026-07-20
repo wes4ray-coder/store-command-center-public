@@ -75,6 +75,18 @@ function _renderControl(d) {
       </div>
     </div>`;
 
+  // era building art: optional generated pixel-art per building per age
+  const eraArt = `
+    <div style="padding:10px 14px;margin-bottom:14px;border-radius:12px;background:#0e1626;border:1px solid #26324a">
+      <div style="font-size:.74rem;color:#9fc0ff;font-weight:600;margin-bottom:4px">🏛️ Era building art
+        <span style="color:#8a97ad;font-weight:400">· real pixel-art per building per age (🪵→🌙) ${hlp('Optional. Generates one pixel-art sprite per building-type per era, swapping in over the procedural restyle. Shares the sprite hourly GPU budget and generates a few at a time — safe to leave on. Procedural styling shows until each sprite is ready. Off by default.')}</span></div>
+      <div id="era-art-status" style="font-size:.68rem;color:#7a86a0;margin-bottom:6px">…</div>
+      <div style="display:flex;gap:6px">
+        <button class="btn" id="era-art-toggle" style="padding:6px 12px;font-size:.74rem" onclick="controlEraSprites('toggle')">Enable</button>
+        <button class="btn" style="padding:6px 12px;font-size:.74rem" title="Queue generation for every building × era, paced by the sprite hourly budget. Safe to click." onclick="controlEraSprites('preseed')">▶ Generate all era art</button>
+      </div>
+    </div>`;
+
   // systems grouped
   const groups = {};
   (d.systems || []).forEach(s => (groups[s.group] = groups[s.group] || []).push(s));
@@ -118,8 +130,39 @@ function _renderControl(d) {
       </span>
     </div>`;
 
-  _worldModal('🎛️ Company Control', master + runmode + sysHtml + capHtml + sellHtml);
+  _worldModal('🎛️ Company Control', master + runmode + eraArt + sysHtml + capHtml + sellHtml);
+  _loadEraArtStatus();
 }
+
+async function _loadEraArtStatus() {
+  const el = document.getElementById('era-art-status'); if (!el) return;
+  try {
+    const s = await api('/api/world/era-sprites');
+    const b = s.budget || {}, ps = s.preseed || {};
+    el.innerHTML = `<b style="color:${s.enabled ? '#6ee7a8' : '#f59e0b'}">${s.enabled ? 'ON' : 'off'}</b> · `
+      + `${s.have_count || 0}/${s.total || 0} sprites generated · budget ${b.remaining ?? '?'}/${b.max_hour ?? '?'} left this hour`
+      + (ps.running ? ` · <span style="color:#8ecaff">generating ${ps.made || 0}/${ps.total || 0}…</span>` : '');
+    const tb = document.getElementById('era-art-toggle');
+    if (tb) tb.textContent = s.enabled ? 'Disable' : 'Enable';
+    el.dataset.enabled = s.enabled ? '1' : '0';
+  } catch (e) { el.textContent = 'status unavailable'; }
+}
+
+async function controlEraSprites(action) {
+  try {
+    if (action === 'toggle') {
+      const el = document.getElementById('era-art-status');
+      const on = el && el.dataset.enabled === '1';
+      await api('/api/world/settings', { method: 'POST', body: JSON.stringify({ settings: { world_era_sprites_enabled: on ? '0' : '1' } }) });
+      toast?.(on ? 'Era art disabled' : '🏛️ Era art enabled');
+    } else if (action === 'preseed') {
+      const r = await api('/api/world/era-sprites/preseed', { method: 'POST', body: JSON.stringify({}) });
+      toast?.(r && r.reason === 'disabled' ? 'Enable era art first' : '🏛️ Generating era art — paced by the hourly budget');
+    }
+  } catch (e) { toast?.(e?.message || 'Failed'); }
+  _loadEraArtStatus();
+}
+window.controlEraSprites = controlEraSprites;
 
 async function controlSellSave() {
   const price = parseFloat(document.getElementById('sell-price')?.value || '24.99');

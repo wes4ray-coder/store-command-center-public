@@ -117,15 +117,17 @@ class Orchestrator:
 
     def clear_pending(self) -> int:
         """Cancel every PENDING (not-yet-running) LLM task. Returns how many were cleared."""
-        n = 0
+        cleared = []
         with self._lock:
             for tid in self._order:
                 t = self._tasks.get(tid)
                 if t and t["status"] == "pending":
                     t["status"] = "cancelled"
                     t["event"].set()
-                    n += 1
-        return n
+                    cleared.append(t)
+        for t in cleared:                      # DB write outside the lock
+            self._record_history(t, "cancelled")
+        return len(cleared)
 
     def _build_message(self, llm, img, active, queue) -> str:
         if self.is_paused():
@@ -153,8 +155,13 @@ class Orchestrator:
         model: Optional[str] = None,
         priority: int = 1,
         task: Optional[str] = None,
+        source: Optional[str] = None,
     ) -> int:
         """Submit an LLM task. Returns task_id immediately (non-blocking).
+
+        `source` — optional explicit system/feature tag for the persistent queue
+        history; when omitted it is derived from `task`/`desc` prefixes at
+        completion time (queue_history.derive_source).
 
         `model` — if given, the worker guarantees THAT specific model is the sole
         resident LLM (verified via `lms ps`) before running `func`; the orchestrator
@@ -180,6 +187,8 @@ class Orchestrator:
                 "error":      None,
                 "retry_meta": retry_meta,
                 "model":      model,
+                "task":       task,              # prompt-registry key (history attribution)
+                "source":     source,            # explicit system tag (history attribution)
                 "priority":   priority,          # 0 user-facing > 1 default > 2 background
                 "enqueued_at": time.time(),
                 "event":      threading.Event(),
@@ -208,12 +217,16 @@ class Orchestrator:
         }
 
     def cancel(self, task_id: int) -> bool:
+        hit = None
         with self._lock:
             t = self._tasks.get(task_id)
             if t and t["status"] == "pending":
                 t["status"] = "cancelled"
                 t["event"].set()
-                return True
+                hit = t
+        if hit:
+            self._record_history(hit, "cancelled")   # DB write outside the lock
+            return True
         return False
 
     def _prune(self):
@@ -460,6 +473,7 @@ class Orchestrator:
                     self._set(llm="idle")
                     return
                 task["status"] = "running"
+                task["started_at"] = time.time()
             self.mark_activity()
 
             # ── Step 3: get the model ready. If the task REQUIRES a specific model,
@@ -478,18 +492,45 @@ class Orchestrator:
             with self._lock:
                 task["result"] = result
                 task["status"] = "done"
+            self._record_history(task, "done")
 
         except Exception as e:
             log.error("[orch] task %d error: %s", task["id"], e)
             with self._lock:
                 task["error"] = str(e)
                 task["status"] = "error"
+            self._record_history(task, "error")
         finally:
             task["event"].set()
             self.mark_activity()
             # ── Step 4: keep the LLM loaded for reuse (no thrash). It is only
             # unloaded when image/video gen actually needs the VRAM. ──
             self._set(llm="idle")
+
+    def _record_history(self, task: dict, status: str):
+        """Persist a finished LLM task (done|error|cancelled) to the queue_history
+        table — the SINGLE write path for the persistent queue history. A logging
+        failure must NEVER break the job itself, so everything is swallowed here
+        (and record() swallows its own errors too — belt and suspenders)."""
+        try:
+            import queue_history
+            queue_history.record(
+                kind="llm",
+                label=task.get("desc") or "LLM task",
+                status=status,
+                task=task.get("task"),
+                source=task.get("source"),
+                # the model it actually ran on: its explicit pick, else the
+                # resident model it borrowed (cancelled tasks never ran → pick only)
+                model=task.get("model") or (self._current_llm_model
+                                            if status != "cancelled" else None),
+                error=task.get("error"),
+                enqueued_at=task.get("enqueued_at"),
+                started_at=task.get("started_at"),
+                finished_at=time.time(),
+            )
+        except Exception as e:                                # noqa: BLE001
+            log.debug("[orch] history log skipped: %s", e)
 
     def sweep_idle_llms(self) -> dict:
         """Belt-and-suspenders idle-TTL enforcement (called from the scheduler tick).

@@ -100,6 +100,35 @@ function _restoreCamera(canvas) {
    tab paused RAF but left the 3s state poll running forever.) */
 let _worldView = { canvas: null, ctx: null };
 
+/* ── TEST/PREVIEW cycle ───────────────────────────────────────────────────────
+   In Test run-mode the client CYCLES every visual state fast so you can eyeball the
+   whole range in ~30s (the slow real progression is for Normal/Fast). It sweeps every
+   building through all 7 civilization eras (~4s each → 28s) and runs a full day→night
+   loop (so lighting + the moon show). Overrides _worldState each frame; leaving Test
+   mode removes the banner and the next poll restores the real values. */
+let _previewT = 0;
+const _PREV_LADDER = ['wood', 'brick', 'metal', 'western', 'modern', 'futuristic', 'moon'];
+const _PREV_EMOJI = { wood: '🪵', brick: '🧱', metal: '⚙️', western: '🤠', modern: '🏙️', futuristic: '🚀', moon: '🌙' };
+function _previewTick(dt) {
+  const on = !!(typeof _worldState !== 'undefined' && _worldState && _worldState.run_mode === 'test');
+  let banner = document.getElementById('world-preview-banner');
+  if (!on) { if (banner) banner.remove(); _previewT = 0; return; }
+  _previewT += dt;
+  const era = Math.min(6, Math.floor((_previewT / 4) % 7));        // 4s per era → 28s full sweep
+  const e = _worldState.eras || (_worldState.eras = {});
+  if (!e.ladder) e.ladder = _PREV_LADDER;
+  if (!e.emoji) e.emoji = _PREV_EMOJI;
+  e.town = era; e.byLoc = {};                                      // every building follows the sweep
+  _worldState.clock_hour = Math.floor(_previewT % 24);            // ~1 hr/sec → a full day in 24s (night shows the moon)
+  if (!banner) {
+    const stage = document.getElementById('world-stage'); if (!stage) return;
+    banner = document.createElement('div'); banner.id = 'world-preview-banner';
+    banner.style.cssText = 'position:absolute;top:8px;left:50%;transform:translateX(-50%);z-index:40;padding:5px 14px;border-radius:20px;background:rgba(30,20,50,.92);border:1px solid #7c5aff;color:#e0d0ff;font-size:.76rem;font-family:ui-monospace,monospace;pointer-events:none;white-space:nowrap';
+    stage.appendChild(banner);
+  }
+  banner.textContent = `🧪 TEST — cycling every visual state · ${_PREV_EMOJI[_PREV_LADDER[era]]} ${_PREV_LADDER[era]} · ${String(_worldState.clock_hour).padStart(2, '0')}:00`;
+}
+
 function _startWorldLoops() {
   const { canvas, ctx } = _worldView;
   if (!canvas || !document.getElementById('world-canvas')) return;
@@ -124,6 +153,7 @@ function _startWorldLoops() {
     try {
       const dt = Math.min(0.05, (now - last) / 1000); last = now;
       _stepAgents(dt);
+      _previewTick(dt);                         // Test mode: sweep every visual state fast
       if (window.WN) WN.tick(dt);
       if (window.WW) WW.tick(dt);
       if (window.WF) WF.tick(dt, (_worldState && _worldState.activity) || {});
