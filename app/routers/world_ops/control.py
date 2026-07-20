@@ -56,6 +56,20 @@ def control_master(body: dict = Body(...)):
     return world_control.set_master(bool(body.get("on")))
 
 
+@router.post("/api/world/control/runmode")
+def control_runmode(body: dict = Body(...)):
+    """Set the sim run mode: normal | fast | test (see world_run)."""
+    import world_run
+    from deps import get_conn
+    m = str(body.get("mode", "")).strip().lower()
+    if m not in world_run.MODES:
+        raise HTTPException(400, f"mode must be one of {list(world_run.MODES)}")
+    conn = get_conn()
+    conn.execute("INSERT OR REPLACE INTO settings (key,value) VALUES ('world_run_mode',?)", (m,))
+    conn.commit(); conn.close()
+    return {"ok": True, "mode": m, "speed": world_run.speed()}
+
+
 @router.post("/api/world/control/system")
 def control_system(body: dict = Body(...)):
     sid = body.get("id")

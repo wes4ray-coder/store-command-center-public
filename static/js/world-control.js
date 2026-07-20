@@ -61,6 +61,20 @@ function _renderControl(d) {
       <button class="btn" style="padding:8px 16px;font-weight:700;${m ? 'background:#5a2a2a;border-color:#7c3a3a' : 'background:#1f4a32;border-color:#2a5a3a;color:#6ee7a8'}" onclick="controlMaster(${m ? 'false' : 'true'})">${m ? '⏸ Pause all' : '▶ Wake the Company'}</button>
     </div>`;
 
+  // run mode: how fast + how autonomous the sim runs
+  const rm = d.run_mode || 'normal';
+  const rmBtn = (id, label, desc) => `<button class="btn" title="${esc(desc)}" onclick="controlRunMode('${id}')"
+    style="flex:1;padding:8px 6px;font-weight:600;${rm === id ? 'background:#1f3a5a;border-color:#3a6a9a;color:#8ecaff' : ''}">${label}</button>`;
+  const runmode = `
+    <div style="padding:10px 14px;margin-bottom:14px;border-radius:12px;background:#0e1626;border:1px solid #26324a">
+      <div style="font-size:.74rem;color:#9fc0ff;font-weight:600;margin-bottom:6px">⏱️ Run mode <span style="color:#8a97ad;font-weight:400">· how fast + how autonomous the sim runs</span></div>
+      <div style="display:flex;gap:6px">
+        ${rmBtn('normal', '🐢 Normal', 'Real pace, your automation settings as-is.')}
+        ${rmBtn('fast', '⚡ Fast', '~5x sim speed — watch the town work, gather and advance. LLM/GPU/money keep their own real cadences + gates.')}
+        ${rmBtn('test', '🧪 Test', 'Fast + auto-run the FREE loops (art/work/era) so the world visibly progresses. Money & code stay gated — nothing real is spent or posted.')}
+      </div>
+    </div>`;
+
   // systems grouped
   const groups = {};
   (d.systems || []).forEach(s => (groups[s.group] = groups[s.group] || []).push(s));
@@ -104,7 +118,7 @@ function _renderControl(d) {
       </span>
     </div>`;
 
-  _worldModal('🎛️ Company Control', master + sysHtml + capHtml + sellHtml);
+  _worldModal('🎛️ Company Control', master + runmode + sysHtml + capHtml + sellHtml);
 }
 
 async function controlSellSave() {
@@ -136,6 +150,16 @@ async function controlTrigger(id) {
 }
 
 window.worldControl = worldControl;
+async function controlRunMode(mode) {
+  try {
+    await api('/api/world/control/runmode', { method: 'POST', body: JSON.stringify({ mode }) });
+    toast?.(mode === 'test' ? '🧪 Test — dry run, evolving fast (money/code still gated)'
+          : mode === 'fast' ? '⚡ Fast — ~5x sim speed'
+          : '🐢 Normal pace');
+    const d = await api('/api/world/control/panel'); _renderControl(d);
+  } catch (e) { toast?.(e.message); }
+}
+window.controlRunMode = controlRunMode;
 window.controlMaster = controlMaster;
 window.controlSystem = controlSystem;
 window.controlTrigger = controlTrigger;

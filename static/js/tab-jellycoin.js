@@ -241,11 +241,23 @@ async function cryptoLoadJelly() {
           <td style="text-align:center;color:${m.online ? 'var(--green)' : 'var(--muted)'};">${m.online ? '● online' : '○ offline'}</td></tr>`).join('')}
       </table>` : `<div style="font-size:.78rem;color:var(--muted);">No rigs yet. Dust off an old graphics card:</div>`}
       <div style="font-size:.76rem;color:var(--muted);line-height:1.8;margin-top:10px;">
-        1&#41; On the GPU box: <code>pip install pyopencl numpy requests</code><br>
-        2&#41; Download <a href="/api/jelly/mining/miner.py" style="color:var(--accent,#7aa2ff);">jellyminer.py</a> &nbsp;
-        3&#41; Run: <code style="word-break:break-all;">${esc(tok.run)}</code>
-        <button class="btn-sm" style="margin-left:6px;" onclick="navigator.clipboard.writeText(${JSON.stringify(tok.run)});toast?.('Copied ✓')">📋 Copy</button>
+        <b>One line on any Linux box with a GPU</b> ${hlp('Installs just the miner — its own venv, the OpenCL loader, and a systemd service that survives reboots. Not the full node build: no ComfyUI, no LM Studio. Re-runnable any time; `install-miner.sh check` reports without changing anything.')}<br>
+        <code style="word-break:break-all;">${esc(tok.install || '')}</code>
+        <button class="btn-sm" style="margin-left:6px;" onclick="navigator.clipboard.writeText(${JSON.stringify(tok.install || '')});toast?.('Copied ✓ — run it on the GPU box')">📋 Copy</button>
+        <div style="margin-top:10px;">
+          <button class="btn-sm" onclick="jellyDeployMinerToNode()">🖥️ Install on my GPU node</button>
+          <span style="font-size:.72rem;">&nbsp;pushes it over SSH to the configured node (throttled 50% so it fills the gaps around AI work)</span>
+        </div>
       </div>
+      <details style="margin-top:10px;">
+        <summary style="font-size:.74rem;color:var(--muted);cursor:pointer;">Manual install instead</summary>
+        <div style="font-size:.76rem;color:var(--muted);line-height:1.8;margin-top:6px;">
+          1&#41; On the GPU box: <code>pip install pyopencl numpy requests</code><br>
+          2&#41; Download <a href="/api/jelly/mining/miner.py" style="color:var(--accent,#7aa2ff);">jellyminer.py</a> &nbsp;
+          3&#41; Run: <code style="word-break:break-all;">${esc(tok.run)}</code>
+          <button class="btn-sm" style="margin-left:6px;" onclick="navigator.clipboard.writeText(${JSON.stringify(tok.run)});toast?.('Copied ✓')">📋 Copy</button>
+        </div>
+      </details>
     </div>
 
     <div class="settings-group" style="margin-bottom:16px;">
@@ -568,6 +580,20 @@ function jellyJoinCopy() {
   toast?.('Copied ✓ — run it on the GPU box');
 }
 window.jellyJoinCopy = jellyJoinCopy;
+
+// Install the miner on the configured GPU node over SSH — the miner alone, not
+// the full node build (/api/node/deploy does that).
+async function jellyDeployMinerToNode() {
+  if (!confirm('Install the JellyCoin miner on your GPU node?\n\n'
+             + 'Pushes install-miner.sh over SSH and runs it there: its own venv, the '
+             + 'OpenCL loader, and a systemd service throttled to 50% so it fills the gaps '
+             + 'around AI work. Existing AI stack is not touched.')) return;
+  try {
+    const r = await api('/api/node/deploy-miner', { method: 'POST', body: JSON.stringify({ throttle: '50' }) });
+    toast?.(`Installing on the node (${r.url}) — watch the deploy log`);
+  } catch (e) { toast?.(e.message); }
+}
+window.jellyDeployMinerToNode = jellyDeployMinerToNode;
 
 // Switch between hosting our own chain and participating on a buddy's. The
 // backend refuses to join once our chain has been used, so surface that plainly.

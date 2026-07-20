@@ -163,6 +163,16 @@ def paypal_cfg():
 
 
 def automation_mode():
+    # TEST run mode = a safe dry run: force 'budget' so the FREE internal loops (art/music/
+    # agent work/publishing to WordPress+Cults3D) auto-run and the world visibly evolves —
+    # money + code kinds are in ALWAYS_GATE/gated_kinds(), so they STILL wait for you. So
+    # test mode can never auto-spend or auto-post anything real.
+    try:
+        import world_run
+        if world_run.is_test():
+            return "budget"
+    except Exception:
+        pass
     m = cfg("world_ops_automation_mode")
     return m if m in ("review", "budget") else "review"
 

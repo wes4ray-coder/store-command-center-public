@@ -236,6 +236,7 @@ def panel():
         price = 2499
     return {
         "master": m,
+        "run_mode": _get("world_run_mode", "normal"),
         "systems": [{
             "id": s["id"], "label": s["label"], "group": s["group"], "desc": s.get("desc", ""),
             "desired": desired(s["id"]), "effective": (m and _native_on(s)),

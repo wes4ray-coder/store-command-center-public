@@ -132,6 +132,14 @@ def simulate(conn):
     if last and dt < 2:
         return                       # debounce very frequent polls
     dt = min(dt if last else 20, DT_CAP)
+    # RUN MODE: fast/test advance the sim faster — scale the elapsed step so agents work/
+    # gather/level and tech/era progress ~5x quicker and you can WATCH the town evolve. The
+    # real cap is applied to real elapsed FIRST (downtime protection), then accelerated.
+    try:
+        import world_run
+        dt *= max(1, world_run.speed())
+    except Exception:
+        pass
     mset(c, "last_tick", now)
 
     agents = [dict(r) for r in c.execute("SELECT * FROM world_agents ORDER BY id").fetchall()]

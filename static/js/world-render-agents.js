@@ -57,9 +57,11 @@ function _stateBadge(ctx, a, x, y, top) {
       ctx.beginPath(); ctx.ellipse(x, y + 1, 9, 4, 0, 0, 6.283); ctx.stroke();
       break;
     }
-    case 'skilling':
-      ctx.font = '8px serif'; ctx.fillText('⛏️', x + 11, y - 14);
+    case 'skilling': {                               // badge matches the actual activity (not always a pick)
+      const ic = { mine: '⛏️', woodcut: '🪓', farm: '🌾', fish: '🎣', hunt: '🏹', build: '🔨' }[a.location] || '🧰';
+      ctx.font = '8px serif'; ctx.fillText(ic, x + 11, y - 14);
       break;
+    }
     case 'defending':
       ctx.font = '8px serif';
       ctx.fillText(a.role === 'build' ? '🧱' : a.role === 'medic' ? '💊' : '⚔️', x + 11, y - 14);
@@ -87,36 +89,50 @@ function _stateBadge(ctx, a, x, y, top) {
   }
 }
 
-/* ── what is this agent ACTUALLY doing? → {key, swing} or null ──────────────
-   swing = play the strike animation. Fishing/farming/desk/study don't swing —
-   their tool overlay carries the action instead. */
+/* ── SINGLE SOURCE OF TRUTH: backend state → what the body does + what's in hand.
+   Returns {key, swing, body, carry?, fight?} or null.
+     key   — held-tool overlay (_heldTool); null = empty hands
+     swing — the strike/use loop MAY play (only ever when planted — see _character)
+     body  — WA action animation when planted at the task (each activity has its
+             own sheet now; 'work' is the baked-in-PICKAXE crush and is mapped to
+             MINING ONLY — it is never a default)
+     carry — hauling: use the carry body even while walking
+     fight — melee combatant: face + lunge at the nearest live threat
+   Unknown/future states and locations return null / a neutral body — they
+   degrade to plain idle/walk with no tool and never crash. */
 function _actionOf(a) {
   if (a.state === 'skilling') {
-    // Map EVERY gatherable location to its own tool. `hunt` was added to the
-    // backend skills but was missing here — hunters fell through to the pickaxe
-    // default and swung a pick over the (art-less) hunt node = "swinging at
-    // nothing". Unknown locations no longer swing (swing:0) so a stray skilling
-    // spot never phantom-pickaxes.
-    return { woodcut: { key: 'chop', swing: 1 }, mine: { key: 'mine', swing: 1 },
-             build: { key: 'build', swing: 1 }, farm: { key: 'farm', swing: 0 },
-             fish: { key: 'fish', swing: 0 }, hunt: { key: 'hunt', swing: 0 } }[a.location]
-           || { key: 'build', swing: 0 };
+    return { woodcut: { key: 'chop',  swing: 1, body: 'slice' },
+             mine:    { key: 'mine',  swing: 1, body: 'work' },      // the pickaxe lives here, and ONLY here
+             build:   { key: 'build', swing: 1, body: 'collect' },
+             farm:    { key: null,    swing: 0, body: 'water' },     // watering-can sheet carries the action
+             fish:    { key: null,    swing: 0, body: 'fishing' },   // rod is baked into the sheet
+             hunt:    { key: 'hunt',  swing: 1, body: 'idle' } }[a.location]
+           || { key: null, swing: 0, body: 'collect' };              // unknown node → generic gathering, never a pickaxe
   }
   if (a.state === 'defending')
-    return a.role === 'build' ? { key: 'build', swing: 1 }
-         : a.role === 'medic' ? { key: 'medic', swing: 0 } : { key: 'fight', swing: 1 };
-  if (a.state === 'working') return { key: 'desk', swing: 0 };
-  if (a.state === 'studying') return { key: 'study', swing: 0 };
-  return null;
+    return a.role === 'build' ? { key: 'build', swing: 1, body: 'collect' }
+         : a.role === 'medic' ? { key: 'medic', swing: 0, body: 'collect' }
+         : { key: 'fight', swing: 1, body: 'slice', fight: 1 };
+  if (a.state === 'working')  return { key: 'desk',  swing: 0, body: 'idle' };
+  if (a.state === 'studying') return { key: 'study', swing: 0, body: 'idle' };
+  if (a.state === 'shopping') return { key: null, swing: 0, body: 'carryidle', carry: 1 };  // hauling groceries
+  if (a.state === 'sleep' || a.state === 'downed') return { key: null, swing: 0, body: 'lying' };
+  if (a.state === 'picnicking' || (a.state === 'leisure' && a.location === 'cafe'))
+    return { key: 'food', swing: 0, body: 'idle' };                  // a bite in hand
+  return null;   // every other/unknown state: plain idle/walk + its badge — NO tool fallback
 }
 
-/* ── held TOOLS: a matching implement drawn in-hand per action ──────────────── */
-function _heldTool(ctx, key, x, y) {
+/* ── held TOOLS: a matching implement drawn in-hand per action ────────────────
+   `active` = planted at the task: the use animation (swing/draw cycle) plays.
+   NOT active (walking there) = the tool is merely CARRIED at a fixed shouldered
+   angle — this gate is what stops "walking around swinging a pickaxe". */
+function _heldTool(ctx, key, x, y, active) {
   const t = performance.now();
   ctx.save();
   if (key === 'mine' || key === 'chop' || key === 'build' || key === 'fight') {
-    // swing in sync-ish with the strike animation
-    const ang = Math.sin(t / 160) * 0.85 - 0.5;
+    // swing in sync-ish with the strike animation; at rest, shouldered still
+    const ang = active ? Math.sin(t / 160) * 0.85 - 0.5 : -0.95;
     ctx.translate(x + 5, y - 10); ctx.rotate(ang);
     ctx.strokeStyle = '#7a5230'; ctx.lineWidth = 1.6;
     ctx.beginPath(); ctx.moveTo(0, 3); ctx.lineTo(0, -7); ctx.stroke();     // haft
@@ -147,7 +163,7 @@ function _heldTool(ctx, key, x, y) {
       ctx.beginPath(); ctx.arc(x + 15, y + 6, 2 + k * 6, 0, 6.283); ctx.stroke();
     }
   } else if (key === 'hunt') {                                              // bow, drawn + released
-    const draw = (Math.sin(t / 700) + 1) / 2;                              // 0..1 nock→loose cycle
+    const draw = active ? (Math.sin(t / 700) + 1) / 2 : 0;                 // 0..1 nock→loose cycle (carried slack en route)
     ctx.strokeStyle = '#7a5230'; ctx.lineWidth = 1.4;
     ctx.beginPath(); ctx.arc(x + 7, y - 8, 6, -1.1, 1.1); ctx.stroke();    // bow limb
     ctx.strokeStyle = 'rgba(230,235,245,.7)'; ctx.lineWidth = 0.8;         // string, pulled back when drawing
@@ -158,7 +174,7 @@ function _heldTool(ctx, key, x, y) {
     ctx.strokeStyle = '#caa06a'; ctx.lineWidth = 1;                        // arrow shaft
     ctx.beginPath(); ctx.moveTo(nk, y - 8); ctx.lineTo(x + 13, y - 8); ctx.stroke();
   } else if (key === 'farm') {                                              // slow hoe sweep
-    const ang = 0.5 + Math.sin(t / 520) * 0.45;
+    const ang = active ? 0.5 + Math.sin(t / 520) * 0.45 : 0.9;
     ctx.translate(x + 5, y - 9); ctx.rotate(ang);
     ctx.strokeStyle = '#7a5230'; ctx.lineWidth = 1.4;
     ctx.beginPath(); ctx.moveTo(0, 4); ctx.lineTo(0, -8); ctx.stroke();
@@ -169,6 +185,14 @@ function _heldTool(ctx, key, x, y) {
   } else if (key === 'medic') {                                             // medkit
     ctx.fillStyle = '#efe6d2'; ctx.fillRect(x + 4, y - 8, 6, 4.5);
     ctx.fillStyle = '#e0483b'; ctx.fillRect(x + 6.4, y - 7.4, 1.2, 3.2); ctx.fillRect(x + 5.4, y - 6.4, 3.2, 1.2);
+  } else if (key === 'food') {                                              // a bite: bread + rising steam
+    ctx.fillStyle = '#d9a45c'; ctx.beginPath(); ctx.ellipse(x + 5, y - 8, 3, 1.8, 0.3, 0, 6.283); ctx.fill();
+    ctx.fillStyle = '#b9843f'; ctx.fillRect(x + 3.4, y - 8.6, 1, 0.8); ctx.fillRect(x + 5.6, y - 8, 1, 0.8);
+    if (active) {
+      const k = (t / 900) % 1;
+      ctx.strokeStyle = `rgba(230,235,245,${0.4 * (1 - k)})`; ctx.lineWidth = 0.7;
+      ctx.beginPath(); ctx.moveTo(x + 5, y - 11 - k * 4); ctx.quadraticCurveTo(x + 6, y - 12.5 - k * 4, x + 5, y - 14 - k * 4); ctx.stroke();
+    }
   }
   ctx.restore();
 }
@@ -194,27 +218,39 @@ function _drawTintedActor(ctx, a, facing, mode, x, y, h) {
   return true;
 }
 
-/* ── SELF-GENERATED look: the agent's own commissioned sprite ──────────────── */
-const _agentImgs = {};
-function _drawCustomSprite(ctx, a, x, y, moving, s) {
-  let im = _agentImgs[a.sprite_path];
-  if (im === undefined) {
-    im = new Image(); im.onerror = () => { _agentImgs[a.sprite_path] = null; };
-    im.src = a.sprite_path; _agentImgs[a.sprite_path] = im;
-  }
-  if (!im || !im.complete || !im.naturalWidth) return false;
-  const H = 40, W = 40;
-  const hop = moving ? Math.abs(Math.sin((s.bob || 0) * 3)) * 2 : 0;
-  ctx.save();
-  ctx.imageSmoothingEnabled = false;
-  if (s.dir === 'left') { ctx.translate(2 * x, 0); ctx.scale(-1, 1); }
-  ctx.drawImage(im, x - W / 2, y - H - hop + 2, W, H);
-  ctx.restore();
-  return true;
+/* ── SELF-GENERATED look: the agent's OWN sprite SHEETS (world_sprites registry).
+   The old path drew a.sprite_path as a static picture — agents (and the player)
+   walked around as opaque picture-boxes with baked backgrounds. Now an own look
+   only ever renders from the entity's registered 4-frame sheets (transparent,
+   QA-gated), and a missing action sheet is REQUESTED once (generated once,
+   cached forever) while the pack/procedural body covers the meantime. */
+function _drawOwnSheet(ctx, a, mode, x, y, s) {
+  if (!(window.WSP && WSP.ready)) return false;
+  const eid = 'agent_' + (a.key || a.id);
+  const drew = WSP.draw(ctx, eid, mode, x, y, 40, s.dir);
+  // on-demand need: an own-look agent missing THIS action's sheet (or any agent
+  // in a mode no pack sheet covers) asks the registry — once, ever. WSP.need
+  // self-filters (pack-first, session-once); the backend gates the rest.
+  if (!drew) WSP.need(eid, mode, a.name, 'agent');
+  return drew;
 }
 
 /* pixel character — a little person with hair, shirt (agent colour), a face that
    turns to face its walking direction, and a 2-frame walk. */
+/* Is a skilling agent actually STANDING ON a resource node of its kind? The skilling
+   `location` (mine/woodcut/build/farm/fish) equals the node's kind. If the backend sent
+   an agent to a node-kind that doesn't exist in THIS layout, _agentTile falls back to the
+   park — and it'd swing a pickaxe at grass. This gate stops that ("swinging at nothing"):
+   no matching node under it → don't play the strike, just stand. */
+function _atSkillNode(a, x, y) {
+  if (!(window.WM && WM.nodes && WM.TILE)) return true;         // no node data → don't override
+  const kind = a.location, T = WM.TILE, col = x / T, row = y / T, R = 2.2;
+  for (const n of (WM.nodes || [])) {
+    if (n.kind === kind && Math.abs(n.col + 0.5 - col) <= R && Math.abs(n.row + 0.5 - row) <= R) return true;
+  }
+  return false;
+}
+
 function _character(ctx, s, moving) {
   const a = s.agent;
   const x = Math.round(s.px), y = Math.round(s.py);
@@ -227,27 +263,44 @@ function _character(ctx, s, moving) {
   ctx.fillStyle = 'rgba(0,0,0,.30)'; ctx.beginPath(); ctx.ellipse(x, y + 1, 6, 2.4, 0, 0, 6.283); ctx.fill();
 
   let top = y - 24;    // where labels/emblems sit above the head
-  // WHAT ARE THEY ACTUALLY DOING? Only true swinging work plays the swing
-  // animation — no more pickaxing at fish, deskwork or books. Each action also
-  // gets a matching held TOOL drawn in-hand.
-  const ACT = _actionOf(a);
-  // Only STRIKE when planted at the task. A skilling agent keeps its state the
-  // whole walk over to its node, so gating the swing on !moving stops agents
-  // from "walking around swinging a pickaxe" en route — they walk, then strike
-  // once they arrive on the node.
-  const mode = ACT && ACT.swing && !moving ? 'work' : (moving ? 'walk' : 'idle');
-  const facing = ACT ? 'down' : dir;                     // face the task while acting
-  // fighters lunge forward at the enemy; builders hold at the wall
+  // WHAT ARE THEY ACTUALLY DOING? _actionOf is the one state→action map.
+  // WALKING NEVER PLAYS A TASK ANIMATION: while pathing, the body walks (or
+  // hauls, for carriers) and any tool is merely carried at rest; the strike/use
+  // animation plays only once the agent is PLANTED at its task tile.
+  let ACT = _actionOf(a);
+  // Node-strike tools (pickaxe/axe/hammer) only swing when actually ON a matching node —
+  // else the agent is standing at "nothing", so drop to a plain idle instead of miming.
+  if (a.state === 'skilling' && ACT && ['mine', 'chop', 'build'].includes(ACT.key) && !_atSkillNode(a, x, y)) {
+    ACT = { key: null, swing: 0, body: 'idle' };
+  }
+  const planted = !moving;
+  const mode = moving
+    ? (ACT && ACT.carry && window.WA && WA.hasMode && WA.hasMode('carrywalk') ? 'carrywalk' : 'walk')
+    : (ACT && ACT.body ? ACT.body : 'idle');
+  let facing = (ACT && planted) ? 'down' : dir;          // face the task while acting; face travel while walking
+  // COMBAT INTERACTION: melee fighters square up on the nearest live enemy —
+  // face it and lunge along the attack vector on the strike beat. Builders hold
+  // at the wall; medics stay planted over their patient (no more medic-lunge).
   let lx = 0, ly = 0;
-  if (a.state === 'defending' && a.role !== 'build') { const t = Math.sin(performance.now() / 130 + a.id); lx = t * 3; ly = -Math.abs(t) * 2; }
-  const drew = a.sprite_path
-    ? _drawCustomSprite(ctx, a, x + lx, y + 2 + ly, moving, s)
-    : (window.WA && WA.charsReady && _drawTintedActor(ctx, a, facing, mode, x + lx, y + 2 + ly, 38));
+  if (planted && ACT && ACT.fight) {
+    const tgt = (typeof _nearestThreatPos === 'function') ? _nearestThreatPos(x, y) : null;
+    if (tgt) {
+      const dx = tgt.x - x, dy = tgt.y - y, d = Math.hypot(dx, dy) || 1;
+      facing = Math.abs(dx) > Math.abs(dy) ? (dx < 0 ? 'left' : 'right') : (dy < 0 ? 'up' : 'down');
+      const k = Math.max(0, Math.sin(performance.now() / 130 + a.id));   // lunge TOWARD the enemy
+      lx = dx / d * k * 4; ly = dy / d * k * 3;
+    } else { const t = Math.sin(performance.now() / 130 + a.id); lx = t * 3; ly = -Math.abs(t) * 2; }
+  }
+  // FALLBACK CHAIN: (a) the entity's OWN generated sheet for this action →
+  // (b) the downloaded pack sheet (tinted per-agent) → (c) procedural villager.
+  // Static pictures never render a living agent — that was the picture-box bug.
+  const drew = _drawOwnSheet(ctx, a, mode, x + lx, y + 2 + ly, s)
+    || (window.WA && WA.charsReady && _drawTintedActor(ctx, a, facing, mode, x + lx, y + 2 + ly, 38));
   if (drew) {
     // identity: agent-colour foot ring (tint/accessory/custom sprite carry the rest)
     ctx.strokeStyle = c; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.ellipse(x, y + 2, 6, 2.6, 0, 0, 6.283); ctx.stroke();
     top = y - 26;
-    if (ACT) _heldTool(ctx, ACT.key, x + lx, y + ly);
+    if (ACT && ACT.key) _heldTool(ctx, ACT.key, x + lx, y + ly, planted);
     if (sel) { ctx.strokeStyle = '#fff'; ctx.lineWidth = 1; ctx.strokeRect(x - 12, y - 26, 24, 30); }
   } else {
     // ── procedural fallback villager ──
@@ -285,6 +338,15 @@ function _character(ctx, s, moving) {
   if (a.thriving) { ctx.font = '7px serif'; ctx.fillText('🌟', x - 10, top - 1); }
   if (a.state === 'working') { ctx.font = '8px serif'; ctx.fillText('⚙️', x + 11, y - 14); }
   _stateBadge(ctx, a, x, y, top);
+  // combat vitals: a wounded defender's raid-HP bar, so duel damage lands visibly
+  const rhp = a.raid_hp;
+  if (rhp != null && rhp < 100 &&
+      (a.state === 'defending' || a.state === 'downed' || _worldState?.orchestra?.phase === 'raid')) {
+    const frac = Math.max(0, Math.min(1, rhp / 100));
+    ctx.fillStyle = 'rgba(0,0,0,.65)'; ctx.fillRect(x - 9, top - 12, 18, 2.5);
+    ctx.fillStyle = frac > 0.5 ? '#6ee7a8' : frac > 0.25 ? '#e0a040' : '#ef4444';
+    ctx.fillRect(x - 9, top - 12, 18 * frac, 2.5);
+  }
 
   // name pill + level/coins
   ctx.font = 'bold 7px monospace';

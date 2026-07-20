@@ -137,6 +137,50 @@ def node_deploy(body: dict = None):
     return {"ok": True, "started": True, "with_audio": with_audio}
 
 
+@router.post("/api/node/deploy-miner")
+def node_deploy_miner(body: dict = None):
+    """Install ONLY the JellyCoin miner on the GPU node, over the same SSH path.
+
+    /api/node/deploy provisions the whole node (ComfyUI, LM Studio, video, 3D) —
+    far more than you want when the goal is just 'put a rig on my chain'. This
+    pushes install-miner.sh + jellyminer.py and runs the standalone installer, so
+    an existing node gains (or repairs) mining without touching its AI stack."""
+    body = body or {}
+    st = node_status()
+    if not st.get("reachable"):
+        raise HTTPException(502, st.get("error") or "GPU node unreachable over SSH")
+    installer = BASE / "deploy" / "miner" / "install-miner.sh"
+    miner = BASE / "miner" / "jellyminer.py"
+    if not installer.is_file():
+        raise HTTPException(500, f"installer missing at {installer}")
+
+    _ssh(f"mkdir -p ~/{_REMOTE}", timeout=20)
+    files = [str(p) for p in (installer, miner) if p.exists()]
+    up = _scp(files, f"~/{_REMOTE}/")
+    if up.returncode != 0:
+        raise HTTPException(502, f"failed to copy the miner installer: {(up.stderr or '')[:200]}")
+
+    import shlex as _shlex
+    from routers.jellycoin import _miner_token, _my_miner_url
+    url = str(body.get("url") or "").strip() or _my_miner_url()
+    name = str(body.get("name") or "").strip()
+    throttle = str(body.get("throttle") or "50").strip()   # coexist with the node's AI work
+    args = f"--url {_shlex.quote(url)} --token {_shlex.quote(_miner_token())}"
+    if name:
+        args += f" --name {_shlex.quote(name)}"
+    if throttle:
+        args += f" --throttle {_shlex.quote(throttle)}"
+
+    launch = (f"cd ~/{_REMOTE} && chmod +x install-miner.sh && "
+              f": > ~/{_LOGFILE} && "
+              f"nohup bash install-miner.sh {args} > ~/{_LOGFILE} 2>&1 </dev/null & echo LAUNCHED")
+    r = _ssh(launch, timeout=30)
+    if "LAUNCHED" not in (r.stdout or ""):
+        raise HTTPException(502, f"could not start the miner install: {(r.stderr or r.stdout or '')[:200]}")
+    return {"ok": True, "started": True, "url": url, "throttle": throttle,
+            "note": "Installing the miner on the node — follow /api/node/deploy-log."}
+
+
 @router.get("/api/node/deploy-log")
 def node_deploy_log():
     """Tail the deploy log + whether it's still running."""

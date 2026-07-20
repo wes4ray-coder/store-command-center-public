@@ -30,6 +30,8 @@ router = APIRouter()
 
 MINER_TOKEN_KEY = "jelly_miner_token"
 _MINER_FILE = Path(__file__).resolve().parent.parent.parent / "miner" / "jellyminer.py"
+_INSTALLER_FILE = (Path(__file__).resolve().parent.parent.parent
+                   / "deploy" / "miner" / "install-miner.sh")
 
 
 def _miner_token() -> str:
@@ -188,13 +190,52 @@ def jelly_miner_download(request: Request):
     return FileResponse(str(_MINER_FILE), media_type="text/x-python", filename="jellyminer.py")
 
 
+@router.get("/api/jelly/mining/install-miner.sh")
+def jelly_miner_installer(request: Request):
+    """The standalone installer, served so a fresh GPU box can one-line itself in:
+
+        curl -sSL http://<store>:8787/api/jelly/mining/install-miner.sh \\
+          | bash -s -- --url http://<store>:8787 --token <TOKEN> --name rig1
+
+    Same rig-token gate as the miner download — it is fetched by machines that are
+    about to mine, not by browsers."""
+    _check_miner(request)
+    if not _INSTALLER_FILE.is_file():
+        raise HTTPException(404, "installer missing from install")
+    return FileResponse(str(_INSTALLER_FILE), media_type="text/x-shellscript",
+                        filename="install-miner.sh")
+
+
+def _my_miner_url() -> str:
+    """The URL a rig should point at — derived at runtime, never hardcoded.
+
+    Prefers this box's LAN address because that is where rigs almost always live.
+    (It also fixes the public release: the old copy-paste command carried a literal
+    LAN IP, which the retail scrub rewrote to 127.0.0.1 — leaving every public user
+    a command that only ever worked on the store box itself. Detecting the address
+    means each install prints its own.) A buddy mining from outside the LAN should
+    substitute the node's public URL."""
+    import socket
+    from config import PORT
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))          # no packet sent; just picks the route
+        ip = s.getsockname()[0]
+        s.close()
+        return f"http://{ip}:{PORT}"
+    except Exception:
+        return (PUBLIC_BASE_URL or f"http://127.0.0.1:{PORT}").rstrip("/")
+
+
 @router.get("/api/jelly/miner-token")
 def jelly_miner_token():
-    """Session-only: show the token + a copy-paste command to start a rig on any LAN box."""
+    """Session-only: the token, a copy-paste run command, and the one-line installer."""
     tok = _miner_token()
-    return {"token": tok,
-            "run": (f"python3 jellyminer.py --url http://127.0.0.1:8787 "
-                    f"--token {tok} --name $(hostname)")}
+    url = _my_miner_url()
+    return {"token": tok, "url": url,
+            "run": f"python3 jellyminer.py --url {url} --token {tok} --name $(hostname -s)",
+            "install": (f"curl -sSL {url}/api/jelly/mining/install-miner.sh -H 'X-Jelly-Token: {tok}' "
+                        f"| bash -s -- --url {url} --token {tok} --name $(hostname -s)")}
 
 
 # ── buddy-share compute billing (peers federation) ───────────────────────────

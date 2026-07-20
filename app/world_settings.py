@@ -106,6 +106,9 @@ DEFAULTS = {
     # spike/high-severity alert, not routine failed-job flakiness (which shows as amber watch).
     "world_raid_disabled":    "0",
     "world_raid_min_gap_min": "60",
+    # RUN MODE (world_run): normal = real pace; fast = ~5x sim speed to watch it evolve;
+    # test = fast + auto-run the FREE loops (dry run — money/code stay gated). String enum.
+    "world_run_mode":         "normal",
 }
 
 INT_KEYS = {"world_llm_interval_min", "world_active_start", "world_active_end",
