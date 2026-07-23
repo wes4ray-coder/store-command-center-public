@@ -1,5 +1,14 @@
 # Store Command Center
 
+> 🚧 **v2 is on the way.** A major update is in active development — a **Video Studio**
+> (storyboard → matched, layered audio → export), **multi-platform social publishing**
+> (YouTube / TikTok / Instagram), an autonomous **content loop**, and a reworked control
+> panel with an **agent-loops graph** and optional god-tier **lieutenants** (✝️ Jesus and
+> 😈 Satan — a constructive and an adversarial reviewer that give every prediction a
+> best- *and* worst-case). See **[CHANGELOG.md](CHANGELOG.md)** for the running feature +
+> fix list. `main` tracks the current stable line; v2 lands when it's ready. Everything
+> autonomous is gated and defaults **off**; the money and content-safety floors never move.
+
 A self-hosted **AI company-in-a-box**: a FastAPI + SQLite dashboard that runs a real
 print-on-demand / resale / services operation end-to-end on your own hardware — and a
 pixel-art company town, **The Company**, whose agents *are* the operation. Every image,
